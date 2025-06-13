@@ -10,18 +10,18 @@
 
 #define DEBUG 
 
-struct MemoryBlock {
+typedef struct {
     size_t size;
     char* memory;
-};
+} MemoryBlock;
 
-enum SearchResultType {
+typedef enum {
     SEARCH_RESULT_VIDEO = 0,
     SEARCH_RESULT_CHANNEL = 1,
     SEARCH_RESULT_PLAYLIST = 2,
-};
+} SearchResultType;
 
-struct YoutubeSearchNode {
+typedef struct YoutubeSearchNode{
 	char* id;
 	char* title;
 	char* author;
@@ -29,54 +29,68 @@ struct YoutubeSearchNode {
 	char* views;
 	char* date;
 	char* length;
+    int video_count;
     Texture thumbnail;
-    enum SearchResultType type;
+    SearchResultType type;
     struct YoutubeSearchNode* next;
-};
+} YoutubeSearchNode;
 
-struct YoutubeSearchList {
+typedef struct {
     size_t count;
-    struct YoutubeSearchNode* head;
-    struct YoutubeSearchNode* tail;
-};
+    YoutubeSearchNode* head;
+    YoutubeSearchNode* tail;
+} YoutubeSearchList;
 
-struct YoutubeAPI {
+typedef struct {
     char* key;
     char* url;
     char* video_endpoint;
     char* search_endpoint;
     char* channel_endpoint;
     char* playlist_endpoint;
-};
+} YoutubeAPI;
 
-bool is_memory_ready(struct MemoryBlock data)
+bool is_memory_ready(const MemoryBlock data)
 {
     return ((data.size > 0) && (data.memory != NULL));
 }
 
-void unload_memory_block(struct MemoryBlock* memory_block)
+void unload_memory_block(MemoryBlock* memory_block)
 {
     free(memory_block->memory);
     memory_block->size = 0;
 }
 
-struct YoutubeSearchList create_youtube_search_list() 
+YoutubeSearchList create_youtube_search_list() 
 {
-    struct YoutubeSearchList list;
+    YoutubeSearchList list;
+    list.head = list.tail = NULL;
     list.count = 0;
-    list.head = list.tail = malloc(sizeof(struct YoutubeSearchNode));
     return list;
 }
 
 // appends node to end of the list
-void add_node(struct YoutubeSearchList* list, struct YoutubeSearchNode node)
+void add_node(YoutubeSearchList* list, const YoutubeSearchNode node)
 {
     // adding the first node to a list
-    if (list->count == 0) *list->head = *list->tail = node;
+    if (list->count == 0) {
+        list->head = list->tail = malloc(sizeof(YoutubeSearchNode));
+        if (!list->head) {
+            printf("add_node: not enough memory, malloc returned null\n");
+            return;
+        }
+
+        // set both ends of the list to the first node of the list
+        *list->head = *list->tail = node;
+    } 
     else {
         // allocate space for the new node
-        list->tail->next = malloc(sizeof(struct YoutubeSearchNode));
-        
+        list->tail->next = malloc(sizeof(YoutubeSearchNode));
+        if (!list->tail->next) {
+            printf("add_node: not enough memory, malloc returned null\n");
+            return;
+        }
+
         // append node to list
         *list->tail->next = node;
         
@@ -89,7 +103,7 @@ void add_node(struct YoutubeSearchList* list, struct YoutubeSearchNode node)
     list->count++;
 }
 
-void unload_node(struct YoutubeSearchNode* node)
+void unload_node(YoutubeSearchNode* node)
 {
     if (node->id) free(node->id);
     if (node->subs) free(node->subs);
@@ -98,30 +112,30 @@ void unload_node(struct YoutubeSearchNode* node)
     if (node->title) free(node->title);
     if (node->length) free(node->length);
     if (node->author) free(node->author);
-    free(node);
+    if (node) free(node);
 }
 
-void unload_list(struct YoutubeSearchList* list) 
+void unload_list(YoutubeSearchList* list) 
 {
-    struct YoutubeSearchNode* prev = NULL;
-    struct YoutubeSearchNode* current = list->head;
+    YoutubeSearchNode* prev = NULL;
+    YoutubeSearchNode* current = list->head;
 
-    while(current) {
+    while (current) {
         prev = current;
         current = current->next;
         unload_node(prev);
     }
 }
 
-void print_node(struct YoutubeSearchNode* node) 
+void print_node(const YoutubeSearchNode* node) 
 {
-    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s thumbnail id) %d type) %d\n", 
-            node->id, node->title, node->author, node->subs, node->views, node->date, node->length, node->thumbnail.id, node->type);
+    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %d thumbnail id) %d type) %d\n", 
+            node->id, node->title, node->author, node->subs, node->views, node->date, node->length, node->video_count, node->thumbnail.id, node->type);
 }
 
-void print_list(struct YoutubeSearchList* list)
+void print_list(const YoutubeSearchList* list)
 {
-    struct YoutubeSearchNode* current = list->head;
+    YoutubeSearchNode* current = list->head;
     while (current) {
         print_node(current);
         current = current->next;
@@ -137,12 +151,12 @@ size_t write_data(void* src, int nitems, size_t element_size, void* dst)
 
     // next, we need to resize the dst pointer to fit this new data
     // first, find out how much memory we are currenly holding
-    struct MemoryBlock* mem = (struct MemoryBlock*) dst;
+    MemoryBlock* mem = (MemoryBlock*) dst;
 
     // now get the new size, '+1' for '/0'
     char* new_memory = realloc(mem->memory, (mem->size + src_size + 1));
     if (!new_memory) {
-        printf("not enough memory, realloc returned null\n");
+        printf("write_data: not enough memory, realloc returned null\n");
         return 0;
     }
 
@@ -162,9 +176,9 @@ size_t write_data(void* src, int nitems, size_t element_size, void* dst)
 }
 
 // preform a GET request to some url and return the data fetched
-struct MemoryBlock fetch_url(const char* url, CURL* curl_handle)
+MemoryBlock fetch_url(const char* url, CURL* curl_handle)
 {
-    struct MemoryBlock chunk;
+    MemoryBlock chunk;
 
     // where the result is to be stored
     chunk.memory = NULL;
@@ -211,66 +225,50 @@ void append_string_item(int element_count, int maxlen, char list_item[maxlen], c
 }
 
 // given a json item, return the node equivalent 
-struct YoutubeSearchNode create_node(cJSON* item, enum SearchResultType type)
+YoutubeSearchNode create_node(const cJSON* item, const SearchResultType type)
 {
-    struct YoutubeSearchNode node = { 0 };
-    
+    YoutubeSearchNode node = { 0 };
+    if (!item) return node;
+
     // id
     cJSON* id = cJSON_GetObjectItem(item, "id");
-    if (id) {
-        node.id = malloc(strlen(id->valuestring) + 1);
-        strcpy(node.id, id->valuestring);
-    }
+    if (id && cJSON_IsString(id)) node.id = strdup(id->valuestring);
 
     cJSON* snippet = cJSON_GetObjectItem(item, "snippet");
     if (snippet) {
         // title
         cJSON* title = cJSON_GetObjectItem(snippet, "title");
-        if (title) {
-            node.title = malloc(strlen(title->valuestring) + 1);
-            strcpy(node.title, title->valuestring);
-        }
+        if (title && cJSON_IsString(title)) node.title = strdup(title->valuestring);
 
         // author
         cJSON* channelTitle = cJSON_GetObjectItem(snippet, "channelTitle");
-        if (channelTitle) {
-            node.author = malloc(strlen(channelTitle->valuestring) + 1);
-            strcpy(node.author, channelTitle->valuestring);
-        }
+        if (channelTitle && cJSON_IsString(channelTitle)) node.author = strdup(channelTitle->valuestring);
 
         // publish date
         cJSON* publishedAt = cJSON_GetObjectItem(snippet, "publishedAt");
-        if (publishedAt) {
-            node.date = malloc(strlen(publishedAt->valuestring) + 1);
-            strcpy(node.date, publishedAt->valuestring);
-        }
+        if (publishedAt && cJSON_IsString(publishedAt)) node.date = strdup(publishedAt->valuestring);
     }
 
     cJSON* statistics = cJSON_GetObjectItem(item, "statistics");
     if (statistics) {
         // view count
         cJSON* viewCount = cJSON_GetObjectItem(statistics, "viewCount");
-        if (viewCount) {
-            node.views = malloc(strlen(viewCount->valuestring) + 1);
-            strcpy(node.views, viewCount->valuestring);
-        }
+        if (viewCount && cJSON_IsString(viewCount)) node.views = strdup(viewCount->valuestring);
 
         // sub count
         cJSON* subscriberCount = cJSON_GetObjectItem(statistics, "subscriberCount");
-        if (subscriberCount) {
-            node.subs = malloc(strlen(subscriberCount->valuestring) + 1);
-            strcpy(node.subs, subscriberCount->valuestring);
-        }
+        if (subscriberCount && cJSON_IsString(subscriberCount)) node.subs = strdup(subscriberCount->valuestring);
     }
     
-    // length
     cJSON* contentDetails = cJSON_GetObjectItem(item, "contentDetails");
     if (contentDetails) {
+        // video length
         cJSON* duration = cJSON_GetObjectItem(contentDetails, "duration");
-        if (duration) {
-            node.length = malloc(strlen(duration->valuestring) + 1);
-            strcpy(node.length, duration->valuestring);
-        }
+        if (duration && cJSON_IsString(duration)) node.length = strdup(duration->valuestring);
+
+        // amount of playlist items (videos)
+        cJSON* itemCount = cJSON_GetObjectItem(contentDetails, "itemCount");
+        if (itemCount && cJSON_IsNumber(itemCount)) node.video_count = itemCount->valueint;
     }
 
     node.type = type;
@@ -282,7 +280,7 @@ struct YoutubeSearchNode create_node(cJSON* item, enum SearchResultType type)
 cJSON* api_to_json(const char* url, CURL* curl_handle, const char* debug_filename)
 {
     // the data fetched from the URL
-    struct MemoryBlock fetched = fetch_url(url, curl_handle);
+    MemoryBlock fetched = fetch_url(url, curl_handle);
     if (!is_memory_ready(fetched)) return NULL;
 
     // print fetched data to better understand future cJSON opertations
@@ -300,12 +298,12 @@ cJSON* api_to_json(const char* url, CURL* curl_handle, const char* debug_filenam
     }
 
     // dealloc unused memory
-    unload_memory_block(&fetched);
+    if (is_memory_ready(fetched)) unload_memory_block(&fetched);
     
     return json;
 }
 
-void add_nodes_to_list(const char* url, CURL* curl_handle, const char* debug_filename, enum SearchResultType type, struct YoutubeSearchList* list)
+void add_nodes_to_list(const char* url, CURL* curl_handle, const char* debug_filename, const SearchResultType type, YoutubeSearchList* list)
 {
     // get api infomation as a json object
     cJSON* json = api_to_json(url, curl_handle, debug_filename);
@@ -324,7 +322,7 @@ void add_nodes_to_list(const char* url, CURL* curl_handle, const char* debug_fil
     for (int i = 0; i < nitems; i++) {
         // the ith item
         cJSON* item = cJSON_GetArrayItem(items, i);
-        struct YoutubeSearchNode node = create_node(item, type);
+        YoutubeSearchNode node = create_node(item, type);
         add_node(list, node);
     }
 
@@ -333,7 +331,7 @@ void add_nodes_to_list(const char* url, CURL* curl_handle, const char* debug_fil
 }
 
 // writes the video, channel, and playlist ids into a comma delimited string
-void get_ids(cJSON* items, int maxlen, char videoIDs[maxlen], char channelIDs[maxlen], char playlistIDs[maxlen])
+void get_ids(const cJSON* items, const int maxlen, char videoIDs[maxlen], char channelIDs[maxlen], char playlistIDs[maxlen])
 {
     const int nitems = cJSON_GetArraySize(items);
     
@@ -347,20 +345,20 @@ void get_ids(cJSON* items, int maxlen, char videoIDs[maxlen], char channelIDs[ma
         // the id of the search item (either video, playlist, or channel)
         cJSON* videoId = cJSON_GetObjectItem(id, "videoId");
         cJSON* channelId = cJSON_GetObjectItem(id, "channelId");
-        // cJSON* playlistId = cJSON_GetObjectItem(id, "playlistId");
+        cJSON* playlistId = cJSON_GetObjectItem(id, "playlistId");
 
         // append the id to its proper list
         if (videoId) append_string_item(i, maxlen, videoIDs, videoId->valuestring, ",");
         else if (channelId) append_string_item(i, maxlen, channelIDs, channelId->valuestring, ",");
-        // else if (playlistId) append_string_item(i, playlistIDs, playlistId->valuestring, ",");
+        else if (playlistId) append_string_item(i, maxlen, playlistIDs, playlistId->valuestring, ",");
     }
 }
 
 // return a list of results generated from a query
-struct YoutubeSearchList metube_search(int maxresults, const char* query, struct YoutubeAPI API, CURL* curl_handle)
+YoutubeSearchList metube_search(const int maxresults, const char* query, const YoutubeAPI API, CURL* curl_handle)
 {
     // list holding all search data information (to be returned)
-    struct YoutubeSearchList list = create_youtube_search_list();
+    YoutubeSearchList list = create_youtube_search_list();
     
     // format the url for the YouTube Data API search endpoint using the query string
     char url[1024];
@@ -368,13 +366,13 @@ struct YoutubeSearchList metube_search(int maxresults, const char* query, struct
 
     // get api infomation as a json object
     cJSON* search_json = api_to_json(url, curl_handle, "search.json");
-    if (!search_json) return (struct YoutubeSearchList) { 0 };
+    if (!search_json) return (YoutubeSearchList) { 0 };
 
     // tag that is a list of the items returned from GET request
     cJSON* items = cJSON_GetObjectItem(search_json, "items");
     if (!items) {
         printf("Error: %s\n", cJSON_GetErrorPtr());
-        return (struct YoutubeSearchList) { 0 };
+        return (YoutubeSearchList) { 0 };
     }
 
     char videoIDs[512] = { 0 };
@@ -396,12 +394,16 @@ struct YoutubeSearchList metube_search(int maxresults, const char* query, struct
         add_nodes_to_list(url, curl_handle, "video.json", SEARCH_RESULT_VIDEO, &list);
     }
 
+    // do the same for other search result mediums
     if (channelIDs[0] != '\0') {
         snprintf(url, sizeof(url), "%s/%s?part=snippet,statistics&id=%s&key=%s", API.url, API.channel_endpoint, channelIDs, API.key);
         add_nodes_to_list(url, curl_handle, "channel.json", SEARCH_RESULT_CHANNEL, &list);
     }
 
-    // TODO: add playlist support!
+    if (playlistIDs[0] != '\0') {
+        snprintf(url, sizeof(url), "%s/%s?part=snippet,contentDetails&id=%s&key=%s", API.url, API.playlist_endpoint, playlistIDs, API.key);
+        add_nodes_to_list(url, curl_handle, "playlist.json", SEARCH_RESULT_PLAYLIST, &list);
+    }
 
     return list;
 }
@@ -409,18 +411,17 @@ struct YoutubeSearchList metube_search(int maxresults, const char* query, struct
 int main(int argc, char** argv)
 {
     if (argc != 2) {
-        printf("Invalid number of arguments.\nPlease provide your YouTube API key after the executable. (ie ./metube \"YOUR_API_KEY\")\n");
+        printf("Invalid number of command arguments.\nPlease provide your YouTube API key after the executable. (ie ./metube \"YOUR_API_KEY\")\n");
         return 1;
     }
 
-    struct YoutubeAPI API;
-    // AIzaSyA_rjuK_RqbCZpQSxGEDwNW4a8vRGy1tcY
+    YoutubeAPI API;
     API.key = argv[1];
     API.url = "https://www.googleapis.com/youtube/v3";
     API.video_endpoint = "videos";
     API.search_endpoint = "search"; 
     API.channel_endpoint = "channels";
-    API.playlist_endpoint = "playlistItems";
+    API.playlist_endpoint = "playlists";
     
     // start the curl session
     curl_global_init(CURL_GLOBAL_ALL);
@@ -428,16 +429,17 @@ int main(int argc, char** argv)
     CURL* curl_handle = curl_easy_init();
     
     // must be URL encoded
-    const char* query = "xqc";
+    char* query = curl_easy_escape(curl_handle, "eldin ring playthough", 0);
     
     const int max_results = 5;
     
-    struct YoutubeSearchList list = metube_search(max_results, query, API, curl_handle);
+    YoutubeSearchList list = metube_search(max_results, query, API, curl_handle);
     print_list(&list);
     
     // dealloc app
     {
-        // cleanup curl stuff 
+        // cleanup curl stuff
+        curl_free(query); 
         curl_easy_cleanup(curl_handle);
         curl_global_cleanup();
         unload_list(&list);
@@ -447,8 +449,7 @@ int main(int argc, char** argv)
 
 // to do
     // display information properly in raylib
-    // do playlists
-
+    // pagination support after search functionality
 
 // for read me
     // need curl, cjson, and raylib
