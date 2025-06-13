@@ -1,228 +1,12 @@
-#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
-
+#include "api.h"
+#include "list.h"
 #include "raylib.h"
-
-#define DEBUG 
-
-typedef struct {
-    size_t size;
-    char* memory;
-} MemoryBlock;
-
-typedef enum {
-    SEARCH_RESULT_VIDEO = 0,
-    SEARCH_RESULT_CHANNEL = 1,
-    SEARCH_RESULT_PLAYLIST = 2,
-} SearchResultType;
-
-typedef struct YoutubeSearchNode{
-	char* id;
-	char* title;
-	char* author;
-	char* subs;
-	char* views;
-	char* date;
-	char* length;
-    int video_count;
-    Texture thumbnail;
-    SearchResultType type;
-    struct YoutubeSearchNode* next;
-} YoutubeSearchNode;
-
-typedef struct {
-    size_t count;
-    YoutubeSearchNode* head;
-    YoutubeSearchNode* tail;
-} YoutubeSearchList;
-
-typedef struct {
-    char* key;
-    char* url;
-    char* video_endpoint;
-    char* search_endpoint;
-    char* channel_endpoint;
-    char* playlist_endpoint;
-} YoutubeAPI;
-
-bool is_memory_ready(const MemoryBlock data)
-{
-    return ((data.size > 0) && (data.memory != NULL));
-}
-
-void unload_memory_block(MemoryBlock* memory_block)
-{
-    free(memory_block->memory);
-    memory_block->size = 0;
-}
-
-YoutubeSearchList create_youtube_search_list() 
-{
-    YoutubeSearchList list;
-    list.head = list.tail = NULL;
-    list.count = 0;
-    return list;
-}
-
-// appends node to end of the list
-void add_node(YoutubeSearchList* list, const YoutubeSearchNode node)
-{
-    // adding the first node to a list
-    if (list->count == 0) {
-        list->head = list->tail = malloc(sizeof(YoutubeSearchNode));
-        if (!list->head) {
-            printf("add_node: not enough memory, malloc returned null\n");
-            return;
-        }
-
-        // set both ends of the list to the first node of the list
-        *list->head = *list->tail = node;
-    } 
-    else {
-        // allocate space for the new node
-        list->tail->next = malloc(sizeof(YoutubeSearchNode));
-        if (!list->tail->next) {
-            printf("add_node: not enough memory, malloc returned null\n");
-            return;
-        }
-
-        // append node to list
-        *list->tail->next = node;
-        
-        // adjust tail ptr pos.
-        list->tail = list->tail->next;
-        list->tail->next = NULL;
-    }
-    
-    // update list size
-    list->count++;
-}
-
-void unload_node(YoutubeSearchNode* node)
-{
-    if (node->id) free(node->id);
-    if (node->subs) free(node->subs);
-    if (node->date) free(node->date);
-    if (node->views) free(node->views);
-    if (node->title) free(node->title);
-    if (node->length) free(node->length);
-    if (node->author) free(node->author);
-    if (node) free(node);
-}
-
-void unload_list(YoutubeSearchList* list) 
-{
-    YoutubeSearchNode* prev = NULL;
-    YoutubeSearchNode* current = list->head;
-
-    while (current) {
-        prev = current;
-        current = current->next;
-        unload_node(prev);
-    }
-}
-
-void print_node(const YoutubeSearchNode* node) 
-{
-    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %d thumbnail id) %d type) %d\n", 
-            node->id, node->title, node->author, node->subs, node->views, node->date, node->length, node->video_count, node->thumbnail.id, node->type);
-}
-
-void print_list(const YoutubeSearchList* list)
-{
-    YoutubeSearchNode* current = list->head;
-    while (current) {
-        print_node(current);
-        current = current->next;
-    }
-}
-
-// append src to dst
-size_t write_data(void* src, int nitems, size_t element_size, void* dst)
-{
-    // first, we to know how many bytes we are appending to dst
-    // becuase src is generic, we dont know the type (cant use sizeof(*(src_type)src))
-    size_t src_size = (nitems * element_size);
-
-    // next, we need to resize the dst pointer to fit this new data
-    // first, find out how much memory we are currenly holding
-    MemoryBlock* mem = (MemoryBlock*) dst;
-
-    // now get the new size, '+1' for '/0'
-    char* new_memory = realloc(mem->memory, (mem->size + src_size + 1));
-    if (!new_memory) {
-        printf("write_data: not enough memory, realloc returned null\n");
-        return 0;
-    }
-
-    // update the memory of dst
-    mem->memory = new_memory;
-
-    // write new content starting from the end of the old content
-    memcpy(&(mem->memory[mem->size]), src, src_size);
-
-    // update the size accordingly
-    mem->size += src_size;
-    
-    // explicity set null terminator 
-    mem->memory[mem->size] = '\0';
-
-    return src_size;
-}
-
-// preform a GET request to some url and return the data fetched
-MemoryBlock fetch_url(const char* url, CURL* curl_handle)
-{
-    MemoryBlock chunk;
-
-    // where the result is to be stored
-    chunk.memory = NULL;
-    
-    // current size (in bytes)
-    chunk.size = 0;
-
-    // specify parameters for curl handle
-    curl_easy_setopt(curl_handle, CURLOPT_URL, url); // where to request data
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_data); // how to write requested data 
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk); // where to write requested data
-
-    // store the result of the GET request
-    CURLcode res = curl_easy_perform(curl_handle);
-
-    if (res != CURLE_OK) {
-        fprintf(stderr, "curl_easy_perform() failed: %s\n",
-                curl_easy_strerror(res));
-    }
-        
-    return chunk;
-}
-
-void create_file_from_memory(const char* filename, const char* data) 
-{
-    FILE* fp = fopen(filename, "w");
-    if (!fp) printf("could not write \"%s\" in write mode\n", filename);
-    else {
-        fprintf(fp, "%s", data);
-        fclose(fp);
-    } 
-}
-
-// appends the nth element encountered by a list seperated by some delimeter
-void append_string_item(int element_count, int maxlen, char list_item[maxlen], const char* element, const char* delim)
-{
-    bool add_delim = element_count > 0;
-    size_t newlen = strlen(list_item) + strlen(element) + (add_delim ? strlen(delim) : 0);
-
-    if (newlen < maxlen) {
-        if (add_delim) strcat(list_item, delim);
-        strcat(list_item, element);
-    }
-}
 
 // given a json item, return the node equivalent 
 YoutubeSearchNode create_node(const cJSON* item, const SearchResultType type)
@@ -276,33 +60,6 @@ YoutubeSearchNode create_node(const cJSON* item, const SearchResultType type)
     return node;
 }
 
-// convert the content of a fetched url to a json object
-cJSON* api_to_json(const char* url, CURL* curl_handle, const char* debug_filename)
-{
-    // the data fetched from the URL
-    MemoryBlock fetched = fetch_url(url, curl_handle);
-    if (!is_memory_ready(fetched)) return NULL;
-
-    // print fetched data to better understand future cJSON opertations
-    #ifdef DEBUG
-        create_file_from_memory(debug_filename, fetched.memory);
-    #endif
-
-    // the json obj of this data
-    // used to preform CRUD operations of .json files
-    cJSON* json = cJSON_Parse(fetched.memory);
-    if (!json) {
-        printf("Error: %s\n", cJSON_GetErrorPtr());
-        cJSON_Delete(json);
-        return NULL;
-    }
-
-    // dealloc unused memory
-    if (is_memory_ready(fetched)) unload_memory_block(&fetched);
-    
-    return json;
-}
-
 void add_nodes_to_list(const char* url, CURL* curl_handle, const char* debug_filename, const SearchResultType type, YoutubeSearchList* list)
 {
     // get api infomation as a json object
@@ -330,6 +87,18 @@ void add_nodes_to_list(const char* url, CURL* curl_handle, const char* debug_fil
     cJSON_Delete(json);
 }
 
+// appends the nth element encountered by a list seperated by some delimeter
+void append_string_item(int element_count, int maxlen, char list_item[maxlen], const char* element, const char* delim)
+{
+    bool add_delim = element_count > 0;
+    size_t newlen = strlen(list_item) + strlen(element) + (add_delim ? strlen(delim) : 0);
+
+    if (newlen < maxlen) {
+        if (add_delim) strcat(list_item, delim);
+        strcat(list_item, element);
+    }
+}
+
 // writes the video, channel, and playlist ids into a comma delimited string
 void get_ids(const cJSON* items, const int maxlen, char videoIDs[maxlen], char channelIDs[maxlen], char playlistIDs[maxlen])
 {
@@ -337,10 +106,10 @@ void get_ids(const cJSON* items, const int maxlen, char videoIDs[maxlen], char c
     
     for (int i = 0; i < nitems; i++) {
         // the ith item in 'items' object
-        cJSON* subitem = cJSON_GetArrayItem(items, i);
+        cJSON* item = cJSON_GetArrayItem(items, i);
         
         // the 'id' tag of the ith item
-        cJSON* id = cJSON_GetObjectItem(subitem, "id");
+        cJSON* id = cJSON_GetObjectItem(item, "id");
         
         // the id of the search item (either video, playlist, or channel)
         cJSON* videoId = cJSON_GetObjectItem(id, "videoId");
@@ -415,13 +184,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    YoutubeAPI API;
-    API.key = argv[1];
-    API.url = "https://www.googleapis.com/youtube/v3";
-    API.video_endpoint = "videos";
-    API.search_endpoint = "search"; 
-    API.channel_endpoint = "channels";
-    API.playlist_endpoint = "playlists";
+    const YoutubeAPI API = init_youtube_api(argv[1]);
     
     // start the curl session
     curl_global_init(CURL_GLOBAL_ALL);
@@ -449,7 +212,8 @@ int main(int argc, char** argv)
 
 // to do
     // display information properly in raylib
-    // pagination support after search functionality
+    // search function
+    // pagination support
 
 // for read me
     // need curl, cjson, and raylib
