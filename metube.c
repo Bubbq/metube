@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,215 +7,204 @@
 #include <cjson/cJSON.h>
 #include "api.h"
 #include "list.h"
-#include "raylib.h"
+// #include "raylib.h"
 
-// given a json item, return the node equivalent 
-YoutubeSearchNode create_node(const cJSON* item, const SearchResultType type)
+// #define RAYGUI_IMPLEMENTATION
+// #include "raygui.h"
+
+// extracts the yt data from the search result page's html
+char* extract_ytInitalData(const char* html) 
 {
-    YoutubeSearchNode node = { 0 };
-    if (!item) return node;
+    const char* needle = "ytInitialData = ";
 
-    // id
-    cJSON* id = cJSON_GetObjectItem(item, "id");
-    if (id && cJSON_IsString(id)) node.id = strdup(id->valuestring);
-
-    cJSON* snippet = cJSON_GetObjectItem(item, "snippet");
-    if (snippet) {
-        // title
-        cJSON* title = cJSON_GetObjectItem(snippet, "title");
-        if (title && cJSON_IsString(title)) node.title = strdup(title->valuestring);
-
-        // author
-        cJSON* channelTitle = cJSON_GetObjectItem(snippet, "channelTitle");
-        if (channelTitle && cJSON_IsString(channelTitle)) node.author = strdup(channelTitle->valuestring);
-
-        // publish date
-        cJSON* publishedAt = cJSON_GetObjectItem(snippet, "publishedAt");
-        if (publishedAt && cJSON_IsString(publishedAt)) node.date = strdup(publishedAt->valuestring);
-    }
-
-    cJSON* statistics = cJSON_GetObjectItem(item, "statistics");
-    if (statistics) {
-        // view count
-        cJSON* viewCount = cJSON_GetObjectItem(statistics, "viewCount");
-        if (viewCount && cJSON_IsString(viewCount)) node.views = strdup(viewCount->valuestring);
-
-        // sub count
-        cJSON* subscriberCount = cJSON_GetObjectItem(statistics, "subscriberCount");
-        if (subscriberCount && cJSON_IsString(subscriberCount)) node.subs = strdup(subscriberCount->valuestring);
-    }
+    // the beginning of the data 
+    const char* needle_loc = strstr(html, needle);
+    if (!needle_loc) return NULL;
     
-    cJSON* contentDetails = cJSON_GetObjectItem(item, "contentDetails");
-    if (contentDetails) {
-        // video length
-        cJSON* duration = cJSON_GetObjectItem(contentDetails, "duration");
-        if (duration && cJSON_IsString(duration)) node.length = strdup(duration->valuestring);
+    // starts from the opening '{'
+    const char* start = (needle_loc + strlen(needle));
 
-        // amount of playlist items (videos)
-        cJSON* itemCount = cJSON_GetObjectItem(contentDetails, "itemCount");
-        if (itemCount && cJSON_IsNumber(itemCount)) node.video_count = itemCount->valueint;
-    }
+    // ends at the closing "}"
+    const char* end = strstr(start, "};");
+    if (!end) return NULL;
 
-    node.type = type;
+    // return a duplicate of this section of data found in the html
+    const size_t len = end - start + 1;
+    char* ret = malloc(len + 1); // for null terminator
+    strncpy(ret, start, len);
+    ret[len] = '\0';
 
-    return node;
+    return ret;
 }
 
-void add_nodes_to_list(const char* url, CURL* curl_handle, const char* debug_filename, const SearchResultType type, YoutubeSearchList* list)
+// writes a list of search result nodes to list
+void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeSearchList *search_results)
 {
-    // get api infomation as a json object
-    cJSON* json = api_to_json(url, curl_handle, debug_filename);
-    if (!json) return;
+    // first, format the url that will be fetched
+    char url[512];
+    snprintf(url, 512, "https://www.youtube.com/results?search_query=%s", url_encoded_query);
 
-    // the 'items' element in the json object
-    cJSON* items = cJSON_GetObjectItem(json, "items");
-    if (!items) {
+    // then, fetch the page source of this url
+    MemoryBlock search_chunk = fetch_url(url, handle);
+    // create_file_from_memory("test.json", search_chunk);
+
+    if (!is_memory_ready(search_chunk)) return;
+
+    char* cjson_data = extract_ytInitalData(search_chunk.memory);
+    if (!cjson_data) return;
+
+    // now, get the json obj of the search data
+    cJSON* search_json = cJSON_Parse(cjson_data);
+    if (!search_json) {
         printf("Error: %s\n", cJSON_GetErrorPtr());
         return;
     }
-
-    // for every item, store relavent information in the list
-    int nitems = cJSON_GetArraySize(items);
     
-    for (int i = 0; i < nitems; i++) {
-        // the ith item
-        cJSON* item = cJSON_GetArrayItem(items, i);
-        YoutubeSearchNode node = create_node(item, type);
-        add_node(list, node);
+    // go down the parent objects 
+    cJSON *contents = cJSON_GetObjectItemCaseSensitive(search_json, "contents");
+    cJSON *twoColumnSearchResultsRenderer = contents ? cJSON_GetObjectItemCaseSensitive(contents, "twoColumnSearchResultsRenderer") : NULL;
+    cJSON *primaryContents = twoColumnSearchResultsRenderer ? cJSON_GetObjectItemCaseSensitive(twoColumnSearchResultsRenderer, "primaryContents") : NULL;
+    cJSON *sectionListRenderer = primaryContents ? cJSON_GetObjectItemCaseSensitive(primaryContents, "sectionListRenderer") : NULL;
+    cJSON *sections = sectionListRenderer ? cJSON_GetObjectItemCaseSensitive(sectionListRenderer, "contents") : NULL;
+
+    if (sections && cJSON_IsArray(sections)) {
+        cJSON *first_section = cJSON_GetArrayItem(sections, 0);
+        cJSON *itemSectionRenderer = first_section ? cJSON_GetObjectItemCaseSensitive(first_section, "itemSectionRenderer") : NULL;
+        cJSON *contents = itemSectionRenderer ? cJSON_GetObjectItemCaseSensitive(itemSectionRenderer, "contents") : NULL;
+
+        if (contents && cJSON_IsArray(contents)) {
+            // loop through every item and get the node equivalent 
+            cJSON *item;
+            cJSON_ArrayForEach (item, contents) {
+                YoutubeSearchNode node = { 0 };
+                
+                // if the ith item is a video
+                cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");
+                if (videoRenderer) {
+                    node.type = SEARCH_RESULT_VIDEO;
+
+                    // video id
+                    cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
+                    if (videoId && cJSON_IsString(videoId)) node.id = strdup(videoId->valuestring);
+
+                    // video title
+                    cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
+                    cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
+                    if (runs && cJSON_IsArray(runs)) {
+                        cJSON* first_run = cJSON_GetArrayItem(runs, 0);
+                        if (first_run) {
+                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
+                            if (text && cJSON_IsString(text)) node.title = strdup(text->valuestring);
+                        }
+                    }
+
+                    // thumbnail link
+                    cJSON* thumbnail = cJSON_GetObjectItem(videoRenderer, "thumbnail");
+                    cJSON* thumbnails = thumbnail ? cJSON_GetObjectItem(thumbnail, "thumbnails") : NULL;
+                    if(thumbnails && cJSON_IsArray(thumbnails)) {
+                        cJSON* first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
+                        cJSON *url = cJSON_GetObjectItem(first_thumbnail, "url");
+                        // TODO: make image from thumbnail url
+                        if (url && cJSON_IsString(url)) 
+                            ;
+                    }
+
+                    // creator of video
+                    cJSON *ownerTextRuns = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "ownerText"), "runs");
+                    if (ownerTextRuns && cJSON_IsArray(ownerTextRuns)) {
+                        cJSON *first_run = cJSON_GetArrayItem(ownerTextRuns, 0);
+                        if (first_run) {
+                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
+                            if (text && cJSON_IsString(text)) node.author = strdup(text->valuestring);
+                        }
+                    }
+
+                    // view count
+                    cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
+                    if (viewCountText && cJSON_IsString(viewCountText)) node.views = strdup(viewCountText->valuestring);
+
+                    // publish date
+                    cJSON *publishedTimeText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "publishedTimeText"), "simpleText");
+                    if (publishedTimeText && cJSON_IsString(publishedTimeText)) node.date = strdup(publishedTimeText->valuestring);
+
+                    // video length
+                    cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
+                    if (lengthText && cJSON_IsString(lengthText)) node.length = strdup(lengthText->valuestring);
+                }
+
+                // // if the ith item is a channel
+                cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
+                if (channelRenderer) {
+                    node.type = SEARCH_RESULT_CHANNEL;
+
+                    // channel id
+                    cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
+                    if (channelId && cJSON_IsString(channelId)) node.id = strdup(channelId->valuestring);
+
+                    // channel title
+                    cJSON *title = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "title"), "simpleText");
+                    if (title && cJSON_IsString(title)) node.title = strdup(title->valuestring);
+
+                    // subscriber count
+                    cJSON *subCount = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "videoCountText"), "simpleText");
+                    if(subCount && cJSON_IsString(subCount)) node.subs = strdup(subCount->valuestring);
+
+                    // thumbnail link
+                    cJSON *thumbnails = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "thumbnail"), "thumbnails");
+                    if (thumbnails && cJSON_IsArray(thumbnails)) {
+                        cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
+                        cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
+                        // TODO: add url to image (need to add 'http:')
+                        if(url && cJSON_IsString(url)) 
+                            ;
+                    }
+                }
+                
+                // for playlist:
+                    // title
+                    // thumbnail
+                    // nvideos 
+                
+                add_node(search_results, node);
+            }
+        }
     }
 
-    // delloc unused memory
-    cJSON_Delete(json);
-}
-
-// appends the nth element encountered by a list seperated by some delimeter
-void append_string_item(int element_count, int maxlen, char list_item[maxlen], const char* element, const char* delim)
-{
-    bool add_delim = element_count > 0;
-    size_t newlen = strlen(list_item) + strlen(element) + (add_delim ? strlen(delim) : 0);
-
-    if (newlen < maxlen) {
-        if (add_delim) strcat(list_item, delim);
-        strcat(list_item, element);
-    }
-}
-
-// writes the video, channel, and playlist ids into a comma delimited string
-void get_ids(const cJSON* items, const int maxlen, char videoIDs[maxlen], char channelIDs[maxlen], char playlistIDs[maxlen])
-{
-    const int nitems = cJSON_GetArraySize(items);
-    
-    for (int i = 0; i < nitems; i++) {
-        // the ith item in 'items' object
-        cJSON* item = cJSON_GetArrayItem(items, i);
-        
-        // the 'id' tag of the ith item
-        cJSON* id = cJSON_GetObjectItem(item, "id");
-        
-        // the id of the search item (either video, playlist, or channel)
-        cJSON* videoId = cJSON_GetObjectItem(id, "videoId");
-        cJSON* channelId = cJSON_GetObjectItem(id, "channelId");
-        cJSON* playlistId = cJSON_GetObjectItem(id, "playlistId");
-
-        // append the id to its proper list
-        if (videoId) append_string_item(i, maxlen, videoIDs, videoId->valuestring, ",");
-        else if (channelId) append_string_item(i, maxlen, channelIDs, channelId->valuestring, ",");
-        else if (playlistId) append_string_item(i, maxlen, playlistIDs, playlistId->valuestring, ",");
-    }
-}
-
-// return a list of results generated from a query
-YoutubeSearchList metube_search(const int maxresults, const char* query, const YoutubeAPI API, CURL* curl_handle)
-{
-    // list holding all search data information (to be returned)
-    YoutubeSearchList list = create_youtube_search_list();
-    
-    // format the url for the YouTube Data API search endpoint using the query string
-    char url[1024];
-    snprintf(url, 1024, "%s/%s?part=snippet&q=%s&key=%s&maxResults=%d", API.url, API.search_endpoint, query, API.key, maxresults);
-
-    // get api infomation as a json object
-    cJSON* search_json = api_to_json(url, curl_handle, "search.json");
-    if (!search_json) return (YoutubeSearchList) { 0 };
-
-    // tag that is a list of the items returned from GET request
-    cJSON* items = cJSON_GetObjectItem(search_json, "items");
-    if (!items) {
-        printf("Error: %s\n", cJSON_GetErrorPtr());
-        return (YoutubeSearchList) { 0 };
-    }
-
-    char videoIDs[512] = { 0 };
-    char channelIDs[512] = { 0 };
-    char playlistIDs[512] = { 0 };
-
-    // get comma-delimited string of ids of all types for bulk API calls
-    get_ids(items, 512, videoIDs, channelIDs, playlistIDs);
-    
-    // done with this json obj
+    // dealloc
+    free(cjson_data);
     cJSON_Delete(search_json);
-
-    // store detailed video information into a list of youtube search data
-    if (videoIDs[0] != '\0') {
-        // create the url containing all ids of the corresp. type
-        snprintf(url, sizeof(url), "%s/%s?part=snippet,statistics,contentDetails&id=%s&key=%s", API.url, API.video_endpoint, videoIDs, API.key);
-        
-        // add all items fetched from this url to the list of search results
-        add_nodes_to_list(url, curl_handle, "video.json", SEARCH_RESULT_VIDEO, &list);
-    }
-
-    // do the same for other search result mediums
-    if (channelIDs[0] != '\0') {
-        snprintf(url, sizeof(url), "%s/%s?part=snippet,statistics&id=%s&key=%s", API.url, API.channel_endpoint, channelIDs, API.key);
-        add_nodes_to_list(url, curl_handle, "channel.json", SEARCH_RESULT_CHANNEL, &list);
-    }
-
-    if (playlistIDs[0] != '\0') {
-        snprintf(url, sizeof(url), "%s/%s?part=snippet,contentDetails&id=%s&key=%s", API.url, API.playlist_endpoint, playlistIDs, API.key);
-        add_nodes_to_list(url, curl_handle, "playlist.json", SEARCH_RESULT_PLAYLIST, &list);
-    }
-
-    return list;
+    unload_memory_block(&search_chunk);
 }
 
-int main(int argc, char** argv)
+int main()
 {
-    if (argc != 2) {
-        printf("Invalid number of command arguments.\nPlease provide your YouTube API key after the executable. (ie ./metube \"YOUR_API_KEY\")\n");
-        return 1;
-    }
-
-    const YoutubeAPI API = init_youtube_api(argv[1]);
-    
     // start the curl session
     curl_global_init(CURL_GLOBAL_ALL);
     
     CURL* curl_handle = curl_easy_init();
     
-    // must be URL encoded
-    char* query = curl_easy_escape(curl_handle, "eldin ring playthough", 0);
-    
-    const int max_results = 5;
-    
-    YoutubeSearchList list = metube_search(max_results, query, API, curl_handle);
-    print_list(&list);
-    
+    YoutubeSearchList search_results = { 0 };
+    char* query = curl_easy_escape(curl_handle, "elden ring playthrough", 0);
+    metube_search_results(query, curl_handle, &search_results);
+    print_list(&search_results);
+
     // dealloc app
     {
         // cleanup curl stuff
         curl_free(query); 
         curl_easy_cleanup(curl_handle);
         curl_global_cleanup();
-        unload_list(&list);
+
+        // freeing all alloc'ed memory from nodes 
+        unload_list(&search_results);
         return 0;
     }
 }
 
 // to do
-    // display information properly in raylib
     // search function
-    // pagination support
+    // display information properly in raylib
+    // pagination 
 
 // for read me
     // need curl, cjson, and raylib
-    // need to pass your youtube api key as an argument to the program

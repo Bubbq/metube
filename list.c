@@ -64,6 +64,8 @@ void unload_list(YoutubeSearchList* list)
         current = current->next;
         unload_node(prev);
     }
+    
+    list->count = 0;
 }
 
 void print_node(const YoutubeSearchNode* node) 
@@ -76,7 +78,8 @@ void print_list(const YoutubeSearchList* list)
 {
     YoutubeSearchNode* current = list->head;
     while (current) {
-        print_node(current);
+        if(current->type == SEARCH_RESULT_PLAYLIST)
+            print_node(current);
         current = current->next;
     }
 }

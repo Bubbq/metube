@@ -1,18 +1,6 @@
 #include <string.h>
 #include "api.h"
 
-YoutubeAPI init_youtube_api(char* key)
-{
-    YoutubeAPI API;
-    API.key = key;
-    API.url = "https://www.googleapis.com/youtube/v3";
-    API.video_endpoint = "videos";
-    API.search_endpoint = "search"; 
-    API.channel_endpoint = "channels";
-    API.playlist_endpoint = "playlists";
-    return API;
-}
-
 bool is_memory_ready(const MemoryBlock chunk)
 {
     return ((chunk.size > 0) && (chunk.memory != NULL));
@@ -91,29 +79,4 @@ MemoryBlock fetch_url(const char* url, CURL* curl_handle)
     }
         
     return chunk;
-}
-
-// convert the content of a fetched url to a json object
-cJSON* api_to_json(const char* url, CURL* curl_handle, const char* debug_filename)
-{
-    // the data fetched from the URL
-    MemoryBlock fetched = fetch_url(url, curl_handle);
-    if (!is_memory_ready(fetched)) return NULL;
-
-    // print fetched data to better understand future cJSON opertations
-    // create_file_from_memory(debug_filename, fetched);
-
-    // the json obj of this data
-    // used to preform CRUD operations of .json files
-    cJSON* json = cJSON_Parse(fetched.memory);
-    if (!json) {
-        printf("Error: %s\n", cJSON_GetErrorPtr());
-        cJSON_Delete(json);
-        return NULL;
-    }
-
-    // dealloc unused memory
-    if (is_memory_ready(fetched)) unload_memory_block(&fetched);
-    
-    return json;
 }
