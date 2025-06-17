@@ -7,8 +7,8 @@
 #include <cjson/cJSON.h>
 #include "raylib.h"
 
-// #define RAYGUI_IMPLEMENTATION
-// #include "raygui.h"
+#define RAYGUI_IMPLEMENTATION
+#include "raygui.h"
 
 typedef struct {
     size_t size;
@@ -106,10 +106,19 @@ MemoryBlock fetch_url(const char* url, CURL* curl)
 }
 
 typedef enum {
-    SEARCH_RESULT_VIDEO = 0,
-    SEARCH_RESULT_CHANNEL = 1,
-    SEARCH_RESULT_PLAYLIST = 2,
-} SearchResultType;
+    CONTENT_TYPE_VIDEO = 0,
+    CONTENT_TYPE_CHANNEL = 1,
+    CONTENT_TYPE_PLAYLIST = 2,
+    CONTENT_TYPE_NONE = 3,
+} ContentType;
+
+typedef enum 
+{
+    SORT_PARAM_RELEVANCE = 0,
+    SORT_PARAM_UPLOAD_DATE = 1,
+    SORT_PARAM_VIEW_COUNT = 2,
+    SORT_PARAM_RATING = 3,
+} SortParameter;
 
 typedef struct YoutubeSearchNode {
 	char* id;
@@ -121,7 +130,7 @@ typedef struct YoutubeSearchNode {
 	char* length;
     char* video_count;
     Texture thumbnail;
-    SearchResultType type;
+    ContentType type;
     struct YoutubeSearchNode* next;
 } YoutubeSearchNode;
 
@@ -246,7 +255,7 @@ char* extract_yt_data(const char* html)
 }
 
 // returns the json object that is an array of search result items (videos, channels, and/or playlists)
-cJSON* get_search_items(cJSON *json)
+cJSON* get_searched_items(cJSON *json)
 {
     cJSON *contents = cJSON_GetObjectItem(json, "contents");
     cJSON *twoColumnSearchResultsRenderer = contents ? cJSON_GetObjectItem(contents, "twoColumnSearchResultsRenderer") : NULL;
@@ -264,13 +273,46 @@ cJSON* get_search_items(cJSON *json)
     return NULL;
 }
 
+void configure_search_url(const int maxlen, char search_url[maxlen], const char* query, const SortParameter sort_param, const ContentType content_param)
+{
+    snprintf(search_url, maxlen, "https://www.youtube.com/results?search_query=%s&sp=", query);
+
+    // append the sorting parameters to the url
+
+    // possible sorting params
+    const char* relevance = "CAA";
+    const char* upload_date = "CAI";
+    const char* popularity = "CAM";
+    const char* rating = "CAE";
+    
+    switch (sort_param) {
+        case SORT_PARAM_RELEVANCE: strcat(search_url, relevance); break;
+        case SORT_PARAM_UPLOAD_DATE: strcat(search_url, upload_date); break;
+        case SORT_PARAM_VIEW_COUNT: strcat(search_url, popularity); break;
+        case SORT_PARAM_RATING: strcat(search_url, rating); break;
+    }
+
+    // possible type params
+    const char* video = "SAhAB"; 
+    const char* channel = "SAhAC";
+    const char* playlist = "SAhAD";
+    const char* none = "%253D";
+
+    switch (content_param) {
+        case CONTENT_TYPE_VIDEO: strcat(search_url, video); break;
+        case CONTENT_TYPE_CHANNEL: strcat(search_url, channel); break;
+        case CONTENT_TYPE_PLAYLIST: strcat(search_url, playlist); break;
+        case CONTENT_TYPE_NONE: strcat(search_url, none); break;
+    }  
+}
+
 // writes a list of search result nodes to some list
-void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSearchList *search_results)
+void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSearchList *search_results, const SortParameter sort_param, const ContentType content_param)
 {
     // append the query to the yt query string
-    char query_url[512] = "https://www.youtube.com/results?search_query=";
-    strcat(query_url, url_encoded_query);
-    
+    char query_url[512] = "\0";
+    configure_search_url(512, query_url, url_encoded_query, sort_param, content_param);
+
     // get the page source of this url
     MemoryBlock html = fetch_url(query_url, curl);
     if (!is_memory_ready(html)) return;
@@ -287,7 +329,8 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
         printf("Error: %s\n", cJSON_GetErrorPtr());
         return;
     }
-    cJSON *contents = get_search_items(search_json);
+
+    cJSON *contents = get_searched_items(search_json);
     if (contents && cJSON_IsArray(contents)) {
         // loop through every item and get the node equivalent 
         cJSON *item;
@@ -298,7 +341,7 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
             cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel");
 
             if (videoRenderer) {
-                node.type = SEARCH_RESULT_VIDEO;
+                node.type = CONTENT_TYPE_VIDEO;
 
                 // video id
                 cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
@@ -350,7 +393,7 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
             }
 
             else if (channelRenderer) {
-                node.type = SEARCH_RESULT_CHANNEL;
+                node.type = CONTENT_TYPE_CHANNEL;
 
                 // channel id
                 cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
@@ -376,7 +419,7 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
             }
 
             else if (lockupViewModel) {
-                node.type = SEARCH_RESULT_PLAYLIST;
+                node.type = CONTENT_TYPE_PLAYLIST;
 
                 // playlist id
                 cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
@@ -430,28 +473,52 @@ int main()
     curl_global_init(CURL_GLOBAL_ALL);
     
     YoutubeSearchList search_results = create_youtube_search_list();
-    char* query = curl_easy_escape(curl, "finding nemo", 0);
-    get_results_from_query(query, curl, &search_results);
     
-    print_list(&search_results);
+    // init app
+    SetTargetFPS(60);
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
+    InitWindow(1000, 750, "metube");
 
-    // dealloc app
+    char buffer[256] = "\0";
+    bool edit_mode = false;
+
+    while (!WindowShouldClose()) {
+        BeginDrawing();
+            ClearBackground(RAYWHITE);
+            // searchbar
+            if (GuiTextBox((Rectangle){ 5, 5, 300, 25}, buffer, 256, edit_mode)) {
+                edit_mode = !edit_mode;
+                const size_t query_len = strlen(buffer);
+                const bool searched = (edit_mode == false && query_len > 0);
+                if (searched) {
+                    char* query = curl_easy_escape(curl, buffer, query_len);
+                    get_results_from_query(query, curl, &search_results, SORT_PARAM_RELEVANCE, CONTENT_TYPE_VIDEO);
+                    print_list(&search_results);
+                    
+                    // dealloc
+                    curl_free(query);
+                    unload_list(&search_results);
+                }
+            }
+        EndDrawing();
+    }
+
+    // deinit app
     {
         // cleanup curl stuff
-        curl_free(query); 
         curl_easy_cleanup(curl);
         curl_global_cleanup();
 
-        // freeing all alloc'ed memory from nodes 
-        unload_list(&search_results);
+        CloseWindow();
         return 0;
     }
 }
 
 // to do
-    // search function
-    // display information properly in raylib
+    // make frontend for search filters
+    // display searched information
     // pagination 
 
 // for read me
-    // need curl, cjson, and raylib
+    // need curl, cjson, and raylib/raygui
