@@ -46,7 +46,7 @@ void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeS
 
     // then, fetch the page source of this url
     MemoryBlock search_chunk = fetch_url(url, handle);
-    // create_file_from_memory("test.json", search_chunk);
+    create_file_from_memory("test.json", search_chunk);
 
     if (!is_memory_ready(search_chunk)) return;
 
@@ -77,9 +77,9 @@ void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeS
             cJSON *item;
             cJSON_ArrayForEach (item, contents) {
                 YoutubeSearchNode node = { 0 };
-                
-                // if the ith item is a video
+                cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
                 cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");
+                
                 if (videoRenderer) {
                     node.type = SEARCH_RESULT_VIDEO;
 
@@ -131,10 +131,8 @@ void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeS
                     cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
                     if (lengthText && cJSON_IsString(lengthText)) node.length = strdup(lengthText->valuestring);
                 }
-
-                // // if the ith item is a channel
-                cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
-                if (channelRenderer) {
+                
+                else if (channelRenderer) {
                     node.type = SEARCH_RESULT_CHANNEL;
 
                     // channel id
@@ -184,7 +182,7 @@ int main()
     CURL* curl_handle = curl_easy_init();
     
     YoutubeSearchList search_results = { 0 };
-    char* query = curl_easy_escape(curl_handle, "elden ring playthrough", 0);
+    char* query = curl_easy_escape(curl_handle, "asmongold", 0);
     metube_search_results(query, curl_handle, &search_results);
     print_list(&search_results);
 
