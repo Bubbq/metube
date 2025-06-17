@@ -20,6 +20,6 @@ typedef struct {
 
 bool is_memory_ready(const MemoryBlock);
 void unload_memory_block(MemoryBlock*);
-void create_file_from_memory(const char*, const MemoryBlock); 
+void create_file_from_memory(const char*, const char*); 
 size_t write_data(void*, int, size_t, void*);
 MemoryBlock fetch_url(const char*, CURL*);

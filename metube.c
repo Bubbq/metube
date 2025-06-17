@@ -46,12 +46,13 @@ void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeS
 
     // then, fetch the page source of this url
     MemoryBlock search_chunk = fetch_url(url, handle);
-    create_file_from_memory("test.json", search_chunk);
 
     if (!is_memory_ready(search_chunk)) return;
 
     char* cjson_data = extract_ytInitalData(search_chunk.memory);
     if (!cjson_data) return;
+
+    // create_file_from_memory("search.json", cjson_data);
 
     // now, get the json obj of the search data
     cJSON* search_json = cJSON_Parse(cjson_data);
@@ -79,7 +80,8 @@ void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeS
                 YoutubeSearchNode node = { 0 };
                 cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
                 cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");
-                
+                cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel");
+
                 if (videoRenderer) {
                     node.type = SEARCH_RESULT_VIDEO;
 
@@ -131,7 +133,7 @@ void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeS
                     cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
                     if (lengthText && cJSON_IsString(lengthText)) node.length = strdup(lengthText->valuestring);
                 }
-                
+
                 else if (channelRenderer) {
                     node.type = SEARCH_RESULT_CHANNEL;
 
@@ -157,6 +159,49 @@ void metube_search_results(const char* url_encoded_query, CURL *handle, YoutubeS
                             ;
                     }
                 }
+
+                else if (lockupViewModel) {
+                    node.type = SEARCH_RESULT_PLAYLIST;
+
+                    // playlist id
+                    cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
+                    if (contentId && cJSON_IsString(contentId)) node.id = strdup(contentId->valuestring);
+
+                    // playlist title
+                    cJSON *metadata = cJSON_GetObjectItem(lockupViewModel, "metadata");
+                    cJSON *lockupMetadataViewModel = metadata ? cJSON_GetObjectItem(metadata, "lockupMetadataViewModel") : NULL;
+                    cJSON *title = lockupMetadataViewModel ? cJSON_GetObjectItem(lockupMetadataViewModel, "title") : NULL;
+                    cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
+                    if (content && cJSON_IsString(content)) node.title = strdup(content->valuestring);
+
+                    // number of videos in playlist
+                    cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
+                    cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
+                    cJSON *primaryThumbnail = collectionThumbnailViewModel ? cJSON_GetObjectItem(collectionThumbnailViewModel, "primaryThumbnail") : NULL;
+                    cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
+                    cJSON *overlays = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "overlays") : NULL;
+                    cJSON *overlay;
+                    if (overlays && cJSON_IsArray(overlays)) {
+                        cJSON_ArrayForEach (overlay, overlays) {
+                            cJSON *thumbnailOverlayBadgeViewModel = cJSON_GetObjectItem(overlay, "thumbnailOverlayBadgeViewModel");
+                            cJSON *thumbnailBadges = thumbnailOverlayBadgeViewModel ? cJSON_GetObjectItem(thumbnailOverlayBadgeViewModel, "thumbnailBadges") : NULL;
+                            if (thumbnailBadges && cJSON_IsArray(thumbnailBadges)) {
+                                cJSON *thumbnailBadge;
+                                cJSON_ArrayForEach (thumbnailBadge, thumbnailBadges) {
+                                    cJSON *thumbnailBadgeViewModel = cJSON_GetObjectItem(thumbnailBadge, "thumbnailBadgeViewModel");
+                                    if (thumbnailBadgeViewModel) {
+                                        cJSON *text = cJSON_GetObjectItem(thumbnailBadgeViewModel, "text");
+                                        if (text && cJSON_IsString(text)) {
+                                            node.video_count = strdup(text->valuestring);
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
                 
                 // for playlist:
                     // title
@@ -178,12 +223,12 @@ int main()
 {
     // start the curl session
     curl_global_init(CURL_GLOBAL_ALL);
-    
     CURL* curl_handle = curl_easy_init();
     
-    YoutubeSearchList search_results = { 0 };
-    char* query = curl_easy_escape(curl_handle, "asmongold", 0);
+    YoutubeSearchList search_results = create_youtube_search_list();
+    char* query = curl_easy_escape(curl_handle, "elden ring playthrough", 0);
     metube_search_results(query, curl_handle, &search_results);
+    
     print_list(&search_results);
 
     // dealloc app

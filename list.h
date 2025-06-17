@@ -16,7 +16,7 @@ typedef struct YoutubeSearchNode {
 	char* views;
 	char* date;
 	char* length;
-    int video_count;
+    char* video_count;
     Texture thumbnail;
     SearchResultType type;
     struct YoutubeSearchNode* next;

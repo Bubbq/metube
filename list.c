@@ -1,5 +1,6 @@
 #include "list.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 YoutubeSearchList create_youtube_search_list() 
 {
@@ -50,6 +51,7 @@ void unload_node(YoutubeSearchNode* node)
     if (node->views) free(node->views);
     if (node->title) free(node->title);
     if (node->length) free(node->length);
+    if (node->video_count) free(node->video_count);
     if (node->author) free(node->author);
     if (node) free(node);
 }
@@ -70,7 +72,7 @@ void unload_list(YoutubeSearchList* list)
 
 void print_node(const YoutubeSearchNode* node) 
 {
-    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %d thumbnail id) %d type) %d\n", 
+    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %s thumbnail id) %d type) %d\n", 
             node->id, node->title, node->author, node->subs, node->views, node->date, node->length, node->video_count, node->thumbnail.id, node->type);
 }
 

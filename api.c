@@ -12,12 +12,12 @@ void unload_memory_block(MemoryBlock* chunk)
     chunk->size = 0;
 }
 
-void create_file_from_memory(const char* filename, const MemoryBlock chunk) 
+void create_file_from_memory(const char* filename, const char* memory) 
 {
     FILE* fp = fopen(filename, "w");
     if (!fp) printf("could not write \"%s\" in write mode\n", filename);
     else {
-        fprintf(fp, "%s", chunk.memory);
+        fprintf(fp, "%s", memory);
         fclose(fp);
     } 
 }
