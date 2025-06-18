@@ -485,7 +485,7 @@ char* sort_parameter_to_text (const SortParameter sort_parameter)
     return NULL;
 }
 
-void search (const char* query, CURL* curl, YoutubeSearchList *search_results, const SortParameter sort_parameter, ContentType content_type)
+void search (const char* query, CURL* curl, YoutubeSearchList *search_results, const SortParameter sort_parameter, const ContentType content_type)
 {
     // curl only accepts url encoded queries
     char* url_encoded_query = curl_easy_escape(curl, query,0);
@@ -513,7 +513,7 @@ int main()
     SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
     InitWindow(1000, 750, "metube");
 
-    char buffer[256] = "\0";
+    char text_box_buffer[256] = "\0";
     bool edit_mode = false;
     
     bool show_filter_window = false;
@@ -526,20 +526,25 @@ int main()
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
-            // searchbar
+            // searching
             const Rectangle search_bar = { 5, 5, 300, 25 };
+            const Rectangle search_button = { (search_bar.x + search_bar.width + 5), search_bar.y, 50, 25 };
+
+            // toggle edit mode engaging or leaving the text box window
+            // pressing enter returns 1
+            // clicking out of the window returns 2
             int text_box_status; 
-            if ((text_box_status = GuiTextBox(search_bar, buffer, 256, edit_mode))) {
-                edit_mode = !edit_mode;
-                const size_t query_len = strlen(buffer);
-                const bool ENTER_key_pressed = (text_box_status == 1);
-
-                if ((edit_mode == false) && (query_len > 0) && ENTER_key_pressed) search(buffer, curl, &search_results, sort[current_sort], content[current_type]);
-            }
-
-            // filter button
-            const Rectangle filter_button = { (search_bar.x + search_bar.width + 5), 5, 25, 25 };
-            if (GuiButton(filter_button, "F")) show_filter_window = !show_filter_window;
+            if ((text_box_status = GuiTextBox(search_bar, text_box_buffer, 256, edit_mode))) edit_mode = !edit_mode;
+            
+            // pressing the search button or pressing enter in the search bar will search 
+            if ((GuiButton(search_button, "SEARCH") || (text_box_status == 1)) && ((strlen(text_box_buffer) > 0) && !edit_mode)) search(text_box_buffer, curl, &search_results, sort[current_sort], content[current_type]);
+            
+            // filtering
+            const Rectangle filter_button = { (search_button.x + search_button.width + 5), 5, 50, 25 };
+            
+            // toggle filter window on button press
+            if (GuiButton(filter_button, "FILTER")) show_filter_window = !show_filter_window;
+            
             if (show_filter_window) {
                 const int font = 11;
                 const Rectangle filter_window_area = { 5, (search_bar.y + search_bar.height + 5), search_bar.width, 75 };
