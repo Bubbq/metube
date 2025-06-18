@@ -494,9 +494,7 @@ void search (const char* query, CURL* curl, YoutubeSearchList *search_results, c
     get_results_from_query(url_encoded_query, curl, search_results, sort_parameter, content_type);
     print_list(search_results);
 
-    // freeing alloc'ed memory
     curl_free(url_encoded_query);
-    unload_list(search_results);
 }
 
 int main()
@@ -522,13 +520,19 @@ int main()
     ContentType content[] = { CONTENT_TYPE_ANY, CONTENT_TYPE_VIDEO, CONTENT_TYPE_CHANNEL, CONTENT_TYPE_PLAYLIST };
     SortParameter sort[] = { SORT_PARAM_RELEVANCE, SORT_PARAM_UPLOAD_DATE, SORT_PARAM_VIEW_COUNT, SORT_PARAM_RATING };
 
+    // for GuiScrollPanel funct.
+    Vector2 scroll = { 10, 10 };
+    Rectangle scrollView = { 0, 0 };
+
+    const int padding = 5;
+
     while (!WindowShouldClose()) {
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
             // searching
-            const Rectangle search_bar = { 5, 5, 300, 25 };
-            const Rectangle search_button = { (search_bar.x + search_bar.width + 5), search_bar.y, 50, 25 };
+            const Rectangle search_bar = { padding, padding, 300, 25 };
+            const Rectangle search_button = { (search_bar.x + search_bar.width + padding), search_bar.y, 50, 25 };
 
             // toggle edit mode engaging or leaving the text box window
             // pressing enter returns 1
@@ -537,42 +541,70 @@ int main()
             if ((text_box_status = GuiTextBox(search_bar, text_box_buffer, 256, edit_mode))) edit_mode = !edit_mode;
             
             // pressing the search button or pressing enter in the search bar will search 
-            if ((GuiButton(search_button, "SEARCH") || (text_box_status == 1)) && ((strlen(text_box_buffer) > 0) && !edit_mode)) search(text_box_buffer, curl, &search_results, sort[current_sort], content[current_type]);
+            if ((GuiButton(search_button, "SEARCH") || (text_box_status == 1)) && ((strlen(text_box_buffer) > 0) && !edit_mode)) {
+                if (search_results.count) unload_list(&search_results);
+                search(text_box_buffer, curl, &search_results, sort[current_sort], content[current_type]);
+            } 
             
             // filtering
-            const Rectangle filter_button = { (search_button.x + search_button.width + 5), 5, 50, 25 };
+            const Rectangle filter_button = { (search_button.x + search_button.width + padding), padding, 50, 25 };
             
             // toggle filter window on button press
             if (GuiButton(filter_button, "FILTER")) show_filter_window = !show_filter_window;
             
+            const Rectangle filter_window_area = { padding, (search_bar.y + search_bar.height + padding), search_bar.width, 50 };
             if (show_filter_window) {
+                DrawRectangleLinesEx(filter_window_area, 1, GRAY);
                 const int font = 11;
-                const Rectangle filter_window_area = { 5, (search_bar.y + search_bar.height + 5), search_bar.width, 75 };
 
                 // buttons to switch filter params (the type of content and how they will be sorted)
                 const char* button_text = "SWITCH";
-                const Rectangle sort_type_button = { (filter_window_area.x + filter_window_area.width - 55), (filter_window_area.y + 5), 50, 17.5 };
-                const Rectangle content_type_button = { (filter_window_area.x + filter_window_area.width - 55), (sort_type_button.y + sort_type_button.height + 10), 50, 17.5 };
+                const Rectangle sort_type_button = { (filter_window_area.x + filter_window_area.width - 55), (filter_window_area.y + padding), 50, 17.5 };
+                const Rectangle content_type_button = { (filter_window_area.x + filter_window_area.width - 55), (sort_type_button.y + sort_type_button.height + padding), 50, 17.5 };
                 
                 // update the index of filter params when pressed
                 if (GuiButton(sort_type_button, button_text)) current_sort = bound_index_to_array((current_sort + 1), 4);
                 if (GuiButton(content_type_button, button_text)) current_type = bound_index_to_array((current_type + 1), 4);
 
                 // filters availible
-                DrawText("ORDER:", (filter_window_area.x + 5), (sort_type_button.y + 5), font, BLACK);
-                DrawText("TYPE:", (filter_window_area.x + 5), (content_type_button.y + 5), font, BLACK);
+                DrawText("ORDER:", (filter_window_area.x + padding), (sort_type_button.y + padding), font, BLACK);
+                DrawText("TYPE:", (filter_window_area.x + padding), (content_type_button.y + padding), font, BLACK);
                 
                 // current param value
-                DrawText(content_type_to_text(content[current_type]), ((filter_window_area.x + filter_window_area.width) * 0.4f), (content_type_button.y + 5), font, BLACK);
-                DrawText(sort_parameter_to_text(sort[current_sort]), ((filter_window_area.x + filter_window_area.width) * 0.4f), (sort_type_button.y + 5), font, BLACK);
+                DrawText(content_type_to_text(content[current_type]), ((filter_window_area.x + filter_window_area.width) * 0.4f), (content_type_button.y + padding), font, BLACK);
+                DrawText(sort_parameter_to_text(sort[current_sort]), ((filter_window_area.x + filter_window_area.width) * 0.4f), (sort_type_button.y + padding), font, BLACK);
             }
 
+            // display search results
+            const float ypos = search_bar.y + search_bar.height + (show_filter_window ? (filter_window_area.height + padding) : 0) + padding;
+            const Rectangle scroll_panel_area = { search_bar.x, ypos, search_bar.width, (GetScreenHeight() - ypos - padding) };
+            
+            const int SCROLLBAR_WIDTH = 14;
+            const int content_height = 75;
+            Rectangle content_area = scroll_panel_area;
+            content_area.height = search_results.count * content_height;
+            GuiScrollPanel(scroll_panel_area, NULL, content_area, &scroll, &scrollView);
+
+            // clip drawings within the scroll panel
+            BeginScissorMode(scroll_panel_area.x, (scroll_panel_area.y + 1), scroll_panel_area.width, (scroll_panel_area.height - 2));
+                float y_level = scroll_panel_area.y + 1;
+                for (int i = 0; (i < search_results.count); i++, y_level += content_height) {
+                    const Rectangle content_rect = { (padding + 1), (y_level + scroll.y), (scroll_panel_area.width - SCROLLBAR_WIDTH), content_height };
+
+                    // dont process if out of bounds
+                    if (!CheckCollisionRecs(content_rect, scroll_panel_area)) continue;
+
+                    DrawRectangleRec(content_rect, (i % 2 ? WHITE : RAYWHITE));
+                }
+            EndScissorMode();
+            
             DrawFPS(GetScreenWidth() - 70, GetScreenHeight() - 20);
         EndDrawing();
     }
 
     // deinit app
     {
+        if (search_results.count) unload_list(&search_results);
         curl_easy_cleanup(curl);
         curl_global_cleanup();
         CloseWindow();
