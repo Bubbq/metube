@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,7 +208,8 @@ void unload_list(YoutubeSearchList* list)
         current = current->next;
         unload_node(prev);
     }
-    
+
+    list->head = list->tail = NULL;
     list->count = 0;
 }
 
@@ -310,6 +312,7 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
         return;
     }
 
+    int elements_added = 0;
     cJSON *contents = cJSON_GetObjectItem(search_json, "contents");
     cJSON *twoColumnSearchResultsRenderer = contents ? cJSON_GetObjectItem(contents, "twoColumnSearchResultsRenderer") : NULL;
     cJSON *primaryContents = twoColumnSearchResultsRenderer ? cJSON_GetObjectItem(twoColumnSearchResultsRenderer, "primaryContents") : NULL;
@@ -449,10 +452,15 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
                     }
                 }
 
-                if (node.id) add_node(search_results, node);
+                if (node.id) {
+                    add_node(search_results, node);
+                    elements_added++;
+                }
             }
         }
     }
+
+    if (elements_added == 0) printf("no items were found\n");
     cJSON_Delete(search_json);
 }
 
@@ -492,9 +500,45 @@ void search (const char* query, CURL* curl, YoutubeSearchList *search_results, c
     
     // store the data of the search results to some list
     get_results_from_query(url_encoded_query, curl, search_results, sort_parameter, content_type);
-    print_list(search_results);
-
     curl_free(url_encoded_query);
+}
+
+void format_youtube_views(const char* views_str, const int maxlen, char dst[maxlen])
+{
+    // remove  all non numeric chars
+    char no_commas[32] = "\0";
+    for (int i = 0, j = 0; views_str[i]; i++) 
+        if (isdigit(views_str[i])) no_commas[j++] = views_str[i];
+
+    // convert to int
+    long long views = atoll(no_commas);
+
+    // formatting string
+    
+    // hundreds
+    if (views < 1e3) snprintf(dst, maxlen, "%lld", views);
+    
+    // thousands
+    else if (views < 1e6) {
+        if (views < 1e5) snprintf(dst, maxlen, "%.1fk", (views / 1e3));
+        else snprintf(dst, maxlen, "%dk", (int)(views / 1e3));
+    }
+
+    // millions
+    else if (views < 1e9) {
+        if (views < 1e8) snprintf(dst, maxlen, "%.1fM", (views / 1e6));
+        else snprintf(dst, maxlen, "%dM", (int)(views / 1e6));
+    }
+    
+    // billions
+    else if (views < 1e12) {
+        if (views < 1e11) snprintf(dst, maxlen, "%.1fB", (views / 1e9));
+        else snprintf(dst, maxlen, "%dB", (int)(views / 1e9));
+    }
+
+    // trim '.0' if present
+    char* loc = strstr(dst, ".0");
+    if (loc) *loc = '\0';
 }
 
 int main()
@@ -520,16 +564,17 @@ int main()
     ContentType content[] = { CONTENT_TYPE_ANY, CONTENT_TYPE_VIDEO, CONTENT_TYPE_CHANNEL, CONTENT_TYPE_PLAYLIST };
     SortParameter sort[] = { SORT_PARAM_RELEVANCE, SORT_PARAM_UPLOAD_DATE, SORT_PARAM_VIEW_COUNT, SORT_PARAM_RATING };
 
-    // for GuiScrollPanel funct.
+    // for scroll panel
     Vector2 scroll = { 10, 10 };
     Rectangle scrollView = { 0, 0 };
-
-    const int padding = 5;
 
     while (!WindowShouldClose()) {
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
+            // space nearly every element gives each other
+            const int padding = 5;
+            
             // searching
             const Rectangle search_bar = { padding, padding, 300, 25 };
             const Rectangle search_button = { (search_bar.x + search_bar.width + padding), search_bar.y, 50, 25 };
@@ -542,7 +587,7 @@ int main()
             
             // pressing the search button or pressing enter in the search bar will search 
             if ((GuiButton(search_button, "SEARCH") || (text_box_status == 1)) && ((strlen(text_box_buffer) > 0) && !edit_mode)) {
-                if (search_results.count) unload_list(&search_results);
+                if (search_results.count > 0) unload_list(&search_results);
                 search(text_box_buffer, curl, &search_results, sort[current_sort], content[current_type]);
             } 
             
@@ -576,25 +621,95 @@ int main()
             }
 
             // display search results
-            const float ypos = search_bar.y + search_bar.height + (show_filter_window ? (filter_window_area.height + padding) : 0) + padding;
-            const Rectangle scroll_panel_area = { search_bar.x, ypos, search_bar.width, (GetScreenHeight() - ypos - padding) };
+
+            // the bound of the scroll panel
+            const Rectangle scroll_panel_area = { 
+                search_bar.x, 
+                search_bar.y + search_bar.height + (show_filter_window ? (padding + filter_window_area.height) : 0) + padding, 
+                search_bar.width, 
+                GetScreenHeight() - scroll_panel_area.y - padding, 
+            };
             
-            const int SCROLLBAR_WIDTH = 14;
+            // the area of the content drawn in the window
             const int content_height = 75;
-            Rectangle content_area = scroll_panel_area;
-            content_area.height = search_results.count * content_height;
+            const Rectangle content_area = {
+                scroll_panel_area.x,
+                scroll_panel_area.y,
+                scroll_panel_area.width,
+                search_results.count * content_height,
+            };
+
+            // the width of the scrollbar is only felt when it's visible
+            const int SCROLLBAR_WIDTH = content_area.height > scroll_panel_area.height ? 14 : 2;
+            
             GuiScrollPanel(scroll_panel_area, NULL, content_area, &scroll, &scrollView);
 
             // clip drawings within the scroll panel
             BeginScissorMode(scroll_panel_area.x, (scroll_panel_area.y + 1), scroll_panel_area.width, (scroll_panel_area.height - 2));
+                const int font_size = 13;
+
+                // the y value of the ith rectangle to be drawn
                 float y_level = scroll_panel_area.y + 1;
-                for (int i = 0; (i < search_results.count); i++, y_level += content_height) {
-                    const Rectangle content_rect = { (padding + 1), (y_level + scroll.y), (scroll_panel_area.width - SCROLLBAR_WIDTH), content_height };
+                
+                // for every search result, draw a container and display its data
+                int i = 0;
+                for (YoutubeSearchNode* current = search_results.head; (current && i < search_results.count); current = current->next, i++, y_level += content_height) {
+                    // area of the ith rectangle
+                    const Rectangle content_rect = { 
+                        padding + 1, 
+                        y_level + scroll.y, // scroll is added so moving the scrollbar offsets all elements
+                        scroll_panel_area.width - SCROLLBAR_WIDTH,
+                        content_height 
+                    };
 
-                    // dont process if out of bounds
-                    if (!CheckCollisionRecs(content_rect, scroll_panel_area)) continue;
+                    // only process rectangles in bounds
+                    if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
+                        const Rectangle thumbnail_area = { 
+                            content_rect.x, 
+                            content_rect.y, 
+                            content_rect.width * 0.40f, 
+                            content_rect.height 
+                        };
 
-                    DrawRectangleRec(content_rect, (i % 2 ? WHITE : RAYWHITE));
+                        const Rectangle title_area = {
+                            thumbnail_area.x + thumbnail_area.width,
+                            content_rect.y,
+                            content_rect.width - thumbnail_area.width,
+                            content_rect.height * 0.75f
+                        };
+
+                        const Rectangle statistics_area = {
+                            thumbnail_area.x + thumbnail_area.width,
+                            title_area.y + title_area.height,
+                            title_area.width,
+                            content_height - title_area.height
+                        };
+
+                        // background color
+                        DrawRectangleRec(content_rect, (i % 2 ? WHITE : RAYWHITE));
+                        // DrawRectangleRec(thumbnail_area, MAROON);
+                        // DrawRectangleRec(title_area, GREEN);
+                        // DrawRectangleRec(statistics_area, BLUE);
+
+                        if (current->type == CONTENT_TYPE_VIDEO) {
+                            if (current->title) DrawText(current->title, title_area.x, title_area.y, font_size, BLACK);
+                            if (current->views && current->date) {
+                                char view_count[32];
+                                format_youtube_views(current->views, 32, view_count);
+                                DrawText(TextFormat("%s - %s views", current->date, view_count), statistics_area.x, statistics_area.y, font_size, BLACK);
+                            }
+                            // video thumbnail
+                        }
+                        else if (current->type == CONTENT_TYPE_CHANNEL) {
+                            if (current->title) DrawText(current->title, title_area.x, title_area.y, font_size, BLACK);
+                            if (current->subs) DrawText(current->subs, statistics_area.x, statistics_area.y, font_size, BLACK);
+                            // channel thumb
+                        }   
+                        else if (current->type == CONTENT_TYPE_PLAYLIST) {
+                            if (current->title) DrawText(current->title, title_area.x, title_area.y, font_size, BLACK);
+                            // playlist thumbnail
+                        }
+                    } 
                 }
             EndScissorMode();
             
@@ -604,7 +719,7 @@ int main()
 
     // deinit app
     {
-        if (search_results.count) unload_list(&search_results);
+        if (search_results.count > 0) unload_list(&search_results);
         curl_easy_cleanup(curl);
         curl_global_cleanup();
         CloseWindow();
@@ -613,8 +728,9 @@ int main()
 }
 
 // to do
-    // display searched information
+    // text wrap around content rectangles
     // pagination 
+    // actually play video when pressed
 
 // for read me
     // need curl, cjson, and raylib/raygui
