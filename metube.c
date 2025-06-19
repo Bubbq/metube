@@ -1,12 +1,13 @@
 #include <ctype.h>
-#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <pthread.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include "raylib.h"
+#include "raylib/src/raylib.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
@@ -194,6 +195,7 @@ void unload_node(YoutubeSearchNode* node)
     if (node->length) free(node->length);
     if (node->video_count) free(node->video_count);
     if (node->author) free(node->author);
+    if (IsTextureReady(node->thumbnail)) UnloadTexture(node->thumbnail);
 
     free(node);
 }
@@ -287,13 +289,68 @@ void configure_search_url(const int maxlen, char search_url[maxlen], const char*
     }  
 }
 
+void format_youtube_views(const char* views_str, const int maxlen, char dst[maxlen])
+{
+    // remove  all non numeric chars
+    char no_commas[32] = "\0";
+    for (int i = 0, j = 0; views_str[i]; i++) 
+        if (isdigit(views_str[i])) no_commas[j++] = views_str[i];
+
+    // convert to int
+    long long views = atoll(no_commas);
+
+    // formatting string
+    
+    // hundreds
+    if (views < 1e3) snprintf(dst, maxlen, "%lld", views);
+    
+    // thousands
+    else if (views < 1e6) {
+        if (views < 1e5) snprintf(dst, maxlen, "%.1fk", (views / 1e3));
+        else snprintf(dst, maxlen, "%dk", (int)(views / 1e3));
+    }
+
+    // millions
+    else if (views < 1e9) {
+        if (views < 1e8) snprintf(dst, maxlen, "%.1fM", (views / 1e6));
+        else snprintf(dst, maxlen, "%dM", (int)(views / 1e6));
+    }
+    
+    // billions
+    else if (views < 1e12) {
+        if (views < 1e11) snprintf(dst, maxlen, "%.1fB", (views / 1e9));
+        else snprintf(dst, maxlen, "%dB", (int)(views / 1e9));
+    }
+
+    // trim '.0' if present
+    char* loc = strstr(dst, ".0");
+    if (loc) *loc = '\0';
+}
+
+Texture2D get_thumbnail_from_youtube_link (const char* link, CURL* curl)
+{
+    MemoryBlock image_data = fetch_url(link, curl);
+    if (is_memory_ready(image_data)) {
+        Image image = LoadImageFromMemory(".jpeg", (unsigned char*) image_data.memory, image_data.size);
+        if (IsImageReady(image)) {
+            ImageResize(&image, 151, 85);
+            Texture2D ret = LoadTextureFromImage(image);
+            UnloadImage(image);
+            return ret;
+        }
+        else printf("get_thumbnail_from_youtube_link: failed to load image data\n");
+        unload_memory_block(&image_data);
+    }
+
+    return (Texture){ 0 };
+}
+
 // writes a list of search result nodes to some list
 void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSearchList *search_results, const SortParameter sort_param, const ContentType content_param)
 {
     // append the query to the yt query string
     char query_url[512] = "\0";
     configure_search_url(512, query_url, url_encoded_query, sort_param, content_param);
-    // printf("%s\n", query_url);
 
     // get the page source of this url
     MemoryBlock html = fetch_url(query_url, curl);
@@ -356,9 +413,7 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
                     if(thumbnails && cJSON_IsArray(thumbnails)) {
                         cJSON* first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
                         cJSON *url = cJSON_GetObjectItem(first_thumbnail, "url");
-                        // TODO: make image from thumbnail url
-                        if (url && cJSON_IsString(url)) 
-                            ;
+                        if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
                     }
 
                     // creator of video
@@ -373,7 +428,10 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
 
                     // view count
                     cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
-                    if (viewCountText && cJSON_IsString(viewCountText)) node.views = strdup(viewCountText->valuestring);
+                    if (viewCountText && cJSON_IsString(viewCountText)) {
+                        node.views = malloc(16);
+                        format_youtube_views(viewCountText->valuestring, 16, node.views);
+                    }
 
                     // publish date
                     cJSON *publishedTimeText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "publishedTimeText"), "simpleText");
@@ -405,8 +463,11 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
                         cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
                         cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
                         // TODO: add url to image (need to add 'http:')
-                        if(url && cJSON_IsString(url)) 
-                            ;
+                        if(url && cJSON_IsString(url)) {
+                            char channel_thumbnail_link [128] = "https:";
+                            strcat(channel_thumbnail_link, url->valuestring);
+                            node.thumbnail = get_thumbnail_from_youtube_link(channel_thumbnail_link, curl);
+                        }
                     }
                 }
 
@@ -424,11 +485,21 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
                     cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
                     if (content && cJSON_IsString(content)) node.title = strdup(content->valuestring);
 
-                    // number of videos in playlist
                     cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
                     cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
                     cJSON *primaryThumbnail = collectionThumbnailViewModel ? cJSON_GetObjectItem(collectionThumbnailViewModel, "primaryThumbnail") : NULL;
                     cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
+
+                    // playlist thumbnail
+                    cJSON *image = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "image") : NULL;
+                    cJSON *sources = image ? cJSON_GetObjectItem(image, "sources") : NULL;
+                    if (sources && cJSON_IsArray(sources)) {
+                        cJSON* first_source = cJSON_GetArrayItem(sources, 0);
+                        cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
+                        if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
+                    }
+
+                    // number of videos in playlist
                     cJSON *overlays = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "overlays") : NULL;
                     cJSON *overlay;
                     if (overlays && cJSON_IsArray(overlays)) {
@@ -493,52 +564,221 @@ char* sort_parameter_to_text (const SortParameter sort_parameter)
     return NULL;
 }
 
-void search (const char* query, CURL* curl, YoutubeSearchList *search_results, const SortParameter sort_parameter, const ContentType content_type)
+// Draw text using font inside rectangle limits with support for text selection
+void DrawTextBoxedSelectable(Font font, const char *text, Rectangle rec, float fontSize, float spacing, bool wordWrap, Color tint, int selectStart, int selectLength, Color selectTint, Color selectBackTint)
 {
-    // curl only accepts url encoded queries
-    char* url_encoded_query = curl_easy_escape(curl, query,0);
-    
-    // store the data of the search results to some list
-    get_results_from_query(url_encoded_query, curl, search_results, sort_parameter, content_type);
-    curl_free(url_encoded_query);
+    int length = TextLength(text);  // Total length in bytes of the text, scanned by codepoints in loop
+
+    float textOffsetY = 0;          // Offset between lines (on line break '\n')
+    float textOffsetX = 0.0f;       // Offset X to next character to draw
+
+    float scaleFactor = fontSize/(float)font.baseSize;     // Character rectangle scaling factor
+
+    // Word/character wrapping mechanism variables
+    enum { MEASURE_STATE = 0, DRAW_STATE = 1 };
+    int state = wordWrap? MEASURE_STATE : DRAW_STATE;
+
+    int startLine = -1;         // Index where to begin drawing (where a line begins)
+    int endLine = -1;           // Index where to stop drawing (where a line ends)
+    int lastk = -1;             // Holds last value of the character position
+
+    for (int i = 0, k = 0; i < length; i++, k++)
+    {
+        // Get next codepoint from byte string and glyph index in font
+        int codepointByteCount = 0;
+        int codepoint = GetCodepoint(&text[i], &codepointByteCount);
+        int index = GetGlyphIndex(font, codepoint);
+
+        // NOTE: Normally we exit the decoding sequence as soon as a bad byte is found (and return 0x3f)
+        // but we need to draw all of the bad bytes using the '?' symbol moving one byte
+        if (codepoint == 0x3f) codepointByteCount = 1;
+        i += (codepointByteCount - 1);
+
+        float glyphWidth = 0;
+        if (codepoint != '\n')
+        {
+            glyphWidth = (font.glyphs[index].advanceX == 0) ? font.recs[index].width*scaleFactor : font.glyphs[index].advanceX*scaleFactor;
+
+            if (i + 1 < length) glyphWidth = glyphWidth + spacing;
+        }
+
+        // NOTE: When wordWrap is ON we first measure how much of the text we can draw before going outside of the rec container
+        // We store this info in startLine and endLine, then we change states, draw the text between those two variables
+        // and change states again and again recursively until the end of the text (or until we get outside of the container).
+        // When wordWrap is OFF we don't need the measure state so we go to the drawing state immediately
+        // and begin drawing on the next line before we can get outside the container.
+        if (state == MEASURE_STATE)
+        {
+            // TODO: There are multiple types of spaces in UNICODE, maybe it's a good idea to add support for more
+            // Ref: http://jkorpela.fi/chars/spaces.html
+            if ((codepoint == ' ') || (codepoint == '\t') || (codepoint == '\n')) endLine = i;
+
+            if ((textOffsetX + glyphWidth) > rec.width)
+            {
+                endLine = (endLine < 1)? i : endLine;
+                if (i == endLine) endLine -= codepointByteCount;
+                if ((startLine + codepointByteCount) == endLine) endLine = (i - codepointByteCount);
+
+                state = !state;
+            }
+            else if ((i + 1) == length)
+            {
+                endLine = i;
+                state = !state;
+            }
+            else if (codepoint == '\n') state = !state;
+
+            if (state == DRAW_STATE)
+            {
+                textOffsetX = 0;
+                i = startLine;
+                glyphWidth = 0;
+
+                // Save character position when we switch states
+                int tmp = lastk;
+                lastk = k - 1;
+                k = tmp;
+            }
+        }
+        else
+        {
+            if (codepoint == '\n')
+            {
+                if (!wordWrap)
+                {
+                    textOffsetY += (font.baseSize + font.baseSize / 2.0f) * scaleFactor;
+                    textOffsetX = 0;
+                }
+            }
+            else
+            {
+                if (!wordWrap && ((textOffsetX + glyphWidth) > rec.width))
+                {
+                    textOffsetY += (font.baseSize + font.baseSize / 2.0f) * scaleFactor;
+                    textOffsetX = 0;
+                }
+
+                // When text overflows rectangle height limit, just stop drawing
+                if ((textOffsetY + font.baseSize*scaleFactor) > rec.height) break;
+
+                // Draw selection background
+                bool isGlyphSelected = false;
+                if ((selectStart >= 0) && (k >= selectStart) && (k < (selectStart + selectLength)))
+                {
+                    DrawRectangleRec((Rectangle){ rec.x + textOffsetX - 1, rec.y + textOffsetY, glyphWidth, (float)font.baseSize*scaleFactor }, selectBackTint);
+                    isGlyphSelected = true;
+                }
+
+                // Draw current character glyph
+                if ((codepoint != ' ') && (codepoint != '\t'))
+                {
+                    DrawTextCodepoint(font, codepoint, (Vector2){ rec.x + textOffsetX, rec.y + textOffsetY }, fontSize, isGlyphSelected? selectTint : tint);
+                }
+            }
+
+            if (wordWrap && (i == endLine))
+            {
+                textOffsetY += (font.baseSize + font.baseSize / 2.0f) * scaleFactor;
+                textOffsetX = 0;
+                startLine = endLine;
+                endLine = -1;
+                glyphWidth = 0;
+                selectStart += lastk - k;
+                k = lastk;
+
+                state = !state;
+            }
+        }
+
+        if ((textOffsetX != 0) || (codepoint != ' ')) textOffsetX += glyphWidth;  // avoid leading spaces
+    }
 }
 
-void format_youtube_views(const char* views_str, const int maxlen, char dst[maxlen])
+// Draw text using font inside rectangle limits
+void DrawTextBoxed(Font font, const char *text, Rectangle rec, float fontSize, float spacing, bool wordWrap, Color tint)
 {
-    // remove  all non numeric chars
-    char no_commas[32] = "\0";
-    for (int i = 0, j = 0; views_str[i]; i++) 
-        if (isdigit(views_str[i])) no_commas[j++] = views_str[i];
+    DrawTextBoxedSelectable(font, text, rec, fontSize, spacing, wordWrap, tint, 0, 0, WHITE, WHITE);
+}
 
-    // convert to int
-    long long views = atoll(no_commas);
+// applies some padding to a rectangle
+Rectangle padded_rectangle (const float padding, const Rectangle rect)
+{
+    return (Rectangle) { rect.x + padding, rect.y + padding, rect.width - padding, rect.height - padding };
+}
 
-    // formatting string
+void draw_thumbnail_subtext (const Rectangle container, const Font font, const Color text_color, const int font_size, const int spacing, const int padding, const char* text)
+{
+    const Vector2 text_size = MeasureTextEx(font, text, font_size, spacing);
+    const float width = text_size.x + (padding * 2);
+    const float height = text_size.y + (padding * 2);
+    const Rectangle length_area = {
+        container.x + container.width - width - padding,
+        container.y + container.height - height - padding,
+        width,
+        height
+    };
+
+    DrawRectangleRec(length_area, BLACK);
+    DrawTextBoxed(font, text, padded_rectangle(padding, length_area), font_size, spacing, true, text_color);
+}
+
+void draw_search_result (const Color background_color, const Font font, const Rectangle container, const YoutubeSearchNode* search_result)
+{
+    const Rectangle thumbnail_bounds = { 
+        container.x, 
+        container.y, 
+        container.width * 0.45f, 
+        container.height 
+    };
+
+    const Rectangle title_bounds = {
+        thumbnail_bounds.x + thumbnail_bounds.width,
+        container.y,
+        container.width - thumbnail_bounds.width,
+        container.height * 0.75f
+    };
+
+    const Rectangle subtext_bounds = {
+        thumbnail_bounds.x + thumbnail_bounds.width,
+        title_bounds.y + title_bounds.height,
+        title_bounds.width,
+        container.height - title_bounds.height
+    };
+
+    const int padding = 5;
+    const int font_size = 11;
+    const int spacing = 2;
+    const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
+
+    // content backgound
+    DrawRectangleRec(container, background_color);
     
-    // hundreds
-    if (views < 1e3) snprintf(dst, maxlen, "%lld", views);
-    
-    // thousands
-    else if (views < 1e6) {
-        if (views < 1e5) snprintf(dst, maxlen, "%.1fk", (views / 1e3));
-        else snprintf(dst, maxlen, "%dk", (int)(views / 1e3));
+    // title
+    if (search_result->title)
+        DrawTextBoxed(font, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
+
+    // thumbnail
+    if (IsTextureReady(search_result->thumbnail))
+        DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
+
+    if (search_result->type == CONTENT_TYPE_VIDEO) {
+        if (search_result->date && search_result->views)    
+            DrawTextBoxed(font, TextFormat("%s - %s", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+        
+        draw_thumbnail_subtext(thumbnail_bounds, font, RAYWHITE, font_size, spacing, 5, search_result->length ? search_result->length : "LIVE");
     }
 
-    // millions
-    else if (views < 1e9) {
-        if (views < 1e8) snprintf(dst, maxlen, "%.1fM", (views / 1e6));
-        else snprintf(dst, maxlen, "%dM", (int)(views / 1e6));
-    }
-    
-    // billions
-    else if (views < 1e12) {
-        if (views < 1e11) snprintf(dst, maxlen, "%.1fB", (views / 1e9));
-        else snprintf(dst, maxlen, "%dB", (int)(views / 1e9));
-    }
+    else if (search_result->type == CONTENT_TYPE_CHANNEL) {
+        if (search_result->subs) 
+            DrawTextBoxed(font, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+        
+        draw_thumbnail_subtext(thumbnail_bounds, font, RAYWHITE, font_size, spacing, padding, "CHANNEL");
+    }  
 
-    // trim '.0' if present
-    char* loc = strstr(dst, ".0");
-    if (loc) *loc = '\0';
+    else if (search_result->type == CONTENT_TYPE_PLAYLIST) {
+        if (search_result->video_count) 
+            draw_thumbnail_subtext(thumbnail_bounds, font, RAYWHITE, font_size, spacing, padding, search_result->video_count);
+    }
 }
 
 int main()
@@ -546,7 +786,7 @@ int main()
     // start the curl session
     CURL* curl = curl_easy_init();
     curl_global_init(CURL_GLOBAL_ALL);
-    
+
     YoutubeSearchList search_results = create_youtube_search_list();
     
     // init app
@@ -554,15 +794,30 @@ int main()
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
     InitWindow(1000, 750, "metube");
+    
+    const Font FONT = GetFontDefault();
 
     char text_box_buffer[256] = "\0";
     bool edit_mode = false;
     
     bool show_filter_window = false;
+    
     int current_type= 0;
     int current_sort = 0;
-    ContentType content[] = { CONTENT_TYPE_ANY, CONTENT_TYPE_VIDEO, CONTENT_TYPE_CHANNEL, CONTENT_TYPE_PLAYLIST };
-    SortParameter sort[] = { SORT_PARAM_RELEVANCE, SORT_PARAM_UPLOAD_DATE, SORT_PARAM_VIEW_COUNT, SORT_PARAM_RATING };
+
+    ContentType content[] = { 
+        CONTENT_TYPE_ANY, 
+        CONTENT_TYPE_VIDEO, 
+        CONTENT_TYPE_CHANNEL, 
+        CONTENT_TYPE_PLAYLIST 
+    };
+    
+    SortParameter sort[] = {
+        SORT_PARAM_RELEVANCE,
+        SORT_PARAM_UPLOAD_DATE,
+        SORT_PARAM_VIEW_COUNT,
+        SORT_PARAM_RATING 
+    };
 
     // for scroll panel
     Vector2 scroll = { 10, 10 };
@@ -576,7 +831,7 @@ int main()
             const int padding = 5;
             
             // searching
-            const Rectangle search_bar = { padding, padding, 300, 25 };
+            const Rectangle search_bar = { padding, padding, 350, 25 };
             const Rectangle search_button = { (search_bar.x + search_bar.width + padding), search_bar.y, 50, 25 };
 
             // toggle edit mode engaging or leaving the text box window
@@ -588,7 +843,13 @@ int main()
             // pressing the search button or pressing enter in the search bar will search 
             if ((GuiButton(search_button, "SEARCH") || (text_box_status == 1)) && ((strlen(text_box_buffer) > 0) && !edit_mode)) {
                 if (search_results.count > 0) unload_list(&search_results);
-                search(text_box_buffer, curl, &search_results, sort[current_sort], content[current_type]);
+                
+                // curl only accepts url encoded queries
+                char* url_encoded_query = curl_easy_escape(curl, text_box_buffer,0);
+                
+                // store the data of the search results to some list
+                get_results_from_query(url_encoded_query, curl, &search_results, sort[current_sort], content[current_type]);
+                curl_free(url_encoded_query);
             } 
             
             // filtering
@@ -631,7 +892,7 @@ int main()
             };
             
             // the area of the content drawn in the window
-            const int content_height = 75;
+            const int content_height = 85;
             const Rectangle content_area = {
                 scroll_panel_area.x,
                 scroll_panel_area.y,
@@ -646,14 +907,12 @@ int main()
 
             // clip drawings within the scroll panel
             BeginScissorMode(scroll_panel_area.x, (scroll_panel_area.y + 1), scroll_panel_area.width, (scroll_panel_area.height - 2));
-                const int font_size = 13;
-
                 // the y value of the ith rectangle to be drawn
                 float y_level = scroll_panel_area.y + 1;
                 
                 // for every search result, draw a container and display its data
                 int i = 0;
-                for (YoutubeSearchNode* current = search_results.head; (current && i < search_results.count); current = current->next, i++, y_level += content_height) {
+                for (YoutubeSearchNode* current = search_results.head; current; current = current->next, i++, y_level += content_height) {
                     // area of the ith rectangle
                     const Rectangle content_rect = { 
                         padding + 1, 
@@ -662,54 +921,8 @@ int main()
                         content_height 
                     };
 
-                    // only process rectangles in bounds
-                    if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
-                        const Rectangle thumbnail_area = { 
-                            content_rect.x, 
-                            content_rect.y, 
-                            content_rect.width * 0.40f, 
-                            content_rect.height 
-                        };
-
-                        const Rectangle title_area = {
-                            thumbnail_area.x + thumbnail_area.width,
-                            content_rect.y,
-                            content_rect.width - thumbnail_area.width,
-                            content_rect.height * 0.75f
-                        };
-
-                        const Rectangle statistics_area = {
-                            thumbnail_area.x + thumbnail_area.width,
-                            title_area.y + title_area.height,
-                            title_area.width,
-                            content_height - title_area.height
-                        };
-
-                        // background color
-                        DrawRectangleRec(content_rect, (i % 2 ? WHITE : RAYWHITE));
-                        // DrawRectangleRec(thumbnail_area, MAROON);
-                        // DrawRectangleRec(title_area, GREEN);
-                        // DrawRectangleRec(statistics_area, BLUE);
-
-                        if (current->type == CONTENT_TYPE_VIDEO) {
-                            if (current->title) DrawText(current->title, title_area.x, title_area.y, font_size, BLACK);
-                            if (current->views && current->date) {
-                                char view_count[32];
-                                format_youtube_views(current->views, 32, view_count);
-                                DrawText(TextFormat("%s - %s views", current->date, view_count), statistics_area.x, statistics_area.y, font_size, BLACK);
-                            }
-                            // video thumbnail
-                        }
-                        else if (current->type == CONTENT_TYPE_CHANNEL) {
-                            if (current->title) DrawText(current->title, title_area.x, title_area.y, font_size, BLACK);
-                            if (current->subs) DrawText(current->subs, statistics_area.x, statistics_area.y, font_size, BLACK);
-                            // channel thumb
-                        }   
-                        else if (current->type == CONTENT_TYPE_PLAYLIST) {
-                            if (current->title) DrawText(current->title, title_area.x, title_area.y, font_size, BLACK);
-                            // playlist thumbnail
-                        }
-                    } 
+                    if (CheckCollisionRecs(content_rect, scroll_panel_area))
+                        draw_search_result((i % 2 ? WHITE : RAYWHITE), FONT, content_rect, current);
                 }
             EndScissorMode();
             
@@ -726,10 +939,10 @@ int main()
         return 0;
     }
 }
-
 // to do
-    // text wrap around content rectangles
+    // efficent thumbnail rendering 
     // pagination 
+    // show video information when double clicking video
     // actually play video when pressed
 
 // for read me
