@@ -12,6 +12,8 @@
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
+#define MAX_SEARCH_ITEMS 32
+
 typedef struct {
     size_t size;
     char* memory;
@@ -345,6 +347,61 @@ Texture2D get_thumbnail_from_youtube_link (const char* link, CURL* curl)
     return (Texture){ 0 };
 }
 
+typedef struct {
+    Texture2D thumbnail;
+    char id[64];
+} Cache;
+
+int cache_size = 0;
+Cache cached_items[MAX_SEARCH_ITEMS];
+
+Texture2D get_cached_thumbnail (const char* id) {
+    for (int i = 0; i < MAX_SEARCH_ITEMS; i++) {
+        if (strcmp(cached_items[i].id, id) == 0) return cached_items[i].thumbnail;
+    }
+    
+    return (Texture2D) { 0 };
+}
+
+int bound_index_to_array (const int pos, const int array_size)
+{
+    return (pos + array_size) % array_size;
+}
+
+Texture2D CopyTexture(Texture2D source)
+{
+    Image image = LoadImageFromTexture(source);
+    Texture2D copy = LoadTextureFromImage(image);
+    UnloadImage(image);
+    return copy;
+}
+
+void load_thumbnail (const char* thumbnail_link, CURL *curl, YoutubeSearchNode *search_node)
+{
+    // get cached image if same search result persists through searches
+    const Texture2D cached_thumbnail = get_cached_thumbnail(search_node->id);
+    if (IsTextureReady(cached_thumbnail)) {
+        search_node->thumbnail = CopyTexture(cached_thumbnail);
+    } 
+    
+    // add thumbnail to cache
+    else {
+        // get the new thumbnail
+        search_node->thumbnail = get_thumbnail_from_youtube_link(thumbnail_link, curl);
+        
+        // clear cache information 
+        if (IsTextureReady(cached_items[cache_size].thumbnail)) UnloadTexture(cached_items[cache_size].thumbnail);
+        if (cached_items[cache_size].id[0] != '\0') memset(cached_items, 0, sizeof(cached_items[cache_size].id));
+
+        // assign the new id and thumbnail
+        cached_items[cache_size].thumbnail = CopyTexture(search_node->thumbnail);
+        strcpy(cached_items[cache_size].id, search_node->id);
+        
+        // update index
+        cache_size = bound_index_to_array((cache_size + 1), MAX_SEARCH_ITEMS);
+    }
+}
+
 // writes a list of search result nodes to some list
 void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSearchList *search_results, const SortParameter sort_param, const ContentType content_param)
 {
@@ -413,7 +470,8 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
                     if(thumbnails && cJSON_IsArray(thumbnails)) {
                         cJSON* first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
                         cJSON *url = cJSON_GetObjectItem(first_thumbnail, "url");
-                        if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
+                        
+                        if (url && cJSON_IsString(url)) load_thumbnail(url->valuestring, curl, &node);
                     }
 
                     // creator of video
@@ -466,7 +524,9 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
                         if(url && cJSON_IsString(url)) {
                             char channel_thumbnail_link [128] = "https:";
                             strcat(channel_thumbnail_link, url->valuestring);
-                            node.thumbnail = get_thumbnail_from_youtube_link(channel_thumbnail_link, curl);
+                            // node.thumbnail = get_thumbnail_from_youtube_link(channel_thumbnail_link, curl);
+                            if (url && cJSON_IsString(url)) load_thumbnail(channel_thumbnail_link, curl, &node);
+
                         }
                     }
                 }
@@ -496,7 +556,9 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
                     if (sources && cJSON_IsArray(sources)) {
                         cJSON* first_source = cJSON_GetArrayItem(sources, 0);
                         cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
-                        if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
+                        // if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
+                        if (url && cJSON_IsString(url)) load_thumbnail(url->valuestring, curl, &node);
+                    
                     }
 
                     // number of videos in playlist
@@ -533,11 +595,6 @@ void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSe
 
     if (elements_added == 0) printf("no items were found\n");
     cJSON_Delete(search_json);
-}
-
-int bound_index_to_array (const int pos, const int array_size)
-{
-    return (pos + array_size) % array_size;
 }
 
 char* content_type_to_text (const ContentType content_type)
@@ -932,6 +989,10 @@ int main()
 
     // deinit app
     {
+        // unloading cache textures
+        for (int i = 0; i < MAX_SEARCH_ITEMS; i++) {
+            if (IsTextureReady(cached_items[i].thumbnail)) UnloadTexture(cached_items[cache_size].thumbnail);
+        }
         if (search_results.count > 0) unload_list(&search_results);
         curl_easy_cleanup(curl);
         curl_global_cleanup();
