@@ -7,13 +7,14 @@
 #include <pthread.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
+#include <time.h>
 #include "raylib.h"
 #include "raylib/src/raylib.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
-#define MAX_SEARCH_ITEMS 32
+#define SEARCH_ITEMS_PER_PAGE 20
 
 typedef struct
 {
@@ -151,6 +152,7 @@ typedef struct YoutubeSearchNode {
 	char* date;
 	char* length;
     char* video_count;
+    bool thumbnail_loaded;
     char* thumbnail_link;
     Texture thumbnail;
     ContentType type;
@@ -355,20 +357,17 @@ void format_youtube_views(const char* views_str, const int maxlen, char dst[maxl
     if (loc) *loc = '\0';
 }
 
-Texture2D get_thumbnail_from_youtube_link (const char* link, CURL* curl)
+Texture2D get_thumbnail_from_memory (const MemoryBlock chunk, const float width, const float height)
 {
-    MemoryBlock image_data = fetch_url(link, curl);
-    if (is_memory_ready(image_data)) {
-        Image image = LoadImageFromMemory(".jpeg", (unsigned char*) image_data.memory, image_data.size);
+    if (is_memory_ready(chunk)) {
+        Image image = LoadImageFromMemory(".jpeg", (unsigned char*) chunk.memory, chunk.size);
         if (IsImageReady(image)) {
-            ImageResize(&image, 151, 85);
+            ImageResize(&image, width, height);
             Texture2D ret = LoadTextureFromImage(image);
-            unload_memory_block(&image_data);
             UnloadImage(image);
             return ret;
         }
-        else printf("get_thumbnail_from_youtube_link: failed to load image data\n");
-        unload_memory_block(&image_data);
+        else printf("get_thumbnail_from_memory: failed to load image data\n");
     }
 
     return (Texture){ 0 };
@@ -545,6 +544,49 @@ Rectangle padded_rectangle (const float padding, const Rectangle rect)
     return (Rectangle) { rect.x + padding, rect.y + padding, rect.width - padding, rect.height - padding };
 }
 
+typedef struct ThumbnailData {
+    MemoryBlock data;
+    char id[256];
+    struct ThumbnailData *next;
+} ThumbnailData;
+
+typedef struct {
+    ThumbnailData *head;
+    ThumbnailData *tail;  
+    pthread_mutex_t mutex;
+} ThumbnailList;
+
+ThumbnailList create_thumbnail_list ()
+{
+    ThumbnailList tl;
+    tl.head = tl.tail = NULL;
+    pthread_mutex_init(&tl.mutex, NULL);
+    
+    return tl;
+}
+
+typedef struct {
+    Query query;
+    YoutubeSearchList* search_results;
+    ThumbnailList *thumbnail_list;
+} ThreadArgs;
+
+#define MAX_THREADS 4
+pthread_t threads[MAX_THREADS];
+int current_thread = 0;
+
+void add_thumbnail_node (ThumbnailData *node, ThumbnailList *list) 
+{
+    if (list->head == NULL) {
+        list->head = list->tail = node;
+    }
+    else {
+        node->next = NULL;
+        list->tail->next = node;
+        list->tail = list->tail->next;
+    }
+}
+
 void draw_thumbnail_subtext (const Rectangle container, const Font font, const Color text_color, const int font_size, const int spacing, const int padding, const char* text)
 {
     const Vector2 text_size = MeasureTextEx(font, text, font_size, spacing);
@@ -561,75 +603,26 @@ void draw_thumbnail_subtext (const Rectangle container, const Font font, const C
     DrawTextBoxed(font, text, padded_rectangle(padding, length_area), font_size, spacing, true, text_color);
 }
 
-void draw_search_result (const Color background_color, const Font font, const Rectangle container, const YoutubeSearchNode* search_result)
-{
-    const Rectangle thumbnail_bounds = { 
-        container.x, 
-        container.y, 
-        container.width * 0.45f, 
-        container.height 
-    };
-
-    const Rectangle title_bounds = {
-        thumbnail_bounds.x + thumbnail_bounds.width,
-        container.y,
-        container.width - thumbnail_bounds.width,
-        container.height * 0.75f
-    };
-
-    const Rectangle subtext_bounds = {
-        thumbnail_bounds.x + thumbnail_bounds.width,
-        title_bounds.y + title_bounds.height,
-        title_bounds.width,
-        container.height - title_bounds.height
-    };
-
-    const int padding = 5;
-    const int font_size = 11;
-    const int spacing = 2;
-    const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
-
-    // content backgound
-    DrawRectangleRec(container, background_color);
-    
-    // title
-    if (search_result->title)
-        DrawTextBoxed(font, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
-
-    // thumbnail
-    if (IsTextureReady(search_result->thumbnail))
-        DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
-
-    if (search_result->type == CONTENT_TYPE_VIDEO) {
-        if (search_result->date && search_result->views)    
-            DrawTextBoxed(font, TextFormat("%s - %s", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-        draw_thumbnail_subtext(thumbnail_bounds, font, RAYWHITE, font_size, spacing, 5, search_result->length ? search_result->length : "LIVE");
-    }
-
-    else if (search_result->type == CONTENT_TYPE_CHANNEL) {
-        if (search_result->subs) 
-            DrawTextBoxed(font, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-        
-        draw_thumbnail_subtext(thumbnail_bounds, font, RAYWHITE, font_size, spacing, padding, "CHANNEL");
-    }  
-
-    else if (search_result->type == CONTENT_TYPE_PLAYLIST) {
-        if (search_result->video_count) 
-            draw_thumbnail_subtext(thumbnail_bounds, font, RAYWHITE, font_size, spacing, padding, search_result->video_count);
-    }
-}
-
-typedef struct {
-    Query query;
-    YoutubeSearchList* search_results;
-} ThreadArgs;
+bool search_finished = true;
+bool searching = false;
 
 // writes a list of search result nodes to some list
 void* get_results_from_query(void* args)
 {
+    time_t before = time(NULL);
+    
+    search_finished = false;
+    searching = true;
+
     ThreadArgs* targs = (ThreadArgs *) args;
 
     CURL *curl = curl_easy_init();
+    curl_easy_setopt(curl, CURLOPT_TCP_FASTOPEN, 1L);         // Enable TCP Fast Open
+    curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);          // Disable Nagle's algorithm
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);             // Avoid signals for speed
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);       // Disable redirects (if not needed)
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);       // Skip hostname verification
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0); // Use HTTP/2
 
     if (!curl) {
         printf("curl object could not be created\n");
@@ -639,7 +632,8 @@ void* get_results_from_query(void* args)
 
     // get the query in url encoded format
     char* buff = curl_easy_escape(curl, targs->query.url_encoded_query, 0);
-    memcpy(targs->query.url_encoded_query, buff, strlen(buff));
+    strcpy(targs->query.url_encoded_query, buff);
+    printf("processing %s\n", targs->query.url_encoded_query);
     curl_free(buff);
 
     // append the query to the yt query string
@@ -818,7 +812,7 @@ void* get_results_from_query(void* args)
                     }
                 }
 
-                if (node.id) {
+                if (node.id && (targs->search_results->count < SEARCH_ITEMS_PER_PAGE)) {
                     add_node(targs->search_results, node);
                     elements_added++;
                 }
@@ -826,10 +820,32 @@ void* get_results_from_query(void* args)
         }
     }
 
+    printf("processing thumbnails\n");
+    pthread_mutex_lock(&targs->thumbnail_list->mutex);
+        YoutubeSearchList *search_list = targs->search_results;
+        for (YoutubeSearchNode *node = search_list->head; node; node = node->next) {
+            if (node->thumbnail_link[0] != '\0') {
+                MemoryBlock image_data = fetch_url(node->thumbnail_link, curl);
+                if (is_memory_ready(image_data)) {
+                    ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
+                    thumbnail_data->data = image_data;
+                    strcpy(thumbnail_data->id, node->id);
+                    add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
+                }
+            }
+        }
+    pthread_mutex_unlock(&targs->thumbnail_list->mutex);
+    printf("thumbnails loaded\n");
+
+    search_finished = true;
+    searching = false;
+
     if (elements_added == 0) printf("no items were found\n");
     cJSON_Delete(search_json);
     curl_easy_cleanup(curl);
     free(args);
+    time_t after = time(NULL);
+    printf("search process took %ld seconds\n", (after - before));
     return NULL;
 }
 
@@ -837,38 +853,47 @@ int main()
 {
     // start the curl session
     curl_global_init(CURL_GLOBAL_ALL);
-    CURL* curl = curl_easy_init();
 
+    // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
+
+    // list containing the image data of thumbails from a search
+    ThumbnailList thumbnail_list = create_thumbnail_list();
 
     // init app
     SetTargetFPS(60);
-    // SetTraceLogLevel(LOG_ERROR);
+    SetTraceLogLevel(LOG_ERROR);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
     InitWindow(1000, 750, "metube");
 
     const Font FONT = GetFontDefault();
-
-    // char search_buffer[256] = "\0";
     
+    // flag used to start search thread
     bool search = false;
+    
+    // object containing elements required for the search
+    // the string the user passes in the textbox
+    // how the results shall be sorted
+    // what type of items the user is looking for (videos, channels, playlists, etc.) 
     Query query = { 0 };
+
+    // flag determining "GuiTextBox" functionality
     bool edit_mode = false;
     
+    // data for the filter window
     bool show_filter_window = false;
     
-    int current_type= 0;
-    int current_sort = 0;
-
-    ContentType content[] = { 
+    int current_type = 0;
+    ContentType availible_types[] = { 
         CONTENT_TYPE_ANY, 
         CONTENT_TYPE_VIDEO, 
         CONTENT_TYPE_CHANNEL, 
         CONTENT_TYPE_PLAYLIST 
     };
     
-    SortParameter sort[] = {
+    int current_sort = 0;
+    SortParameter availible_sorts[] = {
         SORT_PARAM_RELEVANCE,
         SORT_PARAM_UPLOAD_DATE,
         SORT_PARAM_VIEW_COUNT,
@@ -879,17 +904,27 @@ int main()
     Vector2 scroll = { 10, 10 };
     Rectangle scrollView = { 0, 0 };
 
+    // the current search result the user has selected
     int current_node = -1;
 
-    while (!WindowShouldClose()) {
-        for (YoutubeSearchNode *node = search_results.head; node; node = node->next) {
-            if (!IsTextureReady(node->thumbnail)) {
-                if (node->thumbnail_link) {
-                    node->thumbnail = get_thumbnail_from_youtube_link(node->thumbnail_link, curl);
-                    if (!IsTextureReady(node->thumbnail)) free(node->thumbnail_link);
+    while (!WindowShouldClose() || searching) {
+        // loading thumbnails gathered from thread
+        pthread_mutex_lock(&thumbnail_list.mutex);
+            while (thumbnail_list.head) {
+                ThumbnailData *thumbnail_data = thumbnail_list.head;
+
+                for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
+                    if ((strcmp(thumbnail_data->id, search_node->id) == 0)) {
+                        search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
+                    }
                 }
+
+                // delete node from thumbnail list
+                thumbnail_list.head = thumbnail_list.head->next;
+                unload_memory_block(&thumbnail_data->data);
+                free(thumbnail_data);
             }
-        }
+        pthread_mutex_unlock(&thumbnail_list.mutex);
         
         if (search) {
             search = false;
@@ -898,24 +933,27 @@ int main()
             if (search_results.count > 0) unload_list(&search_results);
             current_node = -1;
             
-            // store the data of the search results to some list
+            // configure thread arguements for routine
             ThreadArgs *targs = malloc(sizeof(ThreadArgs));
             targs->query = query;
             targs->search_results = &search_results;
+            targs->thumbnail_list = &thumbnail_list;
 
-            pthread_t thread;
-            pthread_create(&thread, NULL, get_results_from_query, targs);
-            pthread_detach(thread);
+            // get the results of this query in this thread
+            pthread_create(&threads[current_thread], NULL, get_results_from_query, targs);
+            pthread_detach(threads[current_thread]);
+
+            // update thread pool
+            current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
         }
 
-        
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
-            // space nearly every element gives each other
+            // the space elements gives one another
             const int padding = 5;
             
-            // searching
+            // searching UI
             const Rectangle search_bar = { padding, padding, 350, 25 };
             const Rectangle search_button = { (search_bar.x + search_bar.width + padding), search_bar.y, 50, 25 };
 
@@ -932,13 +970,14 @@ int main()
 
             // pressing the search button or pressing enter in the search bar will search 
             if (start_search && query_entered) {
-                query.sort = sort[current_sort];
-                query.type = content[current_type];
+                query.sort = availible_sorts[current_sort];
+                query.type = availible_types[current_type];
                 
-                search = true;
+                // only search when last search is done 
+                search = (search_finished);
             }
             
-            // filtering
+            // filtering UI
             const Rectangle filter_button = { 
                 search_button.x + search_button.width + padding, 
                 padding, 
@@ -946,13 +985,13 @@ int main()
                 25 
             };
             
-            // toggle filter window on button press
+            // toggle filter window on press
             if (GuiButton(filter_button, "FILTER")) show_filter_window = !show_filter_window;
             
             const Rectangle filter_window_area = { padding, (search_bar.y + search_bar.height + padding), search_bar.width, 50 };
             if (show_filter_window) {
                 DrawRectangleLinesEx(filter_window_area, 1, GRAY);
-                const int font = 11;
+                const int font_size = 11;
 
                 // buttons to switch filter params (the type of content and how they will be sorted)
                 const char* button_text = "SWITCH";
@@ -964,12 +1003,12 @@ int main()
                 if (GuiButton(content_type_button, button_text)) current_type = bound_index_to_array((current_type + 1), 4);
 
                 // filters availible
-                DrawText("ORDER:", (filter_window_area.x + padding), (sort_type_button.y + padding), font, BLACK);
-                DrawText("TYPE:", (filter_window_area.x + padding), (content_type_button.y + padding), font, BLACK);
+                DrawTextEx(FONT, "ORDER:", (Vector2){ filter_window_area.x + padding, sort_type_button.y + padding }, font_size, 2, BLACK);
+                DrawTextEx(FONT, "TYPE:", (Vector2){ filter_window_area.x + padding, content_type_button.y + padding }, font_size, 2, BLACK);
                 
                 // current param value
-                DrawText(content_type_to_text(content[current_type]), ((filter_window_area.x + filter_window_area.width) * 0.4f), (content_type_button.y + padding), font, BLACK);
-                DrawText(sort_parameter_to_text(sort[current_sort]), ((filter_window_area.x + filter_window_area.width) * 0.4f), (sort_type_button.y + padding), font, BLACK);
+                DrawTextEx(FONT, content_type_to_text(availible_types[current_type]), (Vector2){ ((filter_window_area.x + filter_window_area.width) * 0.4f), (content_type_button.y + padding) }, font_size, 2, BLACK);
+                DrawTextEx(FONT, sort_parameter_to_text(availible_sorts[current_sort]), (Vector2){ ((filter_window_area.x + filter_window_area.width) * 0.4f), (sort_type_button.y + padding) }, font_size, 2, BLACK);
             }
 
             // display search results
@@ -983,12 +1022,12 @@ int main()
             };
             
             // the area of the content drawn in the window
-            const int content_height = 85;
+            const int content_height = 100;
             const Rectangle content_area = {
                 scroll_panel_area.x,
                 scroll_panel_area.y,
                 scroll_panel_area.width,
-                search_results.count * content_height,
+                content_height * (search_results.count ? search_results.count : SEARCH_ITEMS_PER_PAGE),
             };
 
             // the width of the scrollbar is only felt when it's visible
@@ -997,21 +1036,27 @@ int main()
             GuiScrollPanel(scroll_panel_area, NULL, content_area, &scroll, &scrollView);
 
             // clip drawings within the scroll panel
-            BeginScissorMode(scroll_panel_area.x, (scroll_panel_area.y + 1), scroll_panel_area.width, (scroll_panel_area.height - 2));
+            BeginScissorMode((scroll_panel_area.x + 1), (scroll_panel_area.y + 1), scroll_panel_area.width, (scroll_panel_area.height - 2));
                 // the y value of the ith rectangle to be drawn
-                float y_level = scroll_panel_area.y + 1;
+                float y_level = scroll_panel_area.y;
                 
                 // for every search result, draw a container and display its data
                 int i = 0;
-                for (YoutubeSearchNode* current = search_results.head; current; current = current->next, i++, y_level += content_height) {
+                for (YoutubeSearchNode* search_result = search_results.head; search_result; search_result = search_result->next, i++, y_level += content_height) {
                     // area of the ith rectangle
                     const Rectangle content_rect = { 
-                        padding + 1, 
+                        padding, 
                         y_level + scroll.y, // scroll is added so moving the scrollbar offsets all elements
                         scroll_panel_area.width - SCROLLBAR_WIDTH,
                         content_height 
                     };
 
+                    const Vector2 mouse_position = GetMousePosition();
+                    if (CheckCollisionPointRec(mouse_position, scroll_panel_area) && CheckCollisionPointRec(mouse_position, content_rect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        current_node = i;
+                    }
+
+                    // only process items that are onscreen
                     if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
                         // if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), content_rect)) {
                         //     if (current_node == i) {
@@ -1028,12 +1073,66 @@ int main()
                         //     else current_node = i;
                         // }
 
-                        Color c;
-                        if (i == current_node) c = SKYBLUE;
+                        const Rectangle thumbnail_bounds = { 
+                            content_rect.x, 
+                            content_rect.y, 
+                            content_rect.width * 0.45f, 
+                            content_rect.height 
+                        };
+
+                        const Rectangle title_bounds = {
+                            thumbnail_bounds.x + thumbnail_bounds.width,
+                            content_rect.y,
+                            content_rect.width - thumbnail_bounds.width,
+                            content_rect.height * 0.75f
+                        };
+
+                        const Rectangle subtext_bounds = {
+                            thumbnail_bounds.x + thumbnail_bounds.width,
+                            title_bounds.y + title_bounds.height,
+                            title_bounds.width,
+                            content_rect.height - title_bounds.height
+                        };
+
+                        const int padding = 5;
+                        const int font_size = 11;
+                        const int spacing = 2;
+                        const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
+
+                        Color background_color;
+                        if (i == current_node) background_color = SKYBLUE;
                         else {
-                            c = (i % 2) ? WHITE : RAYWHITE;
+                            background_color = (i % 2) ? WHITE : RAYWHITE;
                         }
-                        draw_search_result(c, FONT, content_rect, current);
+
+                        // content backgound
+                        DrawRectangleRec(content_rect, background_color);
+                        
+                        // title
+                        if (search_result->title)
+                            DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
+
+                        // thumbnail
+                        if (IsTextureReady(search_result->thumbnail))
+                            DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
+
+                        if (search_result->type == CONTENT_TYPE_VIDEO) {
+                            if (search_result->date && search_result->views)    
+                                DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, search_result->length ? search_result->length : "LIVE");
+                        }
+
+                        else if (search_result->type == CONTENT_TYPE_CHANNEL) {
+                            if (search_result->subs) 
+                                DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                            
+                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
+                        }  
+
+                        else if (search_result->type == CONTENT_TYPE_PLAYLIST) {
+                            if (search_result->video_count) 
+                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
+                        }
                     }
                 }
             EndScissorMode();
@@ -1044,19 +1143,18 @@ int main()
 
     // deinit app
     {
+        pthread_mutex_destroy(&thumbnail_list.mutex);
         if (search_results.count > 0) unload_list(&search_results);
-        curl_easy_cleanup(curl);
         curl_global_cleanup();
         CloseWindow();
         return 0;
     }
 }
 // to do
-    // make cached thumbnails a linked list 
-    // efficent thumbnail rendering 
-    // pagination 
     // show video information when double clicking video
     // actually play video when pressed
+    // loading thumbnails halts the program
+    // pagination 
 
 // for read me
     // need curl, cjson, and raylib/raygui
