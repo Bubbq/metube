@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,23 @@
 #include "raygui.h"
 
 #define MAX_SEARCH_ITEMS 32
+
+typedef struct
+{
+	double startTime;
+	double lifeTime;
+} Timer;
+
+void start_timer(Timer *timer, double lifetime) 
+{
+	timer->startTime = GetTime();
+	timer->lifeTime = lifetime;
+}
+
+bool is_timer_done(Timer timer)
+{ 
+	return (GetTime() - timer.startTime) >= timer.lifeTime; 
+} 
 
 typedef struct {
     size_t size;
@@ -133,6 +151,7 @@ typedef struct YoutubeSearchNode {
 	char* date;
 	char* length;
     char* video_count;
+    char* thumbnail_link;
     Texture thumbnail;
     ContentType type;
     struct YoutubeSearchNode* next;
@@ -197,6 +216,7 @@ void unload_node(YoutubeSearchNode* node)
     if (node->length) free(node->length);
     if (node->video_count) free(node->video_count);
     if (node->author) free(node->author);
+    if (node->thumbnail_link) free(node->thumbnail_link);
     if (IsTextureReady(node->thumbnail)) UnloadTexture(node->thumbnail);
 
     free(node);
@@ -260,9 +280,15 @@ char* extract_yt_data(const char* html)
     return ret;
 }
 
-void configure_search_url(const int maxlen, char search_url[maxlen], const char* query, const SortParameter sort_param, const ContentType content_param)
+typedef struct {
+    char url_encoded_query[256];
+    SortParameter sort;
+    ContentType type;
+} Query;
+
+void configure_search_url(const int maxlen, char search_url[maxlen], const Query query)
 {
-    snprintf(search_url, maxlen, "https://www.youtube.com/results?search_query=%s&sp=", query);
+    snprintf(search_url, maxlen, "https://www.youtube.com/results?search_query=%s&sp=", query.url_encoded_query);
 
     // possible sorting params
     const char* relevance = "CAA";
@@ -270,7 +296,7 @@ void configure_search_url(const int maxlen, char search_url[maxlen], const char*
     const char* popularity = "CAM";
     const char* rating = "CAE";
     
-    switch (sort_param) {
+    switch (query.sort) {
         case SORT_PARAM_RELEVANCE: strcat(search_url, relevance); break;
         case SORT_PARAM_UPLOAD_DATE: strcat(search_url, upload_date); break;
         case SORT_PARAM_VIEW_COUNT: strcat(search_url, popularity); break;
@@ -283,7 +309,7 @@ void configure_search_url(const int maxlen, char search_url[maxlen], const char*
     const char* playlist = "SAhAD";
     const char* none = "%253D";
 
-    switch (content_param) {
+    switch (query.type) {
         case CONTENT_TYPE_VIDEO: strcat(search_url, video); break;
         case CONTENT_TYPE_CHANNEL: strcat(search_url, channel); break;
         case CONTENT_TYPE_PLAYLIST: strcat(search_url, playlist); break;
@@ -337,6 +363,7 @@ Texture2D get_thumbnail_from_youtube_link (const char* link, CURL* curl)
         if (IsImageReady(image)) {
             ImageResize(&image, 151, 85);
             Texture2D ret = LoadTextureFromImage(image);
+            unload_memory_block(&image_data);
             UnloadImage(image);
             return ret;
         }
@@ -347,254 +374,9 @@ Texture2D get_thumbnail_from_youtube_link (const char* link, CURL* curl)
     return (Texture){ 0 };
 }
 
-typedef struct {
-    Texture2D thumbnail;
-    char id[64];
-} Cache;
-
-int cache_size = 0;
-Cache cached_items[MAX_SEARCH_ITEMS];
-
-Texture2D get_cached_thumbnail (const char* id) {
-    for (int i = 0; i < MAX_SEARCH_ITEMS; i++) {
-        if (strcmp(cached_items[i].id, id) == 0) return cached_items[i].thumbnail;
-    }
-    
-    return (Texture2D) { 0 };
-}
-
 int bound_index_to_array (const int pos, const int array_size)
 {
     return (pos + array_size) % array_size;
-}
-
-Texture2D CopyTexture(Texture2D source)
-{
-    Image image = LoadImageFromTexture(source);
-    Texture2D copy = LoadTextureFromImage(image);
-    UnloadImage(image);
-    return copy;
-}
-
-void load_thumbnail (const char* thumbnail_link, CURL *curl, YoutubeSearchNode *search_node)
-{
-    // get cached image if same search result persists through searches
-    const Texture2D cached_thumbnail = get_cached_thumbnail(search_node->id);
-    if (IsTextureReady(cached_thumbnail)) {
-        search_node->thumbnail = CopyTexture(cached_thumbnail);
-    } 
-    
-    // add thumbnail to cache
-    else {
-        // get the new thumbnail
-        search_node->thumbnail = get_thumbnail_from_youtube_link(thumbnail_link, curl);
-        
-        // clear cache information 
-        if (IsTextureReady(cached_items[cache_size].thumbnail)) UnloadTexture(cached_items[cache_size].thumbnail);
-        if (cached_items[cache_size].id[0] != '\0') memset(cached_items, 0, sizeof(cached_items[cache_size].id));
-
-        // assign the new id and thumbnail
-        cached_items[cache_size].thumbnail = CopyTexture(search_node->thumbnail);
-        strcpy(cached_items[cache_size].id, search_node->id);
-        
-        // update index
-        cache_size = bound_index_to_array((cache_size + 1), MAX_SEARCH_ITEMS);
-    }
-}
-
-// writes a list of search result nodes to some list
-void get_results_from_query(const char* url_encoded_query, CURL *curl, YoutubeSearchList *search_results, const SortParameter sort_param, const ContentType content_param)
-{
-    // append the query to the yt query string
-    char query_url[512] = "\0";
-    configure_search_url(512, query_url, url_encoded_query, sort_param, content_param);
-
-    // get the page source of this url
-    MemoryBlock html = fetch_url(query_url, curl);
-    if (!is_memory_ready(html)) return;
-
-    // extract search result data
-    char* cjson_data = extract_yt_data(html.memory);
-    unload_memory_block(&html);
-    if (!cjson_data) return;
-
-    // get json obj
-    cJSON* search_json = cJSON_Parse(cjson_data);
-    free(cjson_data);
-    if (!search_json) {
-        printf("Error: %s\n", cJSON_GetErrorPtr());
-        return;
-    }
-
-    int elements_added = 0;
-    cJSON *contents = cJSON_GetObjectItem(search_json, "contents");
-    cJSON *twoColumnSearchResultsRenderer = contents ? cJSON_GetObjectItem(contents, "twoColumnSearchResultsRenderer") : NULL;
-    cJSON *primaryContents = twoColumnSearchResultsRenderer ? cJSON_GetObjectItem(twoColumnSearchResultsRenderer, "primaryContents") : NULL;
-    cJSON *sectionListRenderer = primaryContents ? cJSON_GetObjectItem(primaryContents, "sectionListRenderer") : NULL;
-    cJSON *sections = sectionListRenderer ? cJSON_GetObjectItem(sectionListRenderer, "contents") : NULL;
-
-    if (sections && cJSON_IsArray(sections)) {
-        cJSON *first_section = cJSON_GetArrayItem(sections, 0);
-        cJSON *itemSectionRenderer = first_section ? cJSON_GetObjectItem(first_section, "itemSectionRenderer") : NULL;
-        cJSON *contents = itemSectionRenderer ? cJSON_GetObjectItem(itemSectionRenderer, "contents") : NULL;
-        if (contents && cJSON_IsArray(contents)) {
-            // loop through every item and get the node equivalent 
-            cJSON *item;
-            cJSON_ArrayForEach (item, contents) {
-                YoutubeSearchNode node = { 0 };
-                cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
-                cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");
-                cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel");
-
-                if (videoRenderer) {
-                    node.type = CONTENT_TYPE_VIDEO;
-
-                    // video id
-                    cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
-                    if (videoId && cJSON_IsString(videoId)) node.id = strdup(videoId->valuestring);
-
-                    // video title
-                    cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
-                    cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
-                    if (runs && cJSON_IsArray(runs)) {
-                        cJSON* first_run = cJSON_GetArrayItem(runs, 0);
-                        if (first_run) {
-                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
-                            if (text && cJSON_IsString(text)) node.title = strdup(text->valuestring);
-                        }
-                    }
-
-                    // thumbnail link
-                    cJSON* thumbnail = cJSON_GetObjectItem(videoRenderer, "thumbnail");
-                    cJSON* thumbnails = thumbnail ? cJSON_GetObjectItem(thumbnail, "thumbnails") : NULL;
-                    if(thumbnails && cJSON_IsArray(thumbnails)) {
-                        cJSON* first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
-                        cJSON *url = cJSON_GetObjectItem(first_thumbnail, "url");
-                        
-                        if (url && cJSON_IsString(url)) load_thumbnail(url->valuestring, curl, &node);
-                    }
-
-                    // creator of video
-                    cJSON *ownerTextRuns = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "ownerText"), "runs");
-                    if (ownerTextRuns && cJSON_IsArray(ownerTextRuns)) {
-                        cJSON *first_run = cJSON_GetArrayItem(ownerTextRuns, 0);
-                        if (first_run) {
-                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
-                            if (text && cJSON_IsString(text)) node.author = strdup(text->valuestring);
-                        }
-                    }
-
-                    // view count
-                    cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
-                    if (viewCountText && cJSON_IsString(viewCountText)) {
-                        node.views = malloc(16);
-                        format_youtube_views(viewCountText->valuestring, 16, node.views);
-                    }
-
-                    // publish date
-                    cJSON *publishedTimeText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "publishedTimeText"), "simpleText");
-                    if (publishedTimeText && cJSON_IsString(publishedTimeText)) node.date = strdup(publishedTimeText->valuestring);
-
-                    // video length
-                    cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
-                    if (lengthText && cJSON_IsString(lengthText)) node.length = strdup(lengthText->valuestring);
-                }
-
-                else if (channelRenderer) {
-                    node.type = CONTENT_TYPE_CHANNEL;
-
-                    // channel id
-                    cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
-                    if (channelId && cJSON_IsString(channelId)) node.id = strdup(channelId->valuestring);
-
-                    // channel title
-                    cJSON *title = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "title"), "simpleText");
-                    if (title && cJSON_IsString(title)) node.title = strdup(title->valuestring);
-
-                    // subscriber count
-                    cJSON *subCount = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "videoCountText"), "simpleText");
-                    if(subCount && cJSON_IsString(subCount)) node.subs = strdup(subCount->valuestring);
-
-                    // thumbnail link
-                    cJSON *thumbnails = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "thumbnail"), "thumbnails");
-                    if (thumbnails && cJSON_IsArray(thumbnails)) {
-                        cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
-                        cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
-                        // TODO: add url to image (need to add 'http:')
-                        if(url && cJSON_IsString(url)) {
-                            char channel_thumbnail_link [128] = "https:";
-                            strcat(channel_thumbnail_link, url->valuestring);
-                            // node.thumbnail = get_thumbnail_from_youtube_link(channel_thumbnail_link, curl);
-                            if (url && cJSON_IsString(url)) load_thumbnail(channel_thumbnail_link, curl, &node);
-
-                        }
-                    }
-                }
-
-                else if (lockupViewModel) {
-                    node.type = CONTENT_TYPE_PLAYLIST;
-
-                    // playlist id
-                    cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
-                    if (contentId && cJSON_IsString(contentId)) node.id = strdup(contentId->valuestring);
-
-                    // playlist title
-                    cJSON *metadata = cJSON_GetObjectItem(lockupViewModel, "metadata");
-                    cJSON *lockupMetadataViewModel = metadata ? cJSON_GetObjectItem(metadata, "lockupMetadataViewModel") : NULL;
-                    cJSON *title = lockupMetadataViewModel ? cJSON_GetObjectItem(lockupMetadataViewModel, "title") : NULL;
-                    cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
-                    if (content && cJSON_IsString(content)) node.title = strdup(content->valuestring);
-
-                    cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
-                    cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
-                    cJSON *primaryThumbnail = collectionThumbnailViewModel ? cJSON_GetObjectItem(collectionThumbnailViewModel, "primaryThumbnail") : NULL;
-                    cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
-
-                    // playlist thumbnail
-                    cJSON *image = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "image") : NULL;
-                    cJSON *sources = image ? cJSON_GetObjectItem(image, "sources") : NULL;
-                    if (sources && cJSON_IsArray(sources)) {
-                        cJSON* first_source = cJSON_GetArrayItem(sources, 0);
-                        cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
-                        // if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
-                        if (url && cJSON_IsString(url)) load_thumbnail(url->valuestring, curl, &node);
-                    
-                    }
-
-                    // number of videos in playlist
-                    cJSON *overlays = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "overlays") : NULL;
-                    cJSON *overlay;
-                    if (overlays && cJSON_IsArray(overlays)) {
-                        cJSON_ArrayForEach (overlay, overlays) {
-                            cJSON *thumbnailOverlayBadgeViewModel = cJSON_GetObjectItem(overlay, "thumbnailOverlayBadgeViewModel");
-                            cJSON *thumbnailBadges = thumbnailOverlayBadgeViewModel ? cJSON_GetObjectItem(thumbnailOverlayBadgeViewModel, "thumbnailBadges") : NULL;
-                            if (thumbnailBadges && cJSON_IsArray(thumbnailBadges)) {
-                                cJSON *thumbnailBadge;
-                                cJSON_ArrayForEach (thumbnailBadge, thumbnailBadges) {
-                                    cJSON *thumbnailBadgeViewModel = cJSON_GetObjectItem(thumbnailBadge, "thumbnailBadgeViewModel");
-                                    if (thumbnailBadgeViewModel) {
-                                        cJSON *text = cJSON_GetObjectItem(thumbnailBadgeViewModel, "text");
-                                        if (text && cJSON_IsString(text)) {
-                                            node.video_count = strdup(text->valuestring);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (node.id) {
-                    add_node(search_results, node);
-                    elements_added++;
-                }
-            }
-        }
-    }
-
-    if (elements_added == 0) printf("no items were found\n");
-    cJSON_Delete(search_json);
 }
 
 char* content_type_to_text (const ContentType content_type)
@@ -775,7 +557,7 @@ void draw_thumbnail_subtext (const Rectangle container, const Font font, const C
         height
     };
 
-    DrawRectangleRec(length_area, BLACK);
+    DrawRectangleRec(length_area, Fade(BLACK, 0.7));
     DrawTextBoxed(font, text, padded_rectangle(padding, length_area), font_size, spacing, true, text_color);
 }
 
@@ -821,7 +603,6 @@ void draw_search_result (const Color background_color, const Font font, const Re
     if (search_result->type == CONTENT_TYPE_VIDEO) {
         if (search_result->date && search_result->views)    
             DrawTextBoxed(font, TextFormat("%s - %s", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-        
         draw_thumbnail_subtext(thumbnail_bounds, font, RAYWHITE, font_size, spacing, 5, search_result->length ? search_result->length : "LIVE");
     }
 
@@ -838,23 +619,241 @@ void draw_search_result (const Color background_color, const Font font, const Re
     }
 }
 
+typedef struct {
+    Query query;
+    YoutubeSearchList* search_results;
+} ThreadArgs;
+
+// writes a list of search result nodes to some list
+void* get_results_from_query(void* args)
+{
+    ThreadArgs* targs = (ThreadArgs *) args;
+
+    CURL *curl = curl_easy_init();
+
+    if (!curl) {
+        printf("curl object could not be created\n");
+        free(targs);
+        return NULL;
+    }
+
+    // get the query in url encoded format
+    char* buff = curl_easy_escape(curl, targs->query.url_encoded_query, 0);
+    memcpy(targs->query.url_encoded_query, buff, strlen(buff));
+    curl_free(buff);
+
+    // append the query to the yt query string
+    char url[512] = "\0";
+    configure_search_url(512, url, targs->query);
+
+    // get the page source of this url
+    MemoryBlock html = fetch_url(url, curl);
+
+    if (!is_memory_ready(html)) return NULL;
+
+    // extract search result data
+    char* cjson_data = extract_yt_data(html.memory);
+    unload_memory_block(&html);
+    if (!cjson_data) return NULL;
+
+    // get json obj
+    cJSON* search_json = cJSON_Parse(cjson_data);
+    free(cjson_data);
+    if (!search_json) {
+        printf("Error: %s\n", cJSON_GetErrorPtr());
+        return NULL;
+    }
+
+    int elements_added = 0;
+    cJSON *contents = cJSON_GetObjectItem(search_json, "contents");
+    cJSON *twoColumnSearchResultsRenderer = contents ? cJSON_GetObjectItem(contents, "twoColumnSearchResultsRenderer") : NULL;
+    cJSON *primaryContents = twoColumnSearchResultsRenderer ? cJSON_GetObjectItem(twoColumnSearchResultsRenderer, "primaryContents") : NULL;
+    cJSON *sectionListRenderer = primaryContents ? cJSON_GetObjectItem(primaryContents, "sectionListRenderer") : NULL;
+    cJSON *sections = sectionListRenderer ? cJSON_GetObjectItem(sectionListRenderer, "contents") : NULL;
+
+    if (sections && cJSON_IsArray(sections)) {
+        cJSON *first_section = cJSON_GetArrayItem(sections, 0);
+        cJSON *itemSectionRenderer = first_section ? cJSON_GetObjectItem(first_section, "itemSectionRenderer") : NULL;
+        cJSON *contents = itemSectionRenderer ? cJSON_GetObjectItem(itemSectionRenderer, "contents") : NULL;
+        if (contents && cJSON_IsArray(contents)) {
+            // loop through every item and get the node equivalent 
+            cJSON *item;
+            cJSON_ArrayForEach (item, contents) {
+                YoutubeSearchNode node = { 0 };
+                cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
+                cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");
+                cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel");
+
+                if (videoRenderer) {
+                    node.type = CONTENT_TYPE_VIDEO;
+
+                    // video id
+                    cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
+                    if (videoId && cJSON_IsString(videoId)) node.id = strdup(videoId->valuestring);
+
+                    // video title
+                    cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
+                    cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
+                    if (runs && cJSON_IsArray(runs)) {
+                        cJSON* first_run = cJSON_GetArrayItem(runs, 0);
+                        if (first_run) {
+                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
+                            if (text && cJSON_IsString(text)) node.title = strdup(text->valuestring);
+                        }
+                    }
+
+                    // thumbnail link
+                    if (node.id) {
+                        char video_thumbnail_url[128];
+                        snprintf(video_thumbnail_url, sizeof(video_thumbnail_url), "https://img.youtube.com/vi/%s/mqdefault.jpg", node.id);
+                        node.thumbnail_link = strdup(video_thumbnail_url);
+                        // node.thumbnail = get_thumbnail_from_youtube_link(video_thumbnail_url, curl);
+                    }
+
+                    // creator of video
+                    cJSON *ownerTextRuns = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "ownerText"), "runs");
+                    if (ownerTextRuns && cJSON_IsArray(ownerTextRuns)) {
+                        cJSON *first_run = cJSON_GetArrayItem(ownerTextRuns, 0);
+                        if (first_run) {
+                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
+                            if (text && cJSON_IsString(text)) node.author = strdup(text->valuestring);
+                        }
+                    }
+
+                    // view count
+                    cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
+                    if (viewCountText && cJSON_IsString(viewCountText)) {
+                        node.views = malloc(16);
+                        format_youtube_views(viewCountText->valuestring, 16, node.views);
+                    }
+
+                    // publish date
+                    cJSON *publishedTimeText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "publishedTimeText"), "simpleText");
+                    if (publishedTimeText && cJSON_IsString(publishedTimeText)) node.date = strdup(publishedTimeText->valuestring);
+
+                    // video length
+                    cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
+                    if (lengthText && cJSON_IsString(lengthText)) node.length = strdup(lengthText->valuestring);
+                }
+
+                else if (channelRenderer) {
+                    node.type = CONTENT_TYPE_CHANNEL;
+
+                    // channel id
+                    cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
+                    if (channelId && cJSON_IsString(channelId)) node.id = strdup(channelId->valuestring);
+
+                    // channel title
+                    cJSON *title = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "title"), "simpleText");
+                    if (title && cJSON_IsString(title)) node.title = strdup(title->valuestring);
+
+                    // subscriber count
+                    cJSON *subCount = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "videoCountText"), "simpleText");
+                    if(subCount && cJSON_IsString(subCount)) node.subs = strdup(subCount->valuestring);
+
+                    // thumbnail link
+                    cJSON *thumbnails = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "thumbnail"), "thumbnails");
+                    if (thumbnails && cJSON_IsArray(thumbnails)) {
+                        cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
+                        cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
+                        if(url && cJSON_IsString(url)) {
+                            char channel_thumbnail_link [128] = "https:";
+                            strcat(channel_thumbnail_link, url->valuestring);
+                            // if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(channel_thumbnail_link, curl);
+                            if (url && cJSON_IsString(url)) node.thumbnail_link = strdup(channel_thumbnail_link);
+                        }
+                    }
+                }
+
+                else if (lockupViewModel) {
+                    node.type = CONTENT_TYPE_PLAYLIST;
+
+                    // playlist id
+                    cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
+                    if (contentId && cJSON_IsString(contentId)) node.id = strdup(contentId->valuestring);
+
+                    // playlist title
+                    cJSON *metadata = cJSON_GetObjectItem(lockupViewModel, "metadata");
+                    cJSON *lockupMetadataViewModel = metadata ? cJSON_GetObjectItem(metadata, "lockupMetadataViewModel") : NULL;
+                    cJSON *title = lockupMetadataViewModel ? cJSON_GetObjectItem(lockupMetadataViewModel, "title") : NULL;
+                    cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
+                    if (content && cJSON_IsString(content)) node.title = strdup(content->valuestring);
+
+                    cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
+                    cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
+                    cJSON *primaryThumbnail = collectionThumbnailViewModel ? cJSON_GetObjectItem(collectionThumbnailViewModel, "primaryThumbnail") : NULL;
+                    cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
+
+                    // playlist thumbnail
+                    cJSON *image = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "image") : NULL;
+                    cJSON *sources = image ? cJSON_GetObjectItem(image, "sources") : NULL;
+                    if (sources && cJSON_IsArray(sources)) {
+                        cJSON* first_source = cJSON_GetArrayItem(sources, 0);
+                        cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
+                        // if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
+                        if (url && cJSON_IsString(url)) node.thumbnail_link = strdup(url->valuestring);
+                    }
+
+                    // number of videos in playlist
+                    cJSON *overlays = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "overlays") : NULL;
+                    cJSON *overlay;
+                    if (overlays && cJSON_IsArray(overlays)) {
+                        cJSON_ArrayForEach (overlay, overlays) {
+                            cJSON *thumbnailOverlayBadgeViewModel = cJSON_GetObjectItem(overlay, "thumbnailOverlayBadgeViewModel");
+                            cJSON *thumbnailBadges = thumbnailOverlayBadgeViewModel ? cJSON_GetObjectItem(thumbnailOverlayBadgeViewModel, "thumbnailBadges") : NULL;
+                            if (thumbnailBadges && cJSON_IsArray(thumbnailBadges)) {
+                                cJSON *thumbnailBadge;
+                                cJSON_ArrayForEach (thumbnailBadge, thumbnailBadges) {
+                                    cJSON *thumbnailBadgeViewModel = cJSON_GetObjectItem(thumbnailBadge, "thumbnailBadgeViewModel");
+                                    if (thumbnailBadgeViewModel) {
+                                        cJSON *text = cJSON_GetObjectItem(thumbnailBadgeViewModel, "text");
+                                        if (text && cJSON_IsString(text)) {
+                                            node.video_count = strdup(text->valuestring);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (node.id) {
+                    add_node(targs->search_results, node);
+                    elements_added++;
+                }
+            }
+        }
+    }
+
+    if (elements_added == 0) printf("no items were found\n");
+    cJSON_Delete(search_json);
+    curl_easy_cleanup(curl);
+    free(args);
+    return NULL;
+}
+
 int main()
 {
     // start the curl session
-    CURL* curl = curl_easy_init();
     curl_global_init(CURL_GLOBAL_ALL);
+    CURL* curl = curl_easy_init();
 
     YoutubeSearchList search_results = create_youtube_search_list();
-    
+
     // init app
     SetTargetFPS(60);
+    // SetTraceLogLevel(LOG_ERROR);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
     InitWindow(1000, 750, "metube");
-    
+
     const Font FONT = GetFontDefault();
 
-    char text_box_buffer[256] = "\0";
+    // char search_buffer[256] = "\0";
+    
+    bool search = false;
+    Query query = { 0 };
     bool edit_mode = false;
     
     bool show_filter_window = false;
@@ -880,7 +879,36 @@ int main()
     Vector2 scroll = { 10, 10 };
     Rectangle scrollView = { 0, 0 };
 
+    int current_node = -1;
+
     while (!WindowShouldClose()) {
+        for (YoutubeSearchNode *node = search_results.head; node; node = node->next) {
+            if (!IsTextureReady(node->thumbnail)) {
+                if (node->thumbnail_link) {
+                    node->thumbnail = get_thumbnail_from_youtube_link(node->thumbnail_link, curl);
+                    if (!IsTextureReady(node->thumbnail)) free(node->thumbnail_link);
+                }
+            }
+        }
+        
+        if (search) {
+            search = false;
+
+            // clear search result list information
+            if (search_results.count > 0) unload_list(&search_results);
+            current_node = -1;
+            
+            // store the data of the search results to some list
+            ThreadArgs *targs = malloc(sizeof(ThreadArgs));
+            targs->query = query;
+            targs->search_results = &search_results;
+
+            pthread_t thread;
+            pthread_create(&thread, NULL, get_results_from_query, targs);
+            pthread_detach(thread);
+        }
+
+        
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
@@ -895,22 +923,28 @@ int main()
             // pressing enter returns 1
             // clicking out of the window returns 2
             int text_box_status; 
-            if ((text_box_status = GuiTextBox(search_bar, text_box_buffer, 256, edit_mode))) edit_mode = !edit_mode;
-            
-            // pressing the search button or pressing enter in the search bar will search 
-            if ((GuiButton(search_button, "SEARCH") || (text_box_status == 1)) && ((strlen(text_box_buffer) > 0) && !edit_mode)) {
-                if (search_results.count > 0) unload_list(&search_results);
-                
-                // curl only accepts url encoded queries
-                char* url_encoded_query = curl_easy_escape(curl, text_box_buffer,0);
-                
-                // store the data of the search results to some list
-                get_results_from_query(url_encoded_query, curl, &search_results, sort[current_sort], content[current_type]);
-                curl_free(url_encoded_query);
+            if ((text_box_status = GuiTextBox(search_bar, query.url_encoded_query, 256, edit_mode))) {
+                edit_mode = !edit_mode;
             } 
             
+            const bool start_search = GuiButton(search_button, "SEARCH") || (text_box_status == 1);
+            const bool query_entered = (query.url_encoded_query[0] != '\0') && (!edit_mode);
+
+            // pressing the search button or pressing enter in the search bar will search 
+            if (start_search && query_entered) {
+                query.sort = sort[current_sort];
+                query.type = content[current_type];
+                
+                search = true;
+            }
+            
             // filtering
-            const Rectangle filter_button = { (search_button.x + search_button.width + padding), padding, 50, 25 };
+            const Rectangle filter_button = { 
+                search_button.x + search_button.width + padding, 
+                padding, 
+                50, 
+                25 
+            };
             
             // toggle filter window on button press
             if (GuiButton(filter_button, "FILTER")) show_filter_window = !show_filter_window;
@@ -978,8 +1012,29 @@ int main()
                         content_height 
                     };
 
-                    if (CheckCollisionRecs(content_rect, scroll_panel_area))
-                        draw_search_result((i % 2 ? WHITE : RAYWHITE), FONT, content_rect, current);
+                    if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
+                        // if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), content_rect)) {
+                        //     if (current_node == i) {
+                        //         if (current->type == CONTENT_TYPE_VIDEO) {
+                        //             char watch_link[256] = "https://www.youtube.com/watch?v=";
+                        //             strcat(watch_link, current->id);
+                        //             MemoryBlock video_data = fetch_url(watch_link, curl);
+                        //             if (is_memory_ready(video_data)) {
+                        //                 create_file_from_memory("video.json", video_data.memory);
+                        //                 unload_memory_block(&video_data);
+                        //             }
+                        //         }
+                        //     }
+                        //     else current_node = i;
+                        // }
+
+                        Color c;
+                        if (i == current_node) c = SKYBLUE;
+                        else {
+                            c = (i % 2) ? WHITE : RAYWHITE;
+                        }
+                        draw_search_result(c, FONT, content_rect, current);
+                    }
                 }
             EndScissorMode();
             
@@ -989,10 +1044,6 @@ int main()
 
     // deinit app
     {
-        // unloading cache textures
-        for (int i = 0; i < MAX_SEARCH_ITEMS; i++) {
-            if (IsTextureReady(cached_items[i].thumbnail)) UnloadTexture(cached_items[cache_size].thumbnail);
-        }
         if (search_results.count > 0) unload_list(&search_results);
         curl_easy_cleanup(curl);
         curl_global_cleanup();
@@ -1001,6 +1052,7 @@ int main()
     }
 }
 // to do
+    // make cached thumbnails a linked list 
     // efficent thumbnail rendering 
     // pagination 
     // show video information when double clicking video
