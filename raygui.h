@@ -1776,7 +1776,7 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
 
     int result = 0;
     GuiState state = guiState;
-    float mouseWheelSpeed = 20.0f;
+    float mouseWheelSpeed = 70.0f;
 
     Rectangle temp = { 0 };
     if (view == NULL) view = &temp;
