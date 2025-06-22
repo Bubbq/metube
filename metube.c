@@ -566,6 +566,8 @@ ThumbnailList create_thumbnail_list ()
 }
 
 typedef struct {
+    char link[256];
+    char id[256];
     Query query;
     YoutubeSearchList* search_results;
     ThumbnailList *thumbnail_list;
@@ -606,6 +608,26 @@ void draw_thumbnail_subtext (const Rectangle container, const Font font, const C
 bool search_finished = true;
 bool searching = false;
 
+CURL *curl;
+void *load_thumbnail (void *args) 
+{
+    ThreadArgs *targs = (ThreadArgs *) args;
+    // pthread_mutex_lock(&targs->thumbnail_list->mutex);
+        MemoryBlock chunk = fetch_url(targs->link, curl);
+        if (is_memory_ready(chunk)) {
+            ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
+            if (!thumbnail_data) {
+                printf("load_thumbnail: malloc returned NULL\n");
+                return NULL;
+            }
+            thumbnail_data->data = chunk;
+            strcpy(thumbnail_data->id, targs->id);
+            add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
+        }
+    // pthread_mutex_unlock(&targs->thumbnail_list->mutex);
+    return NULL;
+}
+
 // writes a list of search result nodes to some list
 void* get_results_from_query(void* args)
 {
@@ -615,20 +637,6 @@ void* get_results_from_query(void* args)
     searching = true;
 
     ThreadArgs* targs = (ThreadArgs *) args;
-
-    CURL *curl = curl_easy_init();
-    curl_easy_setopt(curl, CURLOPT_TCP_FASTOPEN, 1L);         // Enable TCP Fast Open
-    curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);          // Disable Nagle's algorithm
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);             // Avoid signals for speed
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);       // Disable redirects (if not needed)
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);       // Skip hostname verification
-    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0); // Use HTTP/2
-
-    if (!curl) {
-        printf("curl object could not be created\n");
-        free(targs);
-        return NULL;
-    }
 
     // get the query in url encoded format
     char* buff = curl_easy_escape(curl, targs->query.url_encoded_query, 0);
@@ -825,13 +833,13 @@ void* get_results_from_query(void* args)
         YoutubeSearchList *search_list = targs->search_results;
         for (YoutubeSearchNode *node = search_list->head; node; node = node->next) {
             if (node->thumbnail_link[0] != '\0') {
-                MemoryBlock image_data = fetch_url(node->thumbnail_link, curl);
-                if (is_memory_ready(image_data)) {
-                    ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
-                    thumbnail_data->data = image_data;
-                    strcpy(thumbnail_data->id, node->id);
-                    add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
-                }
+                // config thread args
+                strcpy(targs->link, node->thumbnail_link);
+                strcpy(targs->id, node->id);
+                pthread_create(&threads[current_thread], NULL, load_thumbnail, targs);
+                pthread_join(threads[current_thread], NULL);
+                current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
+                node->thumbnail_loaded = true;
             }
         }
     pthread_mutex_unlock(&targs->thumbnail_list->mutex);
@@ -842,7 +850,6 @@ void* get_results_from_query(void* args)
 
     if (elements_added == 0) printf("no items were found\n");
     cJSON_Delete(search_json);
-    curl_easy_cleanup(curl);
     free(args);
     time_t after = time(NULL);
     printf("search process took %ld seconds\n", (after - before));
@@ -853,6 +860,7 @@ int main()
 {
     // start the curl session
     curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
 
     // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
@@ -907,10 +915,10 @@ int main()
     // the current search result the user has selected
     int current_node = -1;
 
-    while (!WindowShouldClose() || searching) {
-        // loading thumbnails gathered from thread
+    while (!WindowShouldClose()) {
+        // loading thumbnails gathered from thread one by one
         pthread_mutex_lock(&thumbnail_list.mutex);
-            while (thumbnail_list.head) {
+            if (thumbnail_list.head) {
                 ThumbnailData *thumbnail_data = thumbnail_list.head;
 
                 for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
@@ -1027,7 +1035,7 @@ int main()
                 scroll_panel_area.x,
                 scroll_panel_area.y,
                 scroll_panel_area.width,
-                content_height * (search_results.count ? search_results.count : SEARCH_ITEMS_PER_PAGE),
+                content_height * (search_results.count),
             };
 
             // the width of the scrollbar is only felt when it's visible
@@ -1058,21 +1066,6 @@ int main()
 
                     // only process items that are onscreen
                     if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
-                        // if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), content_rect)) {
-                        //     if (current_node == i) {
-                        //         if (current->type == CONTENT_TYPE_VIDEO) {
-                        //             char watch_link[256] = "https://www.youtube.com/watch?v=";
-                        //             strcat(watch_link, current->id);
-                        //             MemoryBlock video_data = fetch_url(watch_link, curl);
-                        //             if (is_memory_ready(video_data)) {
-                        //                 create_file_from_memory("video.json", video_data.memory);
-                        //                 unload_memory_block(&video_data);
-                        //             }
-                        //         }
-                        //     }
-                        //     else current_node = i;
-                        // }
-
                         const Rectangle thumbnail_bounds = { 
                             content_rect.x, 
                             content_rect.y, 
@@ -1101,9 +1094,8 @@ int main()
 
                         Color background_color;
                         if (i == current_node) background_color = SKYBLUE;
-                        else {
-                            background_color = (i % 2) ? WHITE : RAYWHITE;
-                        }
+                        else background_color = (i % 2) ? WHITE : RAYWHITE;
+                        
 
                         // content backgound
                         DrawRectangleRec(content_rect, background_color);
@@ -1136,7 +1128,6 @@ int main()
                     }
                 }
             EndScissorMode();
-            
             DrawFPS(GetScreenWidth() - 70, GetScreenHeight() - 20);
         EndDrawing();
     }
@@ -1146,14 +1137,15 @@ int main()
         pthread_mutex_destroy(&thumbnail_list.mutex);
         if (search_results.count > 0) unload_list(&search_results);
         curl_global_cleanup();
+        curl_easy_cleanup(curl);
         CloseWindow();
         return 0;
     }
 }
 // to do
+    // loading thumbnails halts the program
     // show video information when double clicking video
     // actually play video when pressed
-    // loading thumbnails halts the program
     // pagination 
 
 // for read me
