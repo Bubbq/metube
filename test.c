@@ -1,5 +1,4 @@
 #include <ctype.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,29 +8,11 @@
 #include <cjson/cJSON.h>
 #include <time.h>
 #include "raylib.h"
-#include "raylib/src/raylib.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
 #define SEARCH_ITEMS_PER_PAGE 20
-
-typedef struct
-{
-	double startTime;
-	double lifeTime;
-} Timer;
-
-void start_timer(Timer *timer, double lifetime) 
-{
-	timer->startTime = GetTime();
-	timer->lifeTime = lifetime;
-}
-
-bool is_timer_done(Timer timer)
-{ 
-	return (GetTime() - timer.startTime) >= timer.lifeTime; 
-} 
 
 typedef struct {
     size_t size;
@@ -135,16 +116,16 @@ typedef enum
 } SortParameter;
 
 typedef struct YoutubeSearchNode {
-	char* id    ;
-	char* title;
-	char* author;
-	char* subs;
-	char* views;
-	char* date;
-	char* length;
-    char* video_count;
+	char id [64];
+	char title[128];
+	char author[128];
+	char subs[128];
+	char views[128];
+	char date[128];
+	char length[128];
+    char video_count[128];
     bool thumbnail_loaded;
-    char* thumbnail_link;
+    char thumbnail_link[128];
     Texture thumbnail;
     ContentType type;
     struct YoutubeSearchNode* next;
@@ -200,18 +181,7 @@ void add_node(YoutubeSearchList* list, const YoutubeSearchNode node)
 void unload_node(YoutubeSearchNode* node)
 {
     if (!node) return;
-
-    if (node->id) free(node->id);
-    if (node->subs) free(node->subs);
-    if (node->date) free(node->date);
-    if (node->views) free(node->views);
-    if (node->title) free(node->title);
-    if (node->length) free(node->length);
-    if (node->video_count) free(node->video_count);
-    if (node->author) free(node->author);
-    if (node->thumbnail_link) free(node->thumbnail_link);
     if (IsTextureReady(node->thumbnail)) UnloadTexture(node->thumbnail);
-
     free(node);
 }
 
@@ -580,59 +550,6 @@ typedef struct {
 
 ThreadPool thumbnail_thread_pool;
 
-typedef struct TaskNode {
-    ThreadArgs* args;
-    struct TaskNode* next;
-} TaskNode;
-
-typedef struct {
-    TaskNode* head;
-    TaskNode* tail;
-    int count;
-    pthread_mutex_t queue_mutex;
-} TaskQueue;
-
-// Add these global variables with your other globals
-TaskQueue task_queue;
-
-// Add a task to the queue
-void enqueue_task(ThreadArgs* args) {
-    TaskNode* new_task = malloc(sizeof(TaskNode));
-    if (!new_task) {
-        printf("enqueue_task: malloc failed\n");
-        free(args);
-        return;
-    }
-    
-    new_task->args = args;
-    new_task->next = NULL;
-    
-    pthread_mutex_lock(&task_queue.queue_mutex);
-    if (task_queue.head == NULL) {
-        task_queue.head = task_queue.tail = new_task;
-    } else {
-        task_queue.tail->next = new_task;
-        task_queue.tail = new_task;
-    }
-    task_queue.count++;
-    pthread_mutex_unlock(&task_queue.queue_mutex);
-}
-
-// Get a task from the queue (returns NULL if queue is empty)
-TaskNode* dequeue_task() {
-    pthread_mutex_lock(&task_queue.queue_mutex);
-    TaskNode* task = task_queue.head;
-    if (task) {
-        task_queue.head = task_queue.head->next;
-        if (task_queue.head == NULL) {
-            task_queue.tail = NULL;
-        }
-        task_queue.count--;
-    }
-    pthread_mutex_unlock(&task_queue.queue_mutex);
-    return task;
-}
-
 #define MAX_THREADS 4
 pthread_t threads[MAX_THREADS];
 int current_thread = 0;
@@ -669,7 +586,7 @@ bool search_finished = true;
 bool searching = false;
 
 pthread_t load_thumbnail_thread;
-
+CURL *curl;
 void *load_thumbnail(void *args) {
     CURL *c = curl_easy_init();
     ThreadArgs *targs = (ThreadArgs *) args;
@@ -687,6 +604,7 @@ void *load_thumbnail(void *args) {
     
     // Load the thumbnail
     MemoryBlock chunk = fetch_url(targs->link, c);
+    // MemoryBlock chunk = fetch_url(targs->link, curl);
     if (is_memory_ready(chunk)) {
         ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
         if (thumbnail_data) {
@@ -710,55 +628,6 @@ void *load_thumbnail(void *args) {
     curl_easy_cleanup(c);
     return NULL;
 }
-void execute_queued_tasks() {
-    while (task_queue.count > 0) {
-        pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
-        bool can_create_thread = (thumbnail_thread_pool.active_count < MAX_THREADS);
-        pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
-        
-        if (!can_create_thread) {
-            break; // No available threads, try again later
-        }
-        
-        TaskNode* task = dequeue_task();
-        if (!task) {
-            break; // No tasks in queue
-        }
-        
-        // Create thread node
-        ThreadNode* thread_node = malloc(sizeof(ThreadNode));
-        if (!thread_node) {
-            printf("execute_queued_tasks: malloc failed for thread_node\n");
-            free(task->args);
-            free(task);
-            continue;
-        }
-        
-        strcpy(thread_node->id, task->args->id);
-        thread_node->completed = false;
-        thread_node->next = NULL;
-        
-        // Add to thread pool
-        pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
-        thread_node->next = thumbnail_thread_pool.head;
-        thumbnail_thread_pool.head = thread_node;
-        thumbnail_thread_pool.active_count++;
-        pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
-        
-        // Create the thread
-        if (pthread_create(&thread_node->thread, NULL, load_thumbnail, task->args) != 0) {
-            // If thread creation fails, clean up
-            pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
-            thumbnail_thread_pool.head = thread_node->next;
-            thumbnail_thread_pool.active_count--;
-            pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
-            free(thread_node);
-            free(task->args);
-        }
-        
-        free(task); // Free the task node (args are now owned by the thread)
-    }
-}
 
 void add_thread_node(ThreadNode *node, ThreadPool *list) 
 {
@@ -772,20 +641,18 @@ void add_thread_node(ThreadNode *node, ThreadPool *list)
     list->active_count++;
     pthread_mutex_unlock(&list->thread_mutex);
 }
-
-YoutubeSearchList cached_results;
-
 void* get_results_from_query(void* args)
 {
     time_t before = time(NULL);
     
     search_finished = false;
     searching = true;
-    CURL *c = curl_easy_init();
+    // CURL *c = curl_easy_init();
     ThreadArgs* targs = (ThreadArgs *) args;
 
     // get the query in url encoded format
-    char* buff = curl_easy_escape(c, targs->query.url_encoded_query, 0);
+    // char* buff = curl_easy_escape(c, targs->query.url_encoded_query, 0);
+    char* buff = curl_easy_escape(curl, targs->query.url_encoded_query, 0);
     strcpy(targs->query.url_encoded_query, buff);
     printf("processing %s\n", targs->query.url_encoded_query);
     curl_free(buff);
@@ -795,7 +662,14 @@ void* get_results_from_query(void* args)
     configure_search_url(512, url, targs->query);
 
     // get the page source of this url
-    MemoryBlock html = fetch_url(url, c);
+    MemoryBlock html = fetch_url(url, curl);
+    while (html.size < 100000) {
+        unload_memory_block(&html);
+        curl_easy_cleanup(curl);
+        curl = curl_easy_init();
+        html = fetch_url(url, curl);
+    }
+    // MemoryBlock html = fetch_url(url, c);
 
     if (!is_memory_ready(html)) return NULL;
 
@@ -837,8 +711,7 @@ void* get_results_from_query(void* args)
 
                     // video id
                     cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
-                    if (videoId && cJSON_IsString(videoId)) node.id = strdup(videoId->valuestring);
-
+                    if (videoId && cJSON_IsString(videoId)) strcpy(node.id, videoId->valuestring);
                     // video title
                     cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
                     cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
@@ -846,61 +719,16 @@ void* get_results_from_query(void* args)
                         cJSON* first_run = cJSON_GetArrayItem(runs, 0);
                         if (first_run) {
                             cJSON *text = cJSON_GetObjectItem(first_run, "text");
-                            if (text && cJSON_IsString(text)) node.title = strdup(text->valuestring);
+                            if (text && cJSON_IsString(text))
+                                // node.title = strdup(text->valuestring);
+                                strcpy(node.title, text->valuestring);
                         }
                     }
 
                     // thumbnail link
-                    if (node.id) {
-                        // find the node in the cache result
-
-
-
-                        char video_thumbnail_url[128];
-                        snprintf(video_thumbnail_url, sizeof(video_thumbnail_url), "https://img.youtube.com/vi/%s/mqdefault.jpg", node.id);
-                        node.thumbnail_link = strdup(video_thumbnail_url);
-                        
-                        // ThreadArgs *load_thumbnail_args = malloc(sizeof(ThreadArgs));
-                        // strcpy(load_thumbnail_args->link, node.thumbnail_link);
-                        // strcpy(load_thumbnail_args->id, node.id);
-                        // load_thumbnail_args->thumbnail_list = targs->thumbnail_list;
-
-                        // // Check if we can create a thread immediately
-                        // pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
-                        // bool can_create_thread = (thumbnail_thread_pool.active_count < MAX_THREADS);
-                        // pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
-
-                        // if (can_create_thread) {
-                        //     // Create thread node
-                        //     ThreadNode* thread_node = malloc(sizeof(ThreadNode));
-                        //     strcpy(thread_node->id, node.id);
-                        //     thread_node->completed = false;
-                        //     thread_node->next = NULL;
-                            
-                        //     // Add to thread pool
-                        //     add_thread_node(thread_node, &thumbnail_thread_pool);
-                            
-                        //     // Create the thread
-                        //     if (pthread_create(&thread_node->thread, NULL, load_thumbnail, load_thumbnail_args) != 0) {
-                        //         pthread_detach(thread_node->thread);
-                        //         // If thread creation fails, clean up
-                        //         pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
-                        //         thumbnail_thread_pool.head = thread_node->next;
-                        //         thumbnail_thread_pool.active_count--;
-                        //         pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
-                        //         free(thread_node);
-                        //         enqueue_task(load_thumbnail_args); // Queue it instead
-                        //     }
-                        // } else {
-                        //     // Queue the task for later execution
-                        //     enqueue_task(load_thumbnail_args);
-                        //     // printf("Task queued - active threads: %d, queued tasks: %d\n", 
-                        //     //     thumbnail_thread_pool.active_count, task_queue.count);
-                        // }
-
-                    
-                    
-                    }
+                    snprintf(node.thumbnail_link, sizeof(node.thumbnail_link), "https://img.youtube.com/vi/%s/mqdefault.jpg", node.id);
+                    // snprintf(video_thumbnail_url, sizeof(video_thumbnail_url), "https://img.youtube.com/vi/%s/mqdefault.jpg", node.id);
+                    // node.thumbnail_link = strdup(video_thumbnail_url);
 
                     // creator of video
                     cJSON *ownerTextRuns = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "ownerText"), "runs");
@@ -908,24 +736,29 @@ void* get_results_from_query(void* args)
                         cJSON *first_run = cJSON_GetArrayItem(ownerTextRuns, 0);
                         if (first_run) {
                             cJSON *text = cJSON_GetObjectItem(first_run, "text");
-                            if (text && cJSON_IsString(text)) node.author = strdup(text->valuestring);
+                            if (text && cJSON_IsString(text))
+                                // node.author = strdup(text->valuestring);
+                                strcpy(node.author, text->valuestring);
                         }
                     }
 
                     // view count
                     cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
                     if (viewCountText && cJSON_IsString(viewCountText)) {
-                        node.views = malloc(16);
-                        format_youtube_views(viewCountText->valuestring, 16, node.views);
+                        format_youtube_views(viewCountText->valuestring, sizeof(node.views), node.views);
                     }
 
                     // publish date
                     cJSON *publishedTimeText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "publishedTimeText"), "simpleText");
-                    if (publishedTimeText && cJSON_IsString(publishedTimeText)) node.date = strdup(publishedTimeText->valuestring);
+                    if (publishedTimeText && cJSON_IsString(publishedTimeText))
+                        // node.date = strdup(publishedTimeText->valuestring);
+                        strcpy(node.date, publishedTimeText->valuestring);    
 
                     // video length
                     cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
-                    if (lengthText && cJSON_IsString(lengthText)) node.length = strdup(lengthText->valuestring);
+                    if (lengthText && cJSON_IsString(lengthText))
+                    // node.length = strdup(lengthText->valuestring);
+                        strcpy(node.length, lengthText->valuestring);
                 }
 
                 else if (channelRenderer) {
@@ -933,16 +766,19 @@ void* get_results_from_query(void* args)
 
                     // channel id
                     cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
-                    if (channelId && cJSON_IsString(channelId)) node.id = strdup(channelId->valuestring);
-
+                    if (channelId && cJSON_IsString(channelId))
+                    // node.id = strdup(channelId->valuestring);
+                        strcpy(node.id, channelId->valuestring);
                     // channel title
                     cJSON *title = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "title"), "simpleText");
-                    if (title && cJSON_IsString(title)) node.title = strdup(title->valuestring);
-
+                    if (title && cJSON_IsString(title))
+                    // node.title = strdup(title->valuestring);
+                        strcpy(node.title, title->valuestring);
                     // subscriber count
                     cJSON *subCount = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "videoCountText"), "simpleText");
-                    if(subCount && cJSON_IsString(subCount)) node.subs = strdup(subCount->valuestring);
-
+                    if(subCount && cJSON_IsString(subCount))
+                    // node.subs = strdup(subCount->valuestring);
+                        strcpy(node.subs, subCount->valuestring);
                     // thumbnail link
                     cJSON *thumbnails = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "thumbnail"), "thumbnails");
                     if (thumbnails && cJSON_IsArray(thumbnails)) {
@@ -952,7 +788,8 @@ void* get_results_from_query(void* args)
                             char channel_thumbnail_link [128] = "https:";
                             strcat(channel_thumbnail_link, url->valuestring);
                             if (url && cJSON_IsString(url)) {
-                                node.thumbnail_link = strdup(channel_thumbnail_link);
+                                // node.thumbnail_link = strdup(channel_thumbnail_link);
+                                strcpy(node.thumbnail_link, channel_thumbnail_link);
                             } 
                         }
                     }
@@ -963,14 +800,18 @@ void* get_results_from_query(void* args)
 
                     // playlist id
                     cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
-                    if (contentId && cJSON_IsString(contentId)) node.id = strdup(contentId->valuestring);
+                    if (contentId && cJSON_IsString(contentId)) 
+                    // node.id = strdup(contentId->valuestring);
+                        strcpy(node.id, contentId->valuestring);
 
                     // playlist title
                     cJSON *metadata = cJSON_GetObjectItem(lockupViewModel, "metadata");
                     cJSON *lockupMetadataViewModel = metadata ? cJSON_GetObjectItem(metadata, "lockupMetadataViewModel") : NULL;
                     cJSON *title = lockupMetadataViewModel ? cJSON_GetObjectItem(lockupMetadataViewModel, "title") : NULL;
                     cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
-                    if (content && cJSON_IsString(content)) node.title = strdup(content->valuestring);
+                    if (content && cJSON_IsString(content))
+                    // node.title = strdup(content->valuestring);
+                        strcpy(node.title, content->valuestring);
 
                     cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
                     cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
@@ -984,7 +825,8 @@ void* get_results_from_query(void* args)
                         cJSON* first_source = cJSON_GetArrayItem(sources, 0);
                         cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
                         if (url && cJSON_IsString(url)){
-                            node.thumbnail_link = strdup(url->valuestring);
+                            // node.thumbnail_link = strdup(url->valuestring);
+                            strcpy(node.thumbnail_link, url->valuestring);
                         }
                     }
 
@@ -1002,7 +844,8 @@ void* get_results_from_query(void* args)
                                     if (thumbnailBadgeViewModel) {
                                         cJSON *text = cJSON_GetObjectItem(thumbnailBadgeViewModel, "text");
                                         if (text && cJSON_IsString(text)) {
-                                            node.video_count = strdup(text->valuestring);
+                                            // node.video_count = strdup(text->valuestring);
+                                            strcpy(node.video_count, text->valuestring);
                                             break;
                                         }
                                     }
@@ -1012,7 +855,7 @@ void* get_results_from_query(void* args)
                     }
                 }
 
-                if (node.id && (targs->search_results->count < SEARCH_ITEMS_PER_PAGE)) {
+                if (node.id[0] != '\0' && (targs->search_results->count < SEARCH_ITEMS_PER_PAGE)) {
                     add_node(targs->search_results, node);
                     elements_added++;
                 }
@@ -1028,9 +871,38 @@ void* get_results_from_query(void* args)
     free(args);
     time_t after = time(NULL);
     printf("search process took %ld seconds\n", (after - before));
-    curl_easy_cleanup(c);
+    // curl_easy_cleanup(c);
     return NULL;
 }
+
+// void cleanup_completed_threads() {
+//     pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
+    
+//     ThreadNode* current = thumbnail_thread_pool.head;
+//     ThreadNode* prev = NULL;
+    
+//     while (current) {
+//         if (current->completed) {
+//             // Remove from list
+//             if (prev) prev->next = current->next;
+//             else  thumbnail_thread_pool.head = current->next;
+            
+//             ThreadNode* to_delete = current;
+//             current = current->next;
+            
+//             // Clean up the thread
+//             pthread_join(to_delete->thread, NULL);
+//             free(to_delete);
+//             thumbnail_thread_pool.active_count--;
+//         } 
+//         else {
+//             prev = current;
+//             current = current->next;
+//         }
+//     }
+    
+//     pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
+// }
 
 void cleanup_completed_threads() {
     pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
@@ -1040,17 +912,17 @@ void cleanup_completed_threads() {
     
     while (current) {
         if (current->completed) {
-            // Remove from list
-            if (prev) {
-                prev->next = current->next;
-            } else {
-                thumbnail_thread_pool.head = current->next;
+            // Remove and cleanup
+            if (prev) prev->next = current->next;
+            else thumbnail_thread_pool.head = current->next;
+            
+            if (current == thumbnail_thread_pool.tail) {
+                thumbnail_thread_pool.tail = prev;
             }
             
             ThreadNode* to_delete = current;
             current = current->next;
             
-            // Clean up the thread
             pthread_join(to_delete->thread, NULL);
             free(to_delete);
             thumbnail_thread_pool.active_count--;
@@ -1067,22 +939,18 @@ int main()
 {
     // start the curl session
     curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
 
     thumbnail_thread_pool.head = NULL;
     thumbnail_thread_pool.active_count = 0;
     pthread_mutex_init(&thumbnail_thread_pool.thread_mutex, NULL);
 
-    task_queue.head = task_queue.tail = NULL;
-    task_queue.count = 0;
-    pthread_mutex_init(&task_queue.queue_mutex, NULL);
-    
     // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
-    cached_results = create_youtube_search_list();
-
+    
     // list containing the image data of thumbails from a search
     ThumbnailList thumbnail_list = create_thumbnail_list();
-
+    
     // init app
     SetTargetFPS(60);
     SetTraceLogLevel(LOG_ERROR);
@@ -1131,13 +999,12 @@ int main()
     int current_node = -1;
 
     while (!WindowShouldClose()) {
+
         cleanup_completed_threads();
-        execute_queued_tasks();
-      
-        // Try to lock without blocking
+
         if (pthread_mutex_trylock(&thumbnail_list.mutex) == 0) {
-            while (thumbnail_list.head) {
             // if (thumbnail_list.head) {
+            while (thumbnail_list.head) {
                 ThumbnailData *thumbnail_data = thumbnail_list.head;
                 
                 // Find matching search node and load texture
@@ -1156,13 +1023,12 @@ int main()
             pthread_mutex_unlock(&thumbnail_list.mutex);
         }
 
-
         if (search) {
             search = false;
             // clear search result list information
             if (search_results.count > 0) unload_list(&search_results);
             current_node = -1;
-
+            
             // configure thread arguements for routine
             ThreadArgs *targs = malloc(sizeof(ThreadArgs));
             targs->query = query;
@@ -1170,12 +1036,9 @@ int main()
             targs->thumbnail_list = &thumbnail_list;
 
             // get the results of this query in this thread
-            pthread_create(&threads[current_thread], NULL, get_results_from_query, targs);
-            pthread_detach(threads[current_thread]);
-
-            // update thread pool
-            current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
-            // printf("%d\n", cached_results.count);
+            pthread_t search_thread;
+            pthread_create(&search_thread, NULL, get_results_from_query, targs);
+            pthread_detach(search_thread);
         }
 
         BeginDrawing();
@@ -1205,7 +1068,6 @@ int main()
                 query.type = availible_types[current_type];
                 
                 // only search when last search is done 
-                // search = (search_finished && task_queue.count == 0 && thumbnail_thread_pool.active_count == 0);
                 search = (search_finished);
             }
             
@@ -1276,128 +1138,111 @@ int main()
                 int i = 0;
                 // if (search_finished) {
                 for (YoutubeSearchNode* search_result = search_results.head; search_result; search_result = search_result->next, i++, y_level += content_height) {
-                        // area of the ith rectangle
-                        const Rectangle content_rect = { 
-                            padding, 
-                            y_level + scroll.y, // scroll is added so moving the scrollbar offsets all elements
-                            scroll_panel_area.width - SCROLLBAR_WIDTH,
-                            content_height 
+                    // area of the ith rectangle
+                    const Rectangle content_rect = { 
+                        padding, 
+                        y_level + scroll.y, // scroll is added so moving the scrollbar offsets all elements
+                        scroll_panel_area.width - SCROLLBAR_WIDTH,
+                        content_height 
+                    };
+
+                    const Vector2 mouse_position = GetMousePosition();
+                    if (CheckCollisionPointRec(mouse_position, scroll_panel_area) && CheckCollisionPointRec(mouse_position, content_rect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        current_node = i;
+                    }
+
+                    // only process items that are onscreen
+                    if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
+                        const Rectangle thumbnail_bounds = { 
+                            content_rect.x, 
+                            content_rect.y, 
+                            content_rect.width * 0.45f, 
+                            content_rect.height 
                         };
 
-                        const Vector2 mouse_position = GetMousePosition();
-                        if (CheckCollisionPointRec(mouse_position, scroll_panel_area) && CheckCollisionPointRec(mouse_position, content_rect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                            current_node = i;
-                        }
+                        const Rectangle title_bounds = {
+                            thumbnail_bounds.x + thumbnail_bounds.width,
+                            content_rect.y,
+                            content_rect.width - thumbnail_bounds.width,
+                            content_rect.height * 0.75f
+                        };
 
-                        // only process items that are onscreen
-                        if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
-                            const Rectangle thumbnail_bounds = { 
-                                content_rect.x, 
-                                content_rect.y, 
-                                content_rect.width * 0.45f, 
-                                content_rect.height 
-                            };
+                        const Rectangle subtext_bounds = {
+                            thumbnail_bounds.x + thumbnail_bounds.width,
+                            title_bounds.y + title_bounds.height,
+                            title_bounds.width,
+                            content_rect.height - title_bounds.height
+                        };
 
-                            const Rectangle title_bounds = {
-                                thumbnail_bounds.x + thumbnail_bounds.width,
-                                content_rect.y,
-                                content_rect.width - thumbnail_bounds.width,
-                                content_rect.height * 0.75f
-                            };
+                        const int padding = 5;
+                        const int font_size = 11;
+                        const int spacing = 2;
+                        const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
 
-                            const Rectangle subtext_bounds = {
-                                thumbnail_bounds.x + thumbnail_bounds.width,
-                                title_bounds.y + title_bounds.height,
-                                title_bounds.width,
-                                content_rect.height - title_bounds.height
-                            };
-
-                            const int padding = 5;
-                            const int font_size = 11;
-                            const int spacing = 2;
-                            const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
-
-                            Color background_color;
-                            if (i == current_node) background_color = SKYBLUE;
-                            else background_color = (i % 2) ? WHITE : RAYWHITE;
+                        Color background_color;
+                        if (i == current_node) background_color = SKYBLUE;
+                        else background_color = (i % 2) ? WHITE : RAYWHITE;
+                        
+                        if (IsTextureReady(search_result->thumbnail)) {
+                            // content backgound
+                            DrawRectangleRec(content_rect, background_color);
                             
-                            // if (IsTextureReady(search_result->thumbnail)) {
+                            // title
+                            if (*search_result->title)
+                                DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
 
-                                // content backgound
-                                DrawRectangleRec(content_rect, background_color);
+                            // thumbnail
+                            if (IsTextureReady(search_result->thumbnail)) {
+                                DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
+                            }
+                            
+                            if (search_result->type == CONTENT_TYPE_VIDEO) {
+                                if (*search_result->date && *search_result->views)    
+                                    DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (*search_result->length) ? search_result->length : "LIVE");
+                            }
+
+                            else if (search_result->type == CONTENT_TYPE_CHANNEL) {
+                                if (*search_result->subs) 
+                                    DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
                                 
+                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
+                            }  
+
+                            else if (search_result->type == CONTENT_TYPE_PLAYLIST) {
+                                if (*search_result->video_count) 
+                                    draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
+                            }
+                        } 
+                        else if (search_result->thumbnail_loaded == false) {
+                            pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
+                            bool can_create_thread = (thumbnail_thread_pool.active_count < MAX_THREADS);
+                            pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
+
+                            if (can_create_thread) {
+                                search_result->thumbnail_loaded = true;
+
+                                ThreadArgs *load_thumbnail_args = malloc(sizeof(ThreadArgs));
+                                strcpy(load_thumbnail_args->link, search_result->thumbnail_link);
+                                strcpy(load_thumbnail_args->id, search_result->id);
+                                load_thumbnail_args->thumbnail_list = &thumbnail_list;
                                 
-                                // title
-                                if (search_result->title)
-                                    DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
-
-                                // thumbnail
-                                if (IsTextureReady(search_result->thumbnail)) {
-                                    DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
-                                }
-                                else if (search_result->thumbnail_loaded == false) {
-                                    search_result->thumbnail_loaded = true;
-                                    ThreadArgs *load_thumbnail_args = malloc(sizeof(ThreadArgs));
-                                    strcpy(load_thumbnail_args->link, search_result->thumbnail_link);
-                                    strcpy(load_thumbnail_args->id, search_result->id);
-                                    load_thumbnail_args->thumbnail_list = &thumbnail_list;
-
-                                    // Check if we can create a thread immediately
-                                    pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
-                                    bool can_create_thread = (thumbnail_thread_pool.active_count < MAX_THREADS);
-                                    pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
-
-                                    if (can_create_thread) {
-                                        // Create thread node
-                                        ThreadNode* thread_node = malloc(sizeof(ThreadNode));
-                                        strcpy(thread_node->id, search_result->id);
-                                        thread_node->completed = false;
-                                        thread_node->next = NULL;
-                                        
-                                        // Add to thread pool
-                                        add_thread_node(thread_node, &thumbnail_thread_pool);
-                                        
-                                        // Create the thread
-                                        if (pthread_create(&thread_node->thread, NULL, load_thumbnail, load_thumbnail_args) != 0) {
-                                            pthread_detach(thread_node->thread);
-                                            // If thread creation fails, clean up
-                                            pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
-                                            thumbnail_thread_pool.head = thread_node->next;
-                                            thumbnail_thread_pool.active_count--;
-                                            pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
-                                            free(thread_node);
-                                            enqueue_task(load_thumbnail_args); // Queue it instead
-                                        }
-                                    } else {
-                                        // Queue the task for later execution
-                                        enqueue_task(load_thumbnail_args);
-                                        // printf("Task queued - active threads: %d, queued tasks: %d\n", 
-                                        //     thumbnail_thread_pool.active_count, task_queue.count);
-                                    }
-                                }
-
-                                if (search_result->type == CONTENT_TYPE_VIDEO) {
-                                    if (search_result->date && search_result->views)    
-                                        DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                                    draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, search_result->length ? search_result->length : "LIVE");
-                                }
-
-                                else if (search_result->type == CONTENT_TYPE_CHANNEL) {
-                                    if (search_result->subs) 
-                                        DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                                    
-                                    draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
-                                }  
-
-                                else if (search_result->type == CONTENT_TYPE_PLAYLIST) {
-                                    if (search_result->video_count) 
-                                        draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
-                                }
-                            // }
-                        }
+                                // Create thread node
+                                ThreadNode* thread_node = malloc(sizeof(ThreadNode));
+                                strcpy(thread_node->id, search_result->id);
+                                thread_node->completed = false;
+                                thread_node->next = NULL;
+                                
+                                // add to pool
+                                add_thread_node(thread_node, &thumbnail_thread_pool);
+                                pthread_create(&thread_node->thread, NULL, load_thumbnail, load_thumbnail_args);
+                                pthread_detach(thread_node->thread);
+                            }
+                        } 
+                    }
                 }
-            //   }
-              EndScissorMode();
+            EndScissorMode();
+
             DrawFPS(GetScreenWidth() - 70, GetScreenHeight() - 20);
         EndDrawing();
     }
@@ -1406,18 +1251,10 @@ int main()
     {
         pthread_mutex_destroy(&thumbnail_thread_pool.thread_mutex);
         pthread_mutex_destroy(&thumbnail_list.mutex);
-        pthread_mutex_destroy(&task_queue.queue_mutex);
         if (search_results.count > 0) unload_list(&search_results);
-        if (cached_results.count > 0) unload_list(&cached_results);
         curl_global_cleanup();
 
-        // Also free any remaining queued tasks
-        while (task_queue.head) {
-            TaskNode* task = task_queue.head;
-            task_queue.head = task_queue.head->next;
-            if (task->args) free(task->args);
-            free(task);
-        }
+        // dealloc all lists
         while (thumbnail_thread_pool.head) {
             ThreadNode *node = thumbnail_thread_pool.head;
             thumbnail_thread_pool.head = thumbnail_thread_pool.head->next;
@@ -1429,12 +1266,14 @@ int main()
             if (is_memory_ready(node->data)) unload_memory_block(&node->data);
             free(node);
         }
+        curl_easy_cleanup(curl);
         CloseWindow();
         return 0;
     }
 }
 // to do
-    // loading thumbnails halts the program
+    // texture caching 
+    // keep threads alive instead of deleting and creating over and over again
     // clean everything
     // show video information when double clicking video
     // actually play video when pressed

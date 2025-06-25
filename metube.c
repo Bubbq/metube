@@ -19,38 +19,10 @@
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
-#define SEARCH_ITEMS_PER_PAGE 20
-
-typedef struct
-{
-	double startTime;
-	double lifeTime;
-} Timer;
-
-void start_timer(Timer *timer, double lifetime) 
-{
-	timer->startTime = GetTime();
-	timer->lifeTime = lifetime;
-}
-
-bool is_timer_done(Timer timer)
-{ 
-	return (GetTime() - timer.startTime) >= timer.lifeTime; 
-} 
-
 typedef struct {
     size_t size;
     char* memory;
 } MemoryBlock;
-
-typedef struct {
-    char* key;
-    char* url;
-    char* video_endpoint;
-    char* search_endpoint;
-    char* channel_endpoint;
-    char* playlist_endpoint;
-} YoutubeAPI;
 
 bool is_memory_ready(const MemoryBlock chunk)
 {
@@ -75,224 +47,6 @@ void unload_memory_block(MemoryBlock* chunk)
     chunk->size = 0;
 }
 
-void create_file_from_memory(const char* filename, const char* memory) 
-{
-    FILE* fp = fopen(filename, "w");
-    if (!fp) printf("could not write memory into \"%s\"\n", filename);
-    else {
-        fprintf(fp, "%s", memory);
-        fclose(fp);
-    } 
-}
-
-size_t write_data(void* src, int nitems, size_t element_size, void* dst)
-{
-    // first, we to know how many bytes we are appending to dst
-    // becuase src is generic, we dont know the type (cant use sizeof(*(src_type)src))
-    size_t src_size = (nitems * element_size);
-
-    // next, we need to resize the dst pointer to fit this new data
-    // first, find out how much memory we are currenly holding
-    MemoryBlock* mem = (MemoryBlock*) dst;
-
-    // now get the new size, '+1' for '/0'
-    char* new_memory = realloc(mem->memory, (mem->size + src_size + 1));
-    if (!new_memory) {
-        printf("write_data: not enough memory, realloc returned null\n");
-        return 0;
-    }
-
-    // update the memory of dst
-    mem->memory = new_memory;
-
-    // write new content starting from the end of the old content
-    memcpy(&(mem->memory[mem->size]), src, src_size);
-
-    // update the size accordingly
-    mem->size += src_size;
-    
-    // explicity set null terminator 
-    mem->memory[mem->size] = '\0';
-
-    return src_size;
-}
-
-// return the number of bytes written from src to a memory block
-size_t write_data_to_memory_block(void* src, const size_t nbytes, MemoryBlock* chunk)
-{
-    // allocate space to hold new data
-    char* new_memory = realloc(chunk->memory, (chunk->size + nbytes + 1));
-    if (!new_memory) {
-        printf("write_data_to_memory_block: not enough memory, realloc returned null\n");
-        return 0;
-    }
-
-    // update params
-    chunk->memory = new_memory;
-    memcpy(&chunk->memory[chunk->size], src, nbytes);
-    chunk->size += nbytes;
-    chunk->memory[chunk->size] = '\0';
-
-    return nbytes;
-}
-
-// preform a GET request to some url and return the data fetched
-MemoryBlock fetch_url(const char* url, CURL* curl)
-{
-    MemoryBlock chunk = create_memory_block(0);
-
-    // specify parameters for curl handle
-    curl_easy_setopt(curl, CURLOPT_URL, url); // where to request data
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data); // how to write requested data 
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk); // where to write requested data
-
-    // store the result of the GET request
-    CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK) fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-    return chunk;
-}
-
-MemoryBlock fetch_url2(const char *host, const char *path, const char *port) 
-{
-    // specify the type of address info you want and store the result
-    struct addrinfo desired_addr_info = {0}, *result;
-    desired_addr_info.ai_family = AF_UNSPEC;
-    desired_addr_info.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port, &desired_addr_info, &result) != 0) {
-        perror("getaddrinfo");
-        return create_memory_block(0);
-    }
-    
-    // initializing socket
-    int sockfd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (connect(sockfd, result->ai_addr, result->ai_addrlen) != 0) {
-        perror("connect");
-        freeaddrinfo(result);
-        close(sockfd);
-        return create_memory_block(0);
-    }
-
-    // ssl setup
-    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-    SSL *ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sockfd);
-    if (SSL_connect(ssl) != 1) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        close(sockfd);
-        freeaddrinfo(result);
-        return create_memory_block(0);
-    }
-
-    // constructing and sending request
-    char request[512];
-    snprintf(request, sizeof(request),
-             "GET %s HTTP/1.1\r\n"
-             "Host: %s\r\n"
-             "Connection: close\r\n"
-             "User-Agent: OpenSSL-Client\r\n"
-             "\r\n",
-             path, host);
-    int write_status;
-    if ((write_status = SSL_write(ssl, request, strlen(request))) <= 0) {
-        SSL_get_error(ssl, write_status);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        close(sockfd);
-        freeaddrinfo(result);
-        return create_memory_block(0);
-    } 
-
-    // reading response
-    char buffer[4096];
-    int bytes;
-    MemoryBlock ret = create_memory_block(0);
-    // information is read in chunks, not as a whole
-    while ((bytes = SSL_read(ssl, buffer, sizeof(buffer)-1)) > 0) {
-        buffer[bytes] = '\0';
-        const size_t size = (bytes * sizeof(char));
-        write_data_to_memory_block(buffer, size, &ret);
-    }
-
-    // deinit
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
-    close(sockfd);
-    freeaddrinfo(result);
-    return ret;
-}
-
-char *extract_yt_data2(char *html)
-{
-    // want the portion after var ytintialData
-    char* ytInitialData = "ytInitialData";
-
-    // ptr to first char that matches needle
-    char* ytInitialData_location = strstr(html, ytInitialData);
-    if (!ytInitialData_location) {
-        perror("strstr");
-        return NULL;
-    }
-
-    // the desired data is enclosed in the first '{}' following the yt initalization
-    char* start = strchr(ytInitialData_location, '{');
-    if (!start) {
-        perror("strstr");
-        return NULL;
-    }
-
-    char *end = strstr(start, "};");
-    if (!end) {
-        perror("strstr");
-        return NULL;
-    }
-
-    // return a duplicate of this section of data found in the html
-    const int nchars = end - start + 1; 
-    char* youtube_search_data = malloc(nchars + 1);
-    if (!youtube_search_data) {
-        perror("malloc");
-        return NULL;
-    }
-
-    memcpy(youtube_search_data, start, nchars);
-    youtube_search_data[nchars] = '\0'; 
-    return youtube_search_data;
-}
-
-// // given the search results page source, return relevant details
-char* extract_yt_data(const char* html) 
-{
-    const char* needle = "var ytInitialData = ";
-
-    // ptr to first char that matches needle
-    const char* location = strstr(html, needle);
-    if (!location) {
-        printf("extract_yt_data: \"%s\" was not found in html arguement\n", needle);
-        return NULL;
-    }
-
-    // the desired data is enclosed in the '{}' following the yt initalization
-    const char* start = (location + strlen(needle));
-    const char* end = strstr(start, "};");
-    if (!end) {
-        printf("extract_yt_data: the closing brace '};' was not found\n");
-        return NULL;
-    }
-
-    // return a duplicate of this section of data found in the html
-    const size_t len = end - start + 1;
-    char* ret = malloc(len + 1); // for null terminator
-    if (!ret) {
-        printf("extract_yt_data: not enough memory, malloc returned NULL\n");
-        return NULL;
-    }
-    strncpy(ret, start, len);
-    ret[len] = '\0';
-    return ret;
-}
 typedef enum {
     CONTENT_TYPE_VIDEO = 0,
     CONTENT_TYPE_CHANNEL = 1,
@@ -309,16 +63,16 @@ typedef enum
 } SortParameter;
 
 typedef struct YoutubeSearchNode {
-	char* id;
-	char* title;
-	char* author;
-	char* subs;
-	char* views;
-	char* date;
-	char* length;
-    char* video_count;
+	char id[64];
+	char title[128];
+	char author[128];
+	char subs[128];
+	char views[128];
+	char date[128];
+	char length[128];
+    char video_count[128];
     bool thumbnail_loaded;
-    char* thumbnail_link;
+    char thumbnail_link[128];
     Texture thumbnail;
     ContentType type;
     struct YoutubeSearchNode* next;
@@ -374,18 +128,7 @@ void add_node(YoutubeSearchList* list, const YoutubeSearchNode node)
 void unload_node(YoutubeSearchNode* node)
 {
     if (!node) return;
-
-    if (node->id) free(node->id);
-    if (node->subs) free(node->subs);
-    if (node->date) free(node->date);
-    if (node->views) free(node->views);
-    if (node->title) free(node->title);
-    if (node->length) free(node->length);
-    if (node->video_count) free(node->video_count);
-    if (node->author) free(node->author);
-    if (node->thumbnail_link) free(node->thumbnail_link);
     if (IsTextureReady(node->thumbnail)) UnloadTexture(node->thumbnail);
-
     free(node);
 }
 
@@ -415,8 +158,6 @@ void print_list(const YoutubeSearchList* list)
     for (YoutubeSearchNode *current = list->head; current; current = current->next) print_node(current);
 }
 
-
-
 typedef struct {
     char url_encoded_query[256];
     SortParameter sort;
@@ -425,8 +166,7 @@ typedef struct {
 
 void configure_search_url(const int maxlen, char search_url[maxlen], const Query query)
 {
-    snprintf(search_url, maxlen, "https://www.youtube.com/results?search_query=%s&sp=", query.url_encoded_query);
-    // snprintf(search_url, maxlen, "/results?search_query=%s&sp=", query.url_encoded_query);
+    snprintf(search_url, maxlen, "/results?search_query=%s&sp=", query.url_encoded_query);
 
     // possible sorting params
     const char* relevance = "CAA";
@@ -697,7 +437,6 @@ ThumbnailList create_thumbnail_list ()
     ThumbnailList tl;
     tl.head = tl.tail = NULL;
     pthread_mutex_init(&tl.mutex, NULL);
-    
     return tl;
 }
 
@@ -744,31 +483,249 @@ void draw_thumbnail_subtext (const Rectangle container, const Font font, const C
 bool search_finished = true;
 bool searching = false;
 
+void create_file_from_memory(const char* filename, const char* memory) 
+{
+    FILE* fp = fopen(filename, "w");
+    if (!fp) printf("could not write memory into \"%s\"\n", filename);
+    else {
+        fprintf(fp, "%s", memory);
+        fclose(fp);
+    } 
+}
+
+char* extract_yt_data(const char* html) 
+{
+    const char* needle = "itemSectionRenderer";
+    const char* location = strstr(html, needle);
+    if (!location) {
+        printf("extract_yt_data2: \"%s\" was not found in html argument\n", needle);
+        return NULL;
+    }
+
+    // move pointer to the first '{' after the needle
+    const char* start = strchr(location, '{');
+    if (!start) {
+        printf("extract_yt_data2: Couldn't find starting '{'\n");
+        return NULL;
+    }
+
+    const char* current = start;
+    int depth = 0;
+    while (*current) {
+        if (*current == '{') depth++;
+        else if (*current == '}') depth--;
+        current++;
+
+        if (depth == 0) break;
+    }
+
+    if (depth != 0) {
+        printf("extract_yt_data2: JSON object appears to be unbalanced\n");
+        return NULL;
+    }
+
+    size_t len = current - start;
+    char* result = malloc(len + 1);
+    if (!result) {
+        printf("extract_yt_data2: malloc failed\n");
+        return NULL;
+    }
+
+    strncpy(result, start, len);
+    result[len] = '\0';
+
+    return result;
+}
+
 CURL *curl;
-// void *load_thumbnail (void *args) 
-// {
-//     ThreadArgs *targs = (ThreadArgs *) args;
-//     // pthread_mutex_lock(&targs->thumbnail_list->mutex);
-//         MemoryBlock chunk = fetch_url(targs->link, curl);
-//         if (is_memory_ready(chunk)) {
-//             ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
-//             if (!thumbnail_data) {
-//                 printf("load_thumbnail: malloc returned NULL\n");
-//                 return NULL;
-//             }
-//             thumbnail_data->data = chunk;
-//             strcpy(thumbnail_data->id, targs->id);
-//             add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
-//         }
-//     // pthread_mutex_unlock(&targs->thumbnail_list->mutex);
-//     return NULL;
-// }
+
+clock_t start_search_time;
+clock_t end_search_time;
+
+bool is_chunked_encoding(const char* response)
+{
+    return strstr(response, "Transfer-Encoding: chunked");
+}
+
+// return the number of bytes written from src to a memory block
+size_t write_data_to_memory_block(const void* src, const size_t nbytes, MemoryBlock* chunk)
+{
+    // allocate space to hold new data
+    char* new_memory = realloc(chunk->memory, (chunk->size + nbytes + 1));
+    if (!new_memory) {
+        printf("write_data_to_memory_block: not enough memory, realloc returned null\n");
+        return 0;
+    }
+
+    // update params
+    chunk->memory = new_memory;
+    memcpy(&chunk->memory[chunk->size], src, nbytes);
+    chunk->size += nbytes;
+    chunk->memory[chunk->size] = '\0';
+
+    return nbytes;
+}
+
+// Helper function to decode chunked data
+MemoryBlock decode_chunked_data(const char* chunked_data)
+{
+    MemoryBlock result = create_memory_block(0);
+    const char* current = chunked_data;
+    
+    while (*current) {
+        // Read chunk size (hex number until \r\n)
+        char* line_end = strstr(current, "\r\n");
+        if (!line_end) break;
+        
+        // Extract chunk size
+        char size_str[16];
+        int size_len = line_end - current;
+        if (size_len >= sizeof(size_str)) break;
+        
+        strncpy(size_str, current, size_len);
+        size_str[size_len] = '\0';
+        
+        // Convert hex string to number
+        long chunk_size = strtol(size_str, NULL, 16);
+        
+        // If chunk size is 0, we're done
+        if (chunk_size == 0) break;
+        
+        // Move past the size line
+        current = line_end + 2;
+        
+        // Copy chunk data
+        if (strlen(current) >= chunk_size) 
+            write_data_to_memory_block(current, chunk_size, &result);
+        
+        // Move past chunk data and trailing \r\n
+        current += chunk_size + 2;
+    }
+    
+    return result;
+}
+
+char* find_http_body_start(const char* response)
+{
+    // the last portion of the raw HTTP request is a special end-of-line character
+    const char *needle = "\r\n\r\n";
+    char* body_start = strstr(response, needle);
+    
+    // return a ptr to the first character of the http body
+    if (body_start) 
+        return body_start + strlen(needle);
+    else
+        return NULL;
+}
+
+MemoryBlock fetch_url(const char *host, const char *path, const char *port) 
+{
+    // specify the type of address info you want and store the result
+    struct addrinfo desired_addr_info = {0}, *result;
+    desired_addr_info.ai_family = AF_UNSPEC;
+    desired_addr_info.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port, &desired_addr_info, &result) != 0) {
+        perror("getaddrinfo");
+        return create_memory_block(0);
+    }
+    
+    // initializing socket
+    int sockfd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (connect(sockfd, result->ai_addr, result->ai_addrlen) != 0) {
+        perror("connect");
+        freeaddrinfo(result);
+        close(sockfd);
+        return create_memory_block(0);
+    }
+
+    // ssl setup
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    SSL *ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sockfd);
+    if (SSL_connect(ssl) != 1) {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        close(sockfd);
+        freeaddrinfo(result);
+        return create_memory_block(0);
+    }
+
+    // constructing and sending request
+    char request[512];
+    snprintf(request, sizeof(request),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, host);
+    
+    int write_status;
+    if ((write_status = SSL_write(ssl, request, strlen(request))) <= 0) {
+        SSL_get_error(ssl, write_status);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        close(sockfd);
+        freeaddrinfo(result);
+        return create_memory_block(0);
+    } 
+
+    // read the response of the created request
+    char buffer[4096];
+    int bytes;
+    MemoryBlock raw_response = create_memory_block(0);
+    
+    // read raw http
+    while ((bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[bytes] = '\0';
+        const size_t size = (bytes * sizeof(char));
+        write_data_to_memory_block(buffer, size, &raw_response);
+    }
+
+    // deinit
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    close(sockfd);
+    freeaddrinfo(result);
+    
+    if (!is_memory_ready(raw_response)) {
+        printf("fetch_url: raw data block is invalid\n");
+        return create_memory_block(0);
+    }
+
+    // create_file_from_memory("raw_response.html", raw_response.memory);
+    
+    // extract http body
+    char* body_start = find_http_body_start(raw_response.memory);
+    if (!body_start) {
+        printf("fetch_url: no http body was found in raw_response\n");
+        unload_memory_block(&raw_response);
+        return create_memory_block(0);
+    }
+    
+    // decode chunked data if needed
+    MemoryBlock final_response = create_memory_block(0);
+    if (is_chunked_encoding(raw_response.memory)) {
+        printf("decoding http response...\n"); 
+        final_response = decode_chunked_data(body_start);
+    }
+    else {
+        size_t body_length = strlen(body_start);
+        final_response = create_memory_block(body_length + 1);
+        if (is_memory_ready(final_response)) {
+            strcpy(final_response.memory, body_start);
+        }
+    }
+    
+    unload_memory_block(&raw_response);
+    return final_response;
+}
 
 // writes a list of search result nodes to some list
 void* get_results_from_query(void* args)
 {
-    time_t before = time(NULL);
-    
     search_finished = false;
     searching = true;
 
@@ -782,18 +739,18 @@ void* get_results_from_query(void* args)
 
     // append the query to the yt query string
     char url[512] = "\0";
-    // configure_search_url(512, url, targs->query);
+    configure_search_url(512, url, targs->query);
+    printf("path: %s\n", url);
+
     // get the page source of this url
     // MemoryBlock html = fetch_url(url, curl);
-    MemoryBlock html = fetch_url2("www.youtube.com", "/results?search_query=test", "443");
-    if (!is_memory_ready(html)) {
-        printf("memory is not valid\n");
-        return NULL;
-    }
+    MemoryBlock html = fetch_url("www.youtube.com", url, "443");
+    // create_file_from_memory("html.html", html.memory);
 
     // extract search result data
-    char* cjson_data = extract_yt_data2(html.memory);
-    create_file_from_memory("cjson_data.html", cjson_data);
+    char* cjson_data = extract_yt_data(html.memory);
+    // create_file_from_memory("cjson_data.html", cjson_data);
+
     unload_memory_block(&html);
     if (!cjson_data) {
         printf("cjson_data is not valid\n");
@@ -804,185 +761,178 @@ void* get_results_from_query(void* args)
     cJSON* search_json = cJSON_Parse(cjson_data);
     free(cjson_data);
     if (!search_json) {
-        // printf("Error: %s\n", cJSON_GetErrorPtr());
-        printf("search json is not valid\n");
+        printf("error parsing json\n");
         return NULL;
     }
 
     int elements_added = 0;
     cJSON *contents = cJSON_GetObjectItem(search_json, "contents");
-    cJSON *twoColumnSearchResultsRenderer = contents ? cJSON_GetObjectItem(contents, "twoColumnSearchResultsRenderer") : NULL;
-    cJSON *primaryContents = twoColumnSearchResultsRenderer ? cJSON_GetObjectItem(twoColumnSearchResultsRenderer, "primaryContents") : NULL;
-    cJSON *sectionListRenderer = primaryContents ? cJSON_GetObjectItem(primaryContents, "sectionListRenderer") : NULL;
-    cJSON *sections = sectionListRenderer ? cJSON_GetObjectItem(sectionListRenderer, "contents") : NULL;
+    if (contents && cJSON_IsArray(contents)) {
+        // loop through every item and get the node equivalent 
+        cJSON *item;
+        cJSON_ArrayForEach (item, contents) {
+            YoutubeSearchNode node = { 0 };
+            cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
+            cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");
+            cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel");
 
-    if (sections && cJSON_IsArray(sections)) {
-        cJSON *first_section = cJSON_GetArrayItem(sections, 0);
-        cJSON *itemSectionRenderer = first_section ? cJSON_GetObjectItem(first_section, "itemSectionRenderer") : NULL;
-        cJSON *contents = itemSectionRenderer ? cJSON_GetObjectItem(itemSectionRenderer, "contents") : NULL;
-        if (contents && cJSON_IsArray(contents)) {
-            // loop through every item and get the node equivalent 
-            cJSON *item;
-            cJSON_ArrayForEach (item, contents) {
-                YoutubeSearchNode node = { 0 };
-                cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer");
-                cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");
-                cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel");
+            if (videoRenderer) {
+                node.type = CONTENT_TYPE_VIDEO;
 
-                if (videoRenderer) {
-                    node.type = CONTENT_TYPE_VIDEO;
-
-                    // video id
-                    cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
-                    if (videoId && cJSON_IsString(videoId)) node.id = strdup(videoId->valuestring);
-
-                    // video title
-                    cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
-                    cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
-                    if (runs && cJSON_IsArray(runs)) {
-                        cJSON* first_run = cJSON_GetArrayItem(runs, 0);
-                        if (first_run) {
-                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
-                            if (text && cJSON_IsString(text)) node.title = strdup(text->valuestring);
-                        }
-                    }
-
-                    // thumbnail link
-                    if (node.id) {
-                        char video_thumbnail_url[128];
-                        snprintf(video_thumbnail_url, sizeof(video_thumbnail_url), "https://img.youtube.com/vi/%s/mqdefault.jpg", node.id);
-                        node.thumbnail_link = strdup(video_thumbnail_url);
-                        // node.thumbnail = get_thumbnail_from_youtube_link(video_thumbnail_url, curl);
-                    }
-
-                    // creator of video
-                    cJSON *ownerTextRuns = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "ownerText"), "runs");
-                    if (ownerTextRuns && cJSON_IsArray(ownerTextRuns)) {
-                        cJSON *first_run = cJSON_GetArrayItem(ownerTextRuns, 0);
-                        if (first_run) {
-                            cJSON *text = cJSON_GetObjectItem(first_run, "text");
-                            if (text && cJSON_IsString(text)) node.author = strdup(text->valuestring);
-                        }
-                    }
-
-                    // view count
-                    cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
-                    if (viewCountText && cJSON_IsString(viewCountText)) {
-                        node.views = malloc(16);
-                        format_youtube_views(viewCountText->valuestring, 16, node.views);
-                    }
-
-                    // publish date
-                    cJSON *publishedTimeText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "publishedTimeText"), "simpleText");
-                    if (publishedTimeText && cJSON_IsString(publishedTimeText)) node.date = strdup(publishedTimeText->valuestring);
-
-                    // video length
-                    cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
-                    if (lengthText && cJSON_IsString(lengthText)) node.length = strdup(lengthText->valuestring);
-                }
-
-                else if (channelRenderer) {
-                    node.type = CONTENT_TYPE_CHANNEL;
-
-                    // channel id
-                    cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
-                    if (channelId && cJSON_IsString(channelId)) node.id = strdup(channelId->valuestring);
-
-                    // channel title
-                    cJSON *title = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "title"), "simpleText");
-                    if (title && cJSON_IsString(title)) node.title = strdup(title->valuestring);
-
-                    // subscriber count
-                    cJSON *subCount = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "videoCountText"), "simpleText");
-                    if(subCount && cJSON_IsString(subCount)) node.subs = strdup(subCount->valuestring);
-
-                    // thumbnail link
-                    cJSON *thumbnails = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "thumbnail"), "thumbnails");
-                    if (thumbnails && cJSON_IsArray(thumbnails)) {
-                        cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
-                        cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
-                        if(url && cJSON_IsString(url)) {
-                            char channel_thumbnail_link [128] = "https:";
-                            strcat(channel_thumbnail_link, url->valuestring);
-                            // if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(channel_thumbnail_link, curl);
-                            if (url && cJSON_IsString(url)) node.thumbnail_link = strdup(channel_thumbnail_link);
-                        }
+                // video id
+                cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
+                if (videoId && cJSON_IsString(videoId)) 
+                    strcpy(node.id, videoId->valuestring);
+                
+                // video title
+                cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
+                cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
+                if (runs && cJSON_IsArray(runs)) {
+                    cJSON* first_run = cJSON_GetArrayItem(runs, 0);
+                    if (first_run) {
+                        cJSON *text = cJSON_GetObjectItem(first_run, "text");
+                        if (text && cJSON_IsString(text))
+                            strcpy(node.title, text->valuestring);
                     }
                 }
 
-                else if (lockupViewModel) {
-                    node.type = CONTENT_TYPE_PLAYLIST;
+                // thumbnail link
+                // snprintf(node.thumbnail_link, sizeof(node.thumbnail_link), "https://img.youtube.com/vi/%s/mqdefault.jpg", node.id);
+                snprintf(node.thumbnail_link, sizeof(node.thumbnail_link), "/vi/%s/mqdefault.jpg", node.id);
 
-                    // playlist id
-                    cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
-                    if (contentId && cJSON_IsString(contentId)) node.id = strdup(contentId->valuestring);
-
-                    // playlist title
-                    cJSON *metadata = cJSON_GetObjectItem(lockupViewModel, "metadata");
-                    cJSON *lockupMetadataViewModel = metadata ? cJSON_GetObjectItem(metadata, "lockupMetadataViewModel") : NULL;
-                    cJSON *title = lockupMetadataViewModel ? cJSON_GetObjectItem(lockupMetadataViewModel, "title") : NULL;
-                    cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
-                    if (content && cJSON_IsString(content)) node.title = strdup(content->valuestring);
-
-                    cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
-                    cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
-                    cJSON *primaryThumbnail = collectionThumbnailViewModel ? cJSON_GetObjectItem(collectionThumbnailViewModel, "primaryThumbnail") : NULL;
-                    cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
-
-                    // playlist thumbnail
-                    cJSON *image = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "image") : NULL;
-                    cJSON *sources = image ? cJSON_GetObjectItem(image, "sources") : NULL;
-                    if (sources && cJSON_IsArray(sources)) {
-                        cJSON* first_source = cJSON_GetArrayItem(sources, 0);
-                        cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
-                        // if (url && cJSON_IsString(url)) node.thumbnail = get_thumbnail_from_youtube_link(url->valuestring, curl);
-                        if (url && cJSON_IsString(url)) node.thumbnail_link = strdup(url->valuestring);
+                // creator of video
+                cJSON *ownerTextRuns = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "ownerText"), "runs");
+                if (ownerTextRuns && cJSON_IsArray(ownerTextRuns)) {
+                    cJSON *first_run = cJSON_GetArrayItem(ownerTextRuns, 0);
+                    if (first_run) {
+                        cJSON *text = cJSON_GetObjectItem(first_run, "text");
+                        if (text && cJSON_IsString(text)) 
+                            strcpy(node.author, text->valuestring);
                     }
+                }
 
-                    // number of videos in playlist
-                    cJSON *overlays = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "overlays") : NULL;
-                    cJSON *overlay;
-                    if (overlays && cJSON_IsArray(overlays)) {
-                        cJSON_ArrayForEach (overlay, overlays) {
-                            cJSON *thumbnailOverlayBadgeViewModel = cJSON_GetObjectItem(overlay, "thumbnailOverlayBadgeViewModel");
-                            cJSON *thumbnailBadges = thumbnailOverlayBadgeViewModel ? cJSON_GetObjectItem(thumbnailOverlayBadgeViewModel, "thumbnailBadges") : NULL;
-                            if (thumbnailBadges && cJSON_IsArray(thumbnailBadges)) {
-                                cJSON *thumbnailBadge;
-                                cJSON_ArrayForEach (thumbnailBadge, thumbnailBadges) {
-                                    cJSON *thumbnailBadgeViewModel = cJSON_GetObjectItem(thumbnailBadge, "thumbnailBadgeViewModel");
-                                    if (thumbnailBadgeViewModel) {
-                                        cJSON *text = cJSON_GetObjectItem(thumbnailBadgeViewModel, "text");
-                                        if (text && cJSON_IsString(text)) {
-                                            node.video_count = strdup(text->valuestring);
-                                            break;
-                                        }
+                // view count
+                cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
+                if (viewCountText && cJSON_IsString(viewCountText)) {
+                    format_youtube_views(viewCountText->valuestring, sizeof(node.views), node.views);
+                }
+
+                // publish date
+                cJSON *publishedTimeText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "publishedTimeText"), "simpleText");
+                if (publishedTimeText && cJSON_IsString(publishedTimeText))
+                    strcpy(node.date, publishedTimeText->valuestring);
+
+                // video length
+                cJSON *lengthText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "lengthText"), "simpleText");
+                if (lengthText && cJSON_IsString(lengthText))
+                    strcpy(node.length, lengthText->valuestring);
+            }
+
+            else if (channelRenderer) {
+                node.type = CONTENT_TYPE_CHANNEL;
+
+                // channel id
+                cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
+                if (channelId && cJSON_IsString(channelId))
+                    strcpy(node.id, channelId->valuestring);
+
+                // channel title
+                cJSON *title = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "title"), "simpleText");
+                if (title && cJSON_IsString(title))
+                    strcpy(node.title, title->valuestring);
+
+                // subscriber count
+                cJSON *subCount = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "videoCountText"), "simpleText");
+                if(subCount && cJSON_IsString(subCount))
+                    strcpy(node.subs, subCount->valuestring);
+
+                // thumbnail link
+                cJSON *thumbnails = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "thumbnail"), "thumbnails");
+                if (thumbnails && cJSON_IsArray(thumbnails)) {
+                    cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
+                    cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
+                    if(url && cJSON_IsString(url)) {
+                        char channel_thumbnail_link [128] = "https:";
+                        strcat(channel_thumbnail_link, url->valuestring);
+                        if (url && cJSON_IsString(url)) 
+                            strcpy(node.thumbnail_link, url->valuestring);
+                    }
+                }
+            }
+
+            else if (lockupViewModel) {
+                node.type = CONTENT_TYPE_PLAYLIST;
+
+                // playlist id
+                cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
+                if (contentId && cJSON_IsString(contentId))
+                    strcpy(node.id, contentId->valuestring);
+
+                // playlist title
+                cJSON *metadata = cJSON_GetObjectItem(lockupViewModel, "metadata");
+                cJSON *lockupMetadataViewModel = metadata ? cJSON_GetObjectItem(metadata, "lockupMetadataViewModel") : NULL;
+                cJSON *title = lockupMetadataViewModel ? cJSON_GetObjectItem(lockupMetadataViewModel, "title") : NULL;
+                cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
+                if (content && cJSON_IsString(content))
+                    strcpy(node.title, content->valuestring);
+
+                cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
+                cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
+                cJSON *primaryThumbnail = collectionThumbnailViewModel ? cJSON_GetObjectItem(collectionThumbnailViewModel, "primaryThumbnail") : NULL;
+                cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
+
+                // playlist thumbnail
+                cJSON *image = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "image") : NULL;
+                cJSON *sources = image ? cJSON_GetObjectItem(image, "sources") : NULL;
+                if (sources && cJSON_IsArray(sources)) {
+                    cJSON* first_source = cJSON_GetArrayItem(sources, 0);
+                    cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
+                    if (url && cJSON_IsString(url)) 
+                        strcpy(node.thumbnail_link, url->valuestring);
+                }
+
+                // number of videos in playlist
+                cJSON *overlays = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "overlays") : NULL;
+                cJSON *overlay;
+                if (overlays && cJSON_IsArray(overlays)) {
+                    cJSON_ArrayForEach (overlay, overlays) {
+                        cJSON *thumbnailOverlayBadgeViewModel = cJSON_GetObjectItem(overlay, "thumbnailOverlayBadgeViewModel");
+                        cJSON *thumbnailBadges = thumbnailOverlayBadgeViewModel ? cJSON_GetObjectItem(thumbnailOverlayBadgeViewModel, "thumbnailBadges") : NULL;
+                        if (thumbnailBadges && cJSON_IsArray(thumbnailBadges)) {
+                            cJSON *thumbnailBadge;
+                            cJSON_ArrayForEach (thumbnailBadge, thumbnailBadges) {
+                                cJSON *thumbnailBadgeViewModel = cJSON_GetObjectItem(thumbnailBadge, "thumbnailBadgeViewModel");
+                                if (thumbnailBadgeViewModel) {
+                                    cJSON *text = cJSON_GetObjectItem(thumbnailBadgeViewModel, "text");
+                                    if (text && cJSON_IsString(text)) {
+                                        strcpy(node.video_count, text->valuestring);
+                                        break;
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                if (node.id && (targs->search_results->count < SEARCH_ITEMS_PER_PAGE)) {
-                    add_node(targs->search_results, node);
-                    elements_added++;
-                }
+            if ((node.id[0] != '\0')) {
+                add_node(targs->search_results, node);
+                elements_added++;
             }
         }
     }
-
     // printf("processing thumbnails\n");
     // pthread_mutex_lock(&targs->thumbnail_list->mutex);
     //     YoutubeSearchList *search_list = targs->search_results;
     //     for (YoutubeSearchNode *node = search_list->head; node; node = node->next) {
     //         if (node->thumbnail_link[0] != '\0') {
-    //             // config thread args
-    //             strcpy(targs->link, node->thumbnail_link);
-    //             strcpy(targs->id, node->id);
-    //             pthread_create(&threads[current_thread], NULL, load_thumbnail, targs);
-    //             pthread_join(threads[current_thread], NULL);
-    //             current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
-    //             node->thumbnail_loaded = true;
+    //             ThumbnailData *data = malloc(sizeof(ThumbnailData));
+    //             strcpy(data->id, node->id);
+    //             data->data = fetch_url("img.youtube.com", "/vi/dQw4w9WgXcQ/mqdefault.jpg", "443");
+    //             if (is_memory_ready(data->data)) {
+    //                 data->next = NULL;
+    //                 add_thumbnail_node(data, targs->thumbnail_list);
+    //             }
     //         }
     //     }
     // pthread_mutex_unlock(&targs->thumbnail_list->mutex);
@@ -990,12 +940,13 @@ void* get_results_from_query(void* args)
 
     search_finished = true;
     searching = false;
-
-    if (elements_added == 0) printf("no items were found\n");
+    end_search_time = clock();
     cJSON_Delete(search_json);
     free(args);
-    time_t after = time(NULL);
-    printf("search process took %ld seconds\n", (after - before));
+    unload_memory_block(&html);
+
+    printf("%d elements added\n", elements_added);
+    printf("search process took %f seconds\n", (end_search_time - start_search_time) / (CLOCKS_PER_SEC * 1.0f) * 10);
     return NULL;
 }
 
@@ -1060,22 +1011,22 @@ int main()
 
     while (!WindowShouldClose()) {
         // loading thumbnails gathered from thread one by one
-        pthread_mutex_lock(&thumbnail_list.mutex);
-            if (thumbnail_list.head) {
-                ThumbnailData *thumbnail_data = thumbnail_list.head;
+        // pthread_mutex_lock(&thumbnail_list.mutex);
+        //     if (thumbnail_list.head) {
+        //         ThumbnailData *thumbnail_data = thumbnail_list.head;
 
-                for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
-                    if ((strcmp(thumbnail_data->id, search_node->id) == 0)) {
-                        search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
-                    }
-                }
+        //         for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
+        //             if ((strcmp(thumbnail_data->id, search_node->id) == 0)) {
+        //                 search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
+        //             }
+        //         }
 
-                // delete node from thumbnail list
-                thumbnail_list.head = thumbnail_list.head->next;
-                unload_memory_block(&thumbnail_data->data);
-                free(thumbnail_data);
-            }
-        pthread_mutex_unlock(&thumbnail_list.mutex);
+        //         // delete node from thumbnail list
+        //         thumbnail_list.head = thumbnail_list.head->next;
+        //         unload_memory_block(&thumbnail_data->data);
+        //         free(thumbnail_data);
+        //     }
+        // pthread_mutex_unlock(&thumbnail_list.mutex);
         
         if (search) {
             search = false;
@@ -1091,11 +1042,9 @@ int main()
             targs->thumbnail_list = &thumbnail_list;
 
             // get the results of this query in this thread
-            pthread_create(&threads[current_thread], NULL, get_results_from_query, targs);
-            pthread_detach(threads[current_thread]);
-
-            // update thread pool
-            current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
+            pthread_t search_thread;
+            pthread_create(&search_thread, NULL, get_results_from_query, targs);
+            pthread_detach(search_thread);
         }
 
         BeginDrawing();
@@ -1105,7 +1054,7 @@ int main()
             const int padding = 5;
             
             // searching UI
-            const Rectangle search_bar = { padding, padding, 350, 25 };
+            const Rectangle search_bar = { padding, padding, 400, 25 };
             const Rectangle search_button = { (search_bar.x + search_bar.width + padding), search_bar.y, 50, 25 };
 
             // toggle edit mode engaging or leaving the text box window
@@ -1126,6 +1075,7 @@ int main()
                 
                 // only search when last search is done 
                 search = (search_finished);
+                if (search) start_search_time = clock();
             }
             
             // filtering UI
@@ -1244,29 +1194,24 @@ int main()
                         DrawRectangleRec(content_rect, background_color);
                         
                         // title
-                        if (search_result->title)
-                            DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
+                        DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
 
                         // thumbnail
                         if (IsTextureReady(search_result->thumbnail))
                             DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
 
                         if (search_result->type == CONTENT_TYPE_VIDEO) {
-                            if (search_result->date && search_result->views)    
-                                DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, search_result->length ? search_result->length : "LIVE");
+                            DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (search_result->length[0] != '\0' ? search_result->length : "LIVE"));
                         }
 
                         else if (search_result->type == CONTENT_TYPE_CHANNEL) {
-                            if (search_result->subs) 
-                                DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                            
+                            DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
                             draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
                         }  
 
                         else if (search_result->type == CONTENT_TYPE_PLAYLIST) {
-                            if (search_result->video_count) 
-                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
+                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
                         }
                     }
                 }
@@ -1286,7 +1231,6 @@ int main()
     }
 }
 // to do
-    // CURL replacement 
     // loading thumbnails halts the program
     // show video information when double clicking video
     // actually play video when pressed
