@@ -536,7 +536,6 @@ void delete_cached_thumbnails (CachedThumbnailList *list)
                 UnloadTexture(current->texture);
             free(current);
             cached_thumbnails.count--;
-            break;
         }
         else {
             prev = current;
@@ -1194,7 +1193,7 @@ int main()
 
     while (!WindowShouldClose()) {
         delete_cached_thumbnails(&cached_thumbnails);
-        // loading thumbnails gathered from thread one by one
+    // loading thumbnails gathered from thread one by one
        if (pthread_mutex_trylock(&thumbnail_list.mutex) == 0) {
             while (thumbnail_list.head) {
                 ThumbnailData *thumbnail_data = thumbnail_list.head;
@@ -1204,7 +1203,7 @@ int main()
                     if (strcmp(thumbnail_data->id, search_node->id) == 0) {
                         if (IsTextureReady(search_node->thumbnail)) UnloadTexture(search_node->thumbnail);
                         search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
-                        if (IsTextureReady(search_node->thumbnail)) {
+                        // if (IsTextureReady(search_node->thumbnail)) {
                             // add new texture to cache
                             CachedThumbnailNode *cached_thumbnail_node = malloc(sizeof(CachedThumbnailNode));
                             cached_thumbnail_node->texture = search_node->thumbnail;
@@ -1213,7 +1212,7 @@ int main()
                             start_timer(&cached_thumbnail_node->lifespan, CACHED_THUMBNAIL_LIFETIME);
                             
                             add_cached_thumbnail(cached_thumbnail_node, &cached_thumbnails);
-                        }
+                        // }
                         break;
                     }
                 }
@@ -1350,12 +1349,6 @@ int main()
                         content_height 
                     };
 
-                    // extend the life of the cached node if texture is still in use
-                    CachedThumbnailNode *cached_node = get_cached_node_by_id(search_result->id, &cached_thumbnails);
-                    if (cached_node) {
-                        start_timer(&cached_node->lifespan, CACHED_THUMBNAIL_LIFETIME);
-                    }
-
                     const Vector2 mouse_position = GetMousePosition();
                     if (CheckCollisionPointRec(mouse_position, scroll_panel_area) && CheckCollisionPointRec(mouse_position, content_rect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                         current_node = i;
@@ -1370,54 +1363,15 @@ int main()
                             content_rect.height 
                         };
 
-                        const Rectangle title_bounds = {
-                            thumbnail_bounds.x + thumbnail_bounds.width,
-                            content_rect.y,
-                            content_rect.width - thumbnail_bounds.width,
-                            content_rect.height * 0.75f
-                        };
-
-                        const Rectangle subtext_bounds = {
-                            thumbnail_bounds.x + thumbnail_bounds.width,
-                            title_bounds.y + title_bounds.height,
-                            title_bounds.width,
-                            content_rect.height - title_bounds.height
-                        };
-
-                        const int padding = 5;
-                        const int font_size = 11;
-                        const int spacing = 2;
-                        const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
-
-                        Color background_color;
-                        if (i == current_node) background_color = SKYBLUE;
-                        else background_color = (i % 2) ? WHITE : RAYWHITE;
-
-                        // content backgound
-                        DrawRectangleRec(content_rect, background_color);
-                        
                         // thumbnail
                         if (IsTextureReady(search_result->thumbnail)) 
                             DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
                         
-                        
-
-                        // title
-                        DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
-
-                        switch(search_result->type) {
-                            case CONTENT_TYPE_VIDEO:
-                                DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (search_result->length[0] != '\0' ? search_result->length : "LIVE"));
-                                break;
-                            case CONTENT_TYPE_CHANNEL:
-                                DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
-                                break;
-                            case CONTENT_TYPE_PLAYLIST:
-                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
-                                break;
-                            default: break;
+                        // extend the life of the cached node if texture is still in use
+                        CachedThumbnailNode *cached_node = get_cached_node_by_id(search_result->id, &cached_thumbnails);
+                        if (cached_node) {
+                            printf("timer started %s\n", cached_node->id);
+                            start_timer(&cached_node->lifespan, CACHED_THUMBNAIL_LIFETIME);
                         }
                     }
                 }
@@ -1452,20 +1406,3 @@ int main()
         return 0;
     }
 }
-
-// to do
-    // cache thumbnails
-    // fetch_url decoding in place
-    // use worker thread structure to load thumbnails faster?
-    // convert search into worker thread
-    // more search filters?
-    // pagination 
-    // show video information when double clicking video
-    // actually play video when pressed
-    // cleanup when prematurley deleting
-        // thumbnail list
-        // thread node
-        // search arguements
-
-// for read me
-    // -lssl -lcrypto -lcjson and raylib/raygui
