@@ -234,7 +234,7 @@ void format_youtube_views(const char* views_str, const int maxlen, char dst[maxl
 Texture2D get_thumbnail_from_memory (const MemoryBlock chunk, const float width, const float height)
 {
     if (is_memory_ready(chunk)) {
-        Image image = LoadImageFromMemory(".jpeg", (unsigned char*) chunk.memory, chunk.size);
+        Image image = LoadImageFromMemory(".jpg", (unsigned char*) chunk.memory, chunk.size);
         if (IsImageReady(image)) {
             ImageResize(&image, width, height);
             Texture2D ret = LoadTextureFromImage(image);
@@ -437,6 +437,7 @@ typedef struct ThumbnailData {
 } ThumbnailData;
 
 typedef struct {
+    int count;
     ThumbnailData *head;
     ThumbnailData *tail;  
     pthread_mutex_t mutex;
@@ -454,13 +455,12 @@ typedef struct {
     char link[256];
     char id[256];
     Query query;
+    ContentType type;
     YoutubeSearchList* search_results;
     ThumbnailList *thumbnail_list;
 } ThreadArgs;
 
 #define MAX_THREADS 4
-pthread_t threads[MAX_THREADS];
-int current_thread = 0;
 
 void add_thumbnail_node (ThumbnailData *node, ThumbnailList *list) 
 {
@@ -472,6 +472,7 @@ void add_thumbnail_node (ThumbnailData *node, ThumbnailList *list)
         list->tail->next = node;
         list->tail = list->tail->next;
     }
+    list->count++;
 }
 
 void draw_thumbnail_subtext (const Rectangle container, const Font font, const Color text_color, const int font_size, const int spacing, const int padding, const char* text)
@@ -638,8 +639,7 @@ char* find_http_body_start(const char* response)
         return NULL;
 }
 
-MemoryBlock fetch_url(const char *host, const char *path, const char *port, const char *debug_filename) 
-{
+MemoryBlock fetch_url(const char *host, const char *path, const char *port, const char *debug_filename) {
     // specify the type of address info you want and store the result
     struct addrinfo desired_addr_info = {0}, *result;
     desired_addr_info.ai_family = AF_UNSPEC;
@@ -770,6 +770,99 @@ char *url_encode(const char *str)
 
     *ptr = '\0';
     return encoded_str;
+}
+
+typedef struct ThreadNode {
+    pthread_t thread;
+    char id[256];
+    bool completed;
+    struct ThreadNode* next;
+} ThreadNode;
+
+typedef struct {
+    ThreadNode* head;
+    ThreadNode* tail;
+    int active_count;
+    pthread_mutex_t thread_mutex;
+} ThreadPool;
+
+ThreadPool thumbnail_thread_pool;
+
+void *load_thumbnail(void *args)
+{
+    ThreadArgs *targs = (ThreadArgs *) args;
+    
+    // Find our thread node to mark completion
+    ThreadNode* our_node = NULL;
+    pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
+    for (ThreadNode* node = thumbnail_thread_pool.head; node; node = node->next) {
+        if (strcmp(node->id, targs->id) == 0) {
+            our_node = node;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
+    
+    // Load the thumbnail
+    MemoryBlock chunk = fetch_url(content_type_to_host(targs->type), targs->link, "443", NULL);
+    if (is_memory_ready(chunk)) {
+        ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
+        if (thumbnail_data) {
+            thumbnail_data->data = chunk;
+            strcpy(thumbnail_data->id, targs->id);
+            thumbnail_data->next = NULL;
+            
+            // Add to thumbnail list with minimal lock time
+            pthread_mutex_lock(&targs->thumbnail_list->mutex);
+            add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
+            pthread_mutex_unlock(&targs->thumbnail_list->mutex);
+        }
+        else {
+            printf("load_thumbnail: malloc returned NULL for thumbnail_data\n");
+        }
+    }
+    else {
+        printf("load_thumbnail: fetched data is not valid\n");
+    }
+    
+    // Mark thread as completed
+    if (our_node) {
+        our_node->completed = true;
+    }
+    
+    free(targs);
+    return NULL;
+}
+
+void cleanup_completed_threads() {
+    pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
+    
+    ThreadNode* current = thumbnail_thread_pool.head;
+    ThreadNode* prev = NULL;
+    
+    while (current) {
+        if (current->completed) {
+            // Remove and cleanup
+            if (prev) prev->next = current->next;
+            else thumbnail_thread_pool.head = current->next;
+            
+            if (current == thumbnail_thread_pool.tail) {
+                thumbnail_thread_pool.tail = prev;
+            }
+            
+            ThreadNode* to_delete = current;
+            current = current->next;
+            
+            pthread_join(to_delete->thread, NULL);
+            free(to_delete);
+            thumbnail_thread_pool.active_count--;
+        } else {
+            prev = current;
+            current = current->next;
+        }
+    }
+    
+    pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
 }
 
 // writes a list of search result nodes to some list
@@ -903,8 +996,11 @@ void* get_results_from_query(void* args)
                 if (thumbnails && cJSON_IsArray(thumbnails)) {
                     cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
                     cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
-                    if(url && cJSON_IsString(url)) 
-                        strcpy(node.thumbnail_link, strrchr(url->valuestring, '/'));
+                    if(url && cJSON_IsString(url)) {
+                        char *potential_channel_url = strstr(url->valuestring,"/ytc");
+                        if (!potential_channel_url) potential_channel_url = strrchr(url->valuestring, '/');
+                        strcpy(node.thumbnail_link, potential_channel_url);
+                    }
                 }
             }
 
@@ -972,27 +1068,6 @@ void* get_results_from_query(void* args)
 
     cJSON_Delete(search_json);
 
-    printf("processing thumbnails\n");
-    pthread_mutex_lock(&targs->thumbnail_list->mutex);
-    YoutubeSearchList *search_list = targs->search_results;
-    for (YoutubeSearchNode *node = search_list->head; node; node = node->next) {
-        if (node->thumbnail_link[0] != '\0') {
-            ThumbnailData *data = malloc(sizeof(ThumbnailData));
-            strcpy(data->id, node->id);
-            data->data = fetch_url(content_type_to_host(node->type), node->thumbnail_link, "443", NULL);
-            if (is_memory_ready(data->data)) {
-                data->next = NULL;
-                add_thumbnail_node(data, targs->thumbnail_list);
-            }
-            else {
-                printf("get_results_from_query: data parameter in thumbnail node is invalid\n");
-                free(data);
-            }
-        }
-    }
-    pthread_mutex_unlock(&targs->thumbnail_list->mutex);
-    printf("thumbnails loaded\n");
-
     search_finished = true;
     searching = false;
     end_search_time = clock();
@@ -1003,8 +1078,25 @@ void* get_results_from_query(void* args)
     return NULL;
 }
 
+void add_thread_node(ThreadNode *node, ThreadPool *list) 
+{
+    pthread_mutex_lock(&list->thread_mutex);
+    if (!list->head) list->head = list->tail = node;
+    else {
+        list->tail->next = node;
+        list->tail = list->tail->next;
+        list->tail->next = NULL;
+    }
+    list->active_count++;
+    pthread_mutex_unlock(&list->thread_mutex);
+}
+
 int main()
 {
+    thumbnail_thread_pool.active_count = 0;
+    thumbnail_thread_pool.head = thumbnail_thread_pool.tail = NULL;
+    pthread_mutex_init(&thumbnail_thread_pool.thread_mutex, NULL);
+
     // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
 
@@ -1059,23 +1151,28 @@ int main()
     int current_node = -1;
 
     while (!WindowShouldClose()) {
+        cleanup_completed_threads();
         // loading thumbnails gathered from thread one by one
-        pthread_mutex_lock(&thumbnail_list.mutex);
-        if (thumbnail_list.head) {
-            ThumbnailData *thumbnail_data = thumbnail_list.head;
-
-            for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
-                if ((strcmp(thumbnail_data->id, search_node->id) == 0)) {
-                    search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
+       if (pthread_mutex_trylock(&thumbnail_list.mutex) == 0) {
+            while (thumbnail_list.head) {
+                ThumbnailData *thumbnail_data = thumbnail_list.head;
+                
+                // Find matching search node and load texture
+                for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
+                    if (strcmp(thumbnail_data->id, search_node->id) == 0) {
+                        if (IsTextureReady(search_node->thumbnail)) UnloadTexture(search_node->thumbnail);
+                        search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
+                        break;
+                    }
                 }
+                
+                // Remove processed thumbnail data
+                thumbnail_list.head = thumbnail_list.head->next;
+                unload_memory_block(&thumbnail_data->data);
+                free(thumbnail_data);
             }
-
-            // delete node from thumbnail list
-            thumbnail_list.head = thumbnail_list.head->next;
-            unload_memory_block(&thumbnail_data->data);
-            free(thumbnail_data);
+            pthread_mutex_unlock(&thumbnail_list.mutex);
         }
-        pthread_mutex_unlock(&thumbnail_list.mutex);
         
         if (search) {
             search = false;
@@ -1083,7 +1180,7 @@ int main()
             // clear search result list information
             if (search_results.count > 0) unload_list(&search_results);
             current_node = -1;
-            
+
             // configure thread arguements for routine
             ThreadArgs *targs = malloc(sizeof(ThreadArgs));
             targs->query = query;
@@ -1241,27 +1338,54 @@ int main()
                         // content backgound
                         DrawRectangleRec(content_rect, background_color);
                         
-                        // title
-                        DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
-
-                        // thumbnail
-                        if (IsTextureReady(search_result->thumbnail))
+                        if (IsTextureReady(search_result->thumbnail)) {
+                            // thumbnail
                             DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
-                        
-                        switch(search_result->type) {
-                            case CONTENT_TYPE_VIDEO:
-                                DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (search_result->length[0] != '\0' ? search_result->length : "LIVE"));
-                                break;
-                            case CONTENT_TYPE_CHANNEL:
-                                DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
-                                break;
-                            case CONTENT_TYPE_PLAYLIST:
-                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
-                                break;
-                            default: break;
+                            
+                            // title
+                            DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
+
+                            switch(search_result->type) {
+                                case CONTENT_TYPE_VIDEO:
+                                    DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                                    draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (search_result->length[0] != '\0' ? search_result->length : "LIVE"));
+                                    break;
+                                case CONTENT_TYPE_CHANNEL:
+                                    DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                                    draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
+                                    break;
+                                case CONTENT_TYPE_PLAYLIST:
+                                    draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
+                                    break;
+                                default: break;
+                            }
                         }
+                        else if (search_result->thumbnail_loaded == false) {
+                            pthread_mutex_lock(&thumbnail_thread_pool.thread_mutex);
+                            bool can_create_thread = (thumbnail_thread_pool.active_count < MAX_THREADS);
+                            pthread_mutex_unlock(&thumbnail_thread_pool.thread_mutex);
+
+                            if (can_create_thread) {
+                                search_result->thumbnail_loaded = true;
+
+                                ThreadArgs *load_thumbnail_args = malloc(sizeof(ThreadArgs));
+                                strcpy(load_thumbnail_args->link, search_result->thumbnail_link);
+                                strcpy(load_thumbnail_args->id, search_result->id);
+                                load_thumbnail_args->thumbnail_list = &thumbnail_list;
+                                load_thumbnail_args->type = search_result->type;
+                                
+                                // Create thread node
+                                ThreadNode* thread_node = malloc(sizeof(ThreadNode));
+                                strcpy(thread_node->id, search_result->id);
+                                thread_node->completed = false;
+                                thread_node->next = NULL;
+                                
+                                // add to pool
+                                add_thread_node(thread_node, &thumbnail_thread_pool);
+                                pthread_create(&thread_node->thread, NULL, load_thumbnail, load_thumbnail_args);
+                                pthread_detach(thread_node->thread);
+                            }
+                        } 
                     }
                 }
             EndScissorMode();
@@ -1279,17 +1403,28 @@ int main()
             unload_memory_block(&node->data);
             free(node);
         }
+        while (thumbnail_thread_pool.head) {
+            ThreadNode * node = thumbnail_thread_pool.head;
+            thumbnail_thread_pool.head = thumbnail_thread_pool.head->next;
+            free(node);
+        }
         CloseWindow();
         return 0;
     }
 }
 // to do
+    // cache thumbnails
     // fetch_url decoding in place
-    // use worker thread structure to load threads fast
+    // use worker thread structure to load thumbnails faster?
+    // convert search into worker thread
     // more search filters?
     // pagination 
     // show video information when double clicking video
     // actually play video when pressed
+    // cleanup when prematurley deleting
+        // thumbnail list
+        // thread node
+        // search arguements
 
 // for read me
     // -lssl -lcrypto -lcjson and raylib/raygui
