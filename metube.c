@@ -1,11 +1,9 @@
 #include <ctype.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <pthread.h>
-#include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include <time.h>
 #include <unistd.h>
@@ -254,6 +252,18 @@ int bound_index_to_array (const int pos, const int array_size)
     return (pos + array_size) % array_size;
 }
 
+char *content_type_to_host (const ContentType content_type)
+{
+    switch (content_type) {
+        case CONTENT_TYPE_VIDEO: return "img.youtube.com";
+        case CONTENT_TYPE_CHANNEL: return "yt3.ggpht.com";
+        case CONTENT_TYPE_PLAYLIST: return "i.ytimg.com";
+        default: break;
+    }
+
+    return NULL;
+}
+
 char* content_type_to_text (const ContentType content_type)
 {
     switch (content_type) {
@@ -483,30 +493,30 @@ void draw_thumbnail_subtext (const Rectangle container, const Font font, const C
 bool search_finished = true;
 bool searching = false;
 
-void create_file_from_memory(const char* filename, const char* memory) 
+void create_file_from_memory(const char* filename, const char* memory, const size_t nbytes) 
 {
-    FILE* fp = fopen(filename, "w");
+    FILE* fp = fopen(filename, "wb");
     if (!fp) printf("could not write memory into \"%s\"\n", filename);
     else {
-        fprintf(fp, "%s", memory);
+        fwrite(memory, 1, nbytes, fp);
         fclose(fp);
     } 
 }
 
-char* extract_yt_data(const char* html) 
+void extract_yt_data(MemoryBlock *html) 
 {
     const char* needle = "itemSectionRenderer";
-    const char* location = strstr(html, needle);
+    const char* location = strstr(html->memory, needle);
     if (!location) {
         printf("extract_yt_data2: \"%s\" was not found in html argument\n", needle);
-        return NULL;
+        return;
     }
 
     // move pointer to the first '{' after the needle
     const char* start = strchr(location, '{');
     if (!start) {
         printf("extract_yt_data2: Couldn't find starting '{'\n");
-        return NULL;
+        return;
     }
 
     const char* current = start;
@@ -520,24 +530,27 @@ char* extract_yt_data(const char* html)
     }
 
     if (depth != 0) {
-        printf("extract_yt_data2: JSON object appears to be unbalanced\n");
-        return NULL;
+        printf("extract_yt_data: JSON object appears to be unbalanced\n");
+        return;
+    }
+    
+    // alter the data in the memory block in place
+
+    const char *end = current;
+    const size_t nchars = end - start + 1;
+    
+    // write valid data over the beginning portion 
+    memcpy(html->memory, start, nchars);
+
+    // free redundant memory after this block 
+    html->memory = realloc(html->memory, nchars + 1);
+    if (!html->memory) {
+        perror("realloc failed");
+        exit(EXIT_FAILURE);
     }
 
-    size_t len = current - start;
-    char* result = malloc(len + 1);
-    if (!result) {
-        printf("extract_yt_data2: malloc failed\n");
-        return NULL;
-    }
-
-    strncpy(result, start, len);
-    result[len] = '\0';
-
-    return result;
+    html->memory[nchars] = '\0';
 }
-
-CURL *curl;
 
 clock_t start_search_time;
 clock_t end_search_time;
@@ -561,45 +574,52 @@ size_t write_data_to_memory_block(const void* src, const size_t nbytes, MemoryBl
     chunk->memory = new_memory;
     memcpy(&chunk->memory[chunk->size], src, nbytes);
     chunk->size += nbytes;
-    chunk->memory[chunk->size] = '\0';
+    // chunk->memory[chunk->size] = '\0';
 
     return nbytes;
 }
 
-// Helper function to decode chunked data
-MemoryBlock decode_chunked_data(const char* chunked_data)
+MemoryBlock decode_chunked_data(const char* chunked_data, const size_t size)
 {
     MemoryBlock result = create_memory_block(0);
     const char* current = chunked_data;
+    const char *needle = "\r\n";
+    const size_t needle_len = strlen(needle);
     
-    while (*current) {
-        // Read chunk size (hex number until \r\n)
-        char* line_end = strstr(current, "\r\n");
-        if (!line_end) break;
+    while (current < (chunked_data + size)) {
+        // the chunk size (hex number) is followed by "\r\n"
+        char* line_end = strstr(current, needle);
+        if (!line_end) {
+            printf("chunk size marker not found\n");
+            break;
+        }
         
-        // Extract chunk size
-        char size_str[16];
-        int size_len = line_end - current;
-        if (size_len >= sizeof(size_str)) break;
+        // extracting the hex number, no +1 bc last char is newline
+        const int nchars = line_end - current;
+        char hex_str[nchars + 1];
+        memcpy(hex_str, current, nchars);
+        hex_str[nchars] = '\0';
+
+        // now we have the number of bytes this oncoming chunk of characters has
+        const long chunk_size = strtol(hex_str, NULL, 16);
+        if (chunk_size == 0) {
+            printf("chunk size is 0, finished reading\n");
+            break;
+        }
         
-        strncpy(size_str, current, size_len);
-        size_str[size_len] = '\0';
+        printf("hex read: \"%s\" chunk size: %ld\n", hex_str, chunk_size);
         
-        // Convert hex string to number
-        long chunk_size = strtol(size_str, NULL, 16);
+        // move past the needle
+        current = line_end + needle_len;
+
+        // write the data
+        if (write_data_to_memory_block(current, chunk_size, &result) != chunk_size) {
+            printf("decode_chunked_data: failed to write %ld bytes to result\n", chunk_size);
+            break;
+        }
         
-        // If chunk size is 0, we're done
-        if (chunk_size == 0) break;
-        
-        // Move past the size line
-        current = line_end + 2;
-        
-        // Copy chunk data
-        if (strlen(current) >= chunk_size) 
-            write_data_to_memory_block(current, chunk_size, &result);
-        
-        // Move past chunk data and trailing \r\n
-        current += chunk_size + 2;
+        // skip over data and trailing needle
+        current += chunk_size + needle_len;
     }
     
     return result;
@@ -618,7 +638,7 @@ char* find_http_body_start(const char* response)
         return NULL;
 }
 
-MemoryBlock fetch_url(const char *host, const char *path, const char *port) 
+MemoryBlock fetch_url(const char *host, const char *path, const char *port, const char *debug_filename) 
 {
     // specify the type of address info you want and store the result
     struct addrinfo desired_addr_info = {0}, *result;
@@ -626,16 +646,16 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port)
     desired_addr_info.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, port, &desired_addr_info, &result) != 0) {
         perror("getaddrinfo");
-        return create_memory_block(0);
+        return (MemoryBlock) { 0 };
     }
     
     // initializing socket
     int sockfd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if (connect(sockfd, result->ai_addr, result->ai_addrlen) != 0) {
         perror("connect");
-        freeaddrinfo(result);
         close(sockfd);
-        return create_memory_block(0);
+        freeaddrinfo(result);
+        return (MemoryBlock) { 0 };
     }
 
     // ssl setup
@@ -648,7 +668,7 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port)
         SSL_CTX_free(ctx);
         close(sockfd);
         freeaddrinfo(result);
-        return create_memory_block(0);
+        return (MemoryBlock) { 0 };
     }
 
     // constructing and sending request
@@ -656,7 +676,7 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port)
     snprintf(request, sizeof(request),
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\r\n"
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
         "Connection: close\r\n"
         "\r\n",
         path, host);
@@ -668,19 +688,18 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port)
         SSL_CTX_free(ctx);
         close(sockfd);
         freeaddrinfo(result);
-        return create_memory_block(0);
+        return (MemoryBlock) { 0 };
     } 
 
     // read the response of the created request
     char buffer[4096];
     int bytes;
-    MemoryBlock raw_response = create_memory_block(0);
+    MemoryBlock raw_response = (MemoryBlock){ 0 };
     
     // read raw http
     while ((bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1)) > 0) {
-        buffer[bytes] = '\0';
-        const size_t size = (bytes * sizeof(char));
-        write_data_to_memory_block(buffer, size, &raw_response);
+        // buffer[bytes] = '\0';
+        write_data_to_memory_block(buffer, bytes, &raw_response);
     }
 
     // deinit
@@ -692,35 +711,65 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port)
     
     if (!is_memory_ready(raw_response)) {
         printf("fetch_url: raw data block is invalid\n");
-        return create_memory_block(0);
+        return (MemoryBlock) { 0 };
     }
-
-    // create_file_from_memory("raw_response.html", raw_response.memory);
     
     // extract http body
     char* body_start = find_http_body_start(raw_response.memory);
     if (!body_start) {
         printf("fetch_url: no http body was found in raw_response\n");
         unload_memory_block(&raw_response);
-        return create_memory_block(0);
+        return (MemoryBlock) { 0 };
     }
     
+    // cant use strlen as '\0' is used for binary data like PNG, JPEG, etc. 
+    const size_t body_len = raw_response.size - (body_start - raw_response.memory);
+
     // decode chunked data if needed
-    MemoryBlock final_response = create_memory_block(0);
+    MemoryBlock final_response = (MemoryBlock){ 0 };
     if (is_chunked_encoding(raw_response.memory)) {
-        printf("decoding http response...\n"); 
-        final_response = decode_chunked_data(body_start);
+        printf("raw response is chunked, decoding...\n"); 
+        final_response = decode_chunked_data(body_start, body_len);
     }
-    else {
-        size_t body_length = strlen(body_start);
-        final_response = create_memory_block(body_length + 1);
-        if (is_memory_ready(final_response)) {
-            strcpy(final_response.memory, body_start);
-        }
-    }
-    
+    else 
+        write_data_to_memory_block(body_start, body_len, &final_response);
+
+    if (debug_filename) 
+        create_file_from_memory(debug_filename, final_response.memory, final_response.size);
+
     unload_memory_block(&raw_response);
     return final_response;
+}
+
+// returns an allocated string that is the URL encoding of the argument passed
+char *url_encode(const char *str)
+{
+    if (!str) {
+        printf("url_encode: arguement is NULL");
+        return NULL;
+    }
+
+    const size_t str_len = strlen(str);
+    const size_t url_enconde_len = 3;
+
+    // worst case senario is when all characters are url encoded
+    char *encoded_str = malloc((str_len * 3) + 1);
+    char *ptr = encoded_str;
+
+    for (int i = 0; i < str_len; i++) {
+        char c = str[i];
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            *ptr++ = c;
+        }
+        // every non alpha character is replace with a % and 2 hex digits
+        else {
+            sprintf(ptr, "%%%02x", c);
+            ptr += url_enconde_len;
+        }
+    }
+
+    *ptr = '\0';
+    return encoded_str;
 }
 
 // writes a list of search result nodes to some list
@@ -732,10 +781,10 @@ void* get_results_from_query(void* args)
     ThreadArgs* targs = (ThreadArgs *) args;
 
     // get the query in url encoded format
-    char* buff = curl_easy_escape(curl, targs->query.url_encoded_query, 0);
+    char *buff = url_encode(targs->query.url_encoded_query);
     strcpy(targs->query.url_encoded_query, buff);
     printf("processing %s\n", targs->query.url_encoded_query);
-    curl_free(buff);
+    free(buff);
 
     // append the query to the yt query string
     char url[512] = "\0";
@@ -743,25 +792,29 @@ void* get_results_from_query(void* args)
     printf("path: %s\n", url);
 
     // get the page source of this url
-    // MemoryBlock html = fetch_url(url, curl);
-    MemoryBlock html = fetch_url("www.youtube.com", url, "443");
-    // create_file_from_memory("html.html", html.memory);
+    MemoryBlock html = fetch_url("www.youtube.com", url, "443", NULL);
+    if (!is_memory_ready(html)) {
+        printf("get_results_from_query: fetch_url returned invalid\n");
+        searching = false;
+        search_finished = true;
+        return NULL;
+    }
 
-    // extract search result data
-    char* cjson_data = extract_yt_data(html.memory);
-    // create_file_from_memory("cjson_data.html", cjson_data);
-
-    unload_memory_block(&html);
-    if (!cjson_data) {
-        printf("cjson_data is not valid\n");
+    extract_yt_data(&html);
+    if (!is_memory_ready(html)) {
+        printf("get_results_from_query: extracting yt data corrupted memory\n");
+        searching = false;
+        search_finished = true;
         return NULL;
     }
 
     // get json obj
-    cJSON* search_json = cJSON_Parse(cjson_data);
-    free(cjson_data);
+    cJSON* search_json = cJSON_Parse(html.memory);
+    unload_memory_block(&html);
     if (!search_json) {
-        printf("error parsing json\n");
+        printf("get_results_from_query: cJSON_Parse returned NULL\n");
+        searching = false;
+        search_finished = true;
         return NULL;
     }
 
@@ -797,7 +850,6 @@ void* get_results_from_query(void* args)
                 }
 
                 // thumbnail link
-                // snprintf(node.thumbnail_link, sizeof(node.thumbnail_link), "https://img.youtube.com/vi/%s/mqdefault.jpg", node.id);
                 snprintf(node.thumbnail_link, sizeof(node.thumbnail_link), "/vi/%s/mqdefault.jpg", node.id);
 
                 // creator of video
@@ -851,12 +903,8 @@ void* get_results_from_query(void* args)
                 if (thumbnails && cJSON_IsArray(thumbnails)) {
                     cJSON *first_thumbnail = cJSON_GetArrayItem(thumbnails, 0);
                     cJSON *url = first_thumbnail ? cJSON_GetObjectItem(first_thumbnail, "url") : NULL;
-                    if(url && cJSON_IsString(url)) {
-                        char channel_thumbnail_link [128] = "https:";
-                        strcat(channel_thumbnail_link, url->valuestring);
-                        if (url && cJSON_IsString(url)) 
-                            strcpy(node.thumbnail_link, url->valuestring);
-                    }
+                    if(url && cJSON_IsString(url)) 
+                        strcpy(node.thumbnail_link, strrchr(url->valuestring, '/'));
                 }
             }
 
@@ -888,7 +936,7 @@ void* get_results_from_query(void* args)
                     cJSON* first_source = cJSON_GetArrayItem(sources, 0);
                     cJSON *url = first_source ? cJSON_GetObjectItem(first_source, "url") : NULL;
                     if (url && cJSON_IsString(url)) 
-                        strcpy(node.thumbnail_link, url->valuestring);
+                        strcpy(node.thumbnail_link, strstr(url->valuestring, "/vi"));
                 }
 
                 // number of videos in playlist
@@ -921,29 +969,34 @@ void* get_results_from_query(void* args)
             }
         }
     }
-    // printf("processing thumbnails\n");
-    // pthread_mutex_lock(&targs->thumbnail_list->mutex);
-    //     YoutubeSearchList *search_list = targs->search_results;
-    //     for (YoutubeSearchNode *node = search_list->head; node; node = node->next) {
-    //         if (node->thumbnail_link[0] != '\0') {
-    //             ThumbnailData *data = malloc(sizeof(ThumbnailData));
-    //             strcpy(data->id, node->id);
-    //             data->data = fetch_url("img.youtube.com", "/vi/dQw4w9WgXcQ/mqdefault.jpg", "443");
-    //             if (is_memory_ready(data->data)) {
-    //                 data->next = NULL;
-    //                 add_thumbnail_node(data, targs->thumbnail_list);
-    //             }
-    //         }
-    //     }
-    // pthread_mutex_unlock(&targs->thumbnail_list->mutex);
-    // printf("thumbnails loaded\n");
+
+    cJSON_Delete(search_json);
+
+    printf("processing thumbnails\n");
+    pthread_mutex_lock(&targs->thumbnail_list->mutex);
+    YoutubeSearchList *search_list = targs->search_results;
+    for (YoutubeSearchNode *node = search_list->head; node; node = node->next) {
+        if (node->thumbnail_link[0] != '\0') {
+            ThumbnailData *data = malloc(sizeof(ThumbnailData));
+            strcpy(data->id, node->id);
+            data->data = fetch_url(content_type_to_host(node->type), node->thumbnail_link, "443", NULL);
+            if (is_memory_ready(data->data)) {
+                data->next = NULL;
+                add_thumbnail_node(data, targs->thumbnail_list);
+            }
+            else {
+                printf("get_results_from_query: data parameter in thumbnail node is invalid\n");
+                free(data);
+            }
+        }
+    }
+    pthread_mutex_unlock(&targs->thumbnail_list->mutex);
+    printf("thumbnails loaded\n");
 
     search_finished = true;
     searching = false;
     end_search_time = clock();
-    cJSON_Delete(search_json);
     free(args);
-    unload_memory_block(&html);
 
     printf("%d elements added\n", elements_added);
     printf("search process took %f seconds\n", (end_search_time - start_search_time) / (CLOCKS_PER_SEC * 1.0f) * 10);
@@ -952,10 +1005,6 @@ void* get_results_from_query(void* args)
 
 int main()
 {
-    // start the curl session
-    curl_global_init(CURL_GLOBAL_ALL);
-    curl = curl_easy_init();
-
     // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
 
@@ -1011,22 +1060,22 @@ int main()
 
     while (!WindowShouldClose()) {
         // loading thumbnails gathered from thread one by one
-        // pthread_mutex_lock(&thumbnail_list.mutex);
-        //     if (thumbnail_list.head) {
-        //         ThumbnailData *thumbnail_data = thumbnail_list.head;
+        pthread_mutex_lock(&thumbnail_list.mutex);
+        if (thumbnail_list.head) {
+            ThumbnailData *thumbnail_data = thumbnail_list.head;
 
-        //         for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
-        //             if ((strcmp(thumbnail_data->id, search_node->id) == 0)) {
-        //                 search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
-        //             }
-        //         }
+            for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
+                if ((strcmp(thumbnail_data->id, search_node->id) == 0)) {
+                    search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
+                }
+            }
 
-        //         // delete node from thumbnail list
-        //         thumbnail_list.head = thumbnail_list.head->next;
-        //         unload_memory_block(&thumbnail_data->data);
-        //         free(thumbnail_data);
-        //     }
-        // pthread_mutex_unlock(&thumbnail_list.mutex);
+            // delete node from thumbnail list
+            thumbnail_list.head = thumbnail_list.head->next;
+            unload_memory_block(&thumbnail_data->data);
+            free(thumbnail_data);
+        }
+        pthread_mutex_unlock(&thumbnail_list.mutex);
         
         if (search) {
             search = false;
@@ -1054,7 +1103,7 @@ int main()
             const int padding = 5;
             
             // searching UI
-            const Rectangle search_bar = { padding, padding, 400, 25 };
+            const Rectangle search_bar = { padding, padding, 350, 25 };
             const Rectangle search_button = { (search_bar.x + search_bar.width + padding), search_bar.y, 50, 25 };
 
             // toggle edit mode engaging or leaving the text box window
@@ -1188,7 +1237,6 @@ int main()
                         Color background_color;
                         if (i == current_node) background_color = SKYBLUE;
                         else background_color = (i % 2) ? WHITE : RAYWHITE;
-                        
 
                         // content backgound
                         DrawRectangleRec(content_rect, background_color);
@@ -1199,19 +1247,20 @@ int main()
                         // thumbnail
                         if (IsTextureReady(search_result->thumbnail))
                             DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
-
-                        if (search_result->type == CONTENT_TYPE_VIDEO) {
-                            DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (search_result->length[0] != '\0' ? search_result->length : "LIVE"));
-                        }
-
-                        else if (search_result->type == CONTENT_TYPE_CHANNEL) {
-                            DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
-                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
-                        }  
-
-                        else if (search_result->type == CONTENT_TYPE_PLAYLIST) {
-                            draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
+                        
+                        switch(search_result->type) {
+                            case CONTENT_TYPE_VIDEO:
+                                DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (search_result->length[0] != '\0' ? search_result->length : "LIVE"));
+                                break;
+                            case CONTENT_TYPE_CHANNEL:
+                                DrawTextBoxed(FONT, search_result->subs, padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, "CHANNEL");
+                                break;
+                            case CONTENT_TYPE_PLAYLIST:
+                                draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, padding, search_result->video_count);
+                                break;
+                            default: break;
                         }
                     }
                 }
@@ -1224,17 +1273,23 @@ int main()
     {
         pthread_mutex_destroy(&thumbnail_list.mutex);
         if (search_results.count > 0) unload_list(&search_results);
-        curl_global_cleanup();
-        curl_easy_cleanup(curl);
+        while (thumbnail_list.head) {
+            ThumbnailData *node = thumbnail_list.head;
+            thumbnail_list.head = thumbnail_list.head->next;
+            unload_memory_block(&node->data);
+            free(node);
+        }
         CloseWindow();
         return 0;
     }
 }
 // to do
-    // loading thumbnails halts the program
+    // fetch_url decoding in place
+    // use worker thread structure to load threads fast
+    // more search filters?
+    // pagination 
     // show video information when double clicking video
     // actually play video when pressed
-    // pagination 
 
 // for read me
-    // need curl, cjson, and raylib/raygui
+    // -lssl -lcrypto -lcjson and raylib/raygui
