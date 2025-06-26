@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <cjson/cJSON.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 #include <netdb.h>
@@ -18,6 +19,7 @@
 #include "raygui.h"
 
 #define CACHED_THUMBNAIL_LIFETIME 3
+#define MAX_ITEMS_PER_PAGE 20
 
 typedef struct
 {
@@ -145,7 +147,6 @@ void add_node(YoutubeSearchList* list, const YoutubeSearchNode node)
 void unload_node(YoutubeSearchNode* node)
 {
     if (!node) return;
-    // if (IsTextureReady(node->thumbnail)) UnloadTexture(node->thumbnail);
     free(node);
 }
 
@@ -520,7 +521,7 @@ void delete_cached_thumbnails (CachedThumbnailList *list)
 
     while (current) {
         if (is_timer_done(current->lifespan)) {
-            printf("cache entry expired id: %s\n", current->id);
+            // printf("cache entry expired id: %s\n", current->id);
             
             // update pointers
             if (!prev) 
@@ -597,6 +598,7 @@ void draw_thumbnail_subtext (const Rectangle container, const Font font, const C
 
 bool search_finished = true;
 bool searching = false;
+bool delete_old_search_results = false;
 
 void create_file_from_memory(const char* filename, const char* memory, const size_t nbytes) 
 {
@@ -679,7 +681,6 @@ size_t write_data_to_memory_block(const void* src, const size_t nbytes, MemoryBl
     chunk->memory = new_memory;
     memcpy(&chunk->memory[chunk->size], src, nbytes);
     chunk->size += nbytes;
-    // chunk->memory[chunk->size] = '\0';
 
     return nbytes;
 }
@@ -699,7 +700,7 @@ MemoryBlock decode_chunked_data(const char* chunked_data, const size_t size)
             break;
         }
         
-        // extracting the hex number, no +1 bc last char is newline
+        // extracting hex number
         const int nchars = line_end - current;
         char hex_str[nchars + 1];
         memcpy(hex_str, current, nchars);
@@ -801,10 +802,8 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port, cons
     MemoryBlock raw_response = (MemoryBlock){ 0 };
     
     // read raw http
-    while ((bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1)) > 0) {
-        // buffer[bytes] = '\0';
+    while ((bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1)) > 0) 
         write_data_to_memory_block(buffer, bytes, &raw_response);
-    }
 
     // deinit
     SSL_shutdown(ssl);
@@ -905,6 +904,8 @@ void *load_thumbnail(void *args)
 }
 
 // writes a list of search result nodes to some list
+int elements_added = 0;
+bool offline = false;
 void* get_results_from_query(void* args)
 {
     search_finished = false;
@@ -929,9 +930,12 @@ void* get_results_from_query(void* args)
         printf("get_results_from_query: fetch_url returned invalid\n");
         searching = false;
         search_finished = true;
+        offline = true;
         return NULL;
     }
 
+    offline = false;
+    
     extract_yt_data(&html);
     if (!is_memory_ready(html)) {
         printf("get_results_from_query: extracting yt data corrupted memory\n");
@@ -950,7 +954,7 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    int elements_added = 0;
+    elements_added = 0;
     cJSON *contents = cJSON_GetObjectItem(search_json, "contents");
     if (contents && cJSON_IsArray(contents)) {
         // loop through every item and get the node equivalent 
@@ -1100,12 +1104,15 @@ void* get_results_from_query(void* args)
 
             if ((node.id[0] != '\0')) {
                 elements_added++;
-                
+                // get cached thumbnail, if it exists
                 CachedThumbnailNode *cached_thumbnail = get_cached_node_by_id(node.id, &cached_thumbnails);
                 if (cached_thumbnail)
                     node.thumbnail = cached_thumbnail->texture;
-
+                
+                // append node to search results
                 add_node(targs->search_results, node);
+
+                // only initalize thread if the texture is not found in the cache
                 if (!IsTextureReady(node.thumbnail)) {
                     ThreadArgs *load_thumbnail_args = malloc(sizeof(ThreadArgs));
                     strcpy(load_thumbnail_args->link, node.thumbnail_link);
@@ -1126,9 +1133,10 @@ void* get_results_from_query(void* args)
 
     search_finished = true;
     searching = false;
+    delete_old_search_results = (elements_added > 0);
     end_search_time = clock();
     free(args);
-
+    
     printf("%d elements added\n", elements_added);
     printf("search process took %f seconds\n", (end_search_time - start_search_time) / (CLOCKS_PER_SEC * 1.0f) * 10);
     return NULL;
@@ -1193,8 +1201,9 @@ int main()
     int current_node = -1;
 
     while (!WindowShouldClose()) {
+        // deleting cached thumbnails after they've been unused for CACHED_THUMBNAIL_LIFETIME seconds 
         delete_cached_thumbnails(&cached_thumbnails);
-        // loading thumbnails gathered from thread one by one
+
        if (pthread_mutex_trylock(&thumbnail_list.mutex) == 0) {
             while (thumbnail_list.head) {
                 ThumbnailData *thumbnail_data = thumbnail_list.head;
@@ -1202,8 +1211,12 @@ int main()
                 // Find matching search node and load texture
                 for (YoutubeSearchNode *search_node = search_results.head; search_node; search_node = search_node->next) {
                     if (strcmp(thumbnail_data->id, search_node->id) == 0) {
-                        if (IsTextureReady(search_node->thumbnail)) UnloadTexture(search_node->thumbnail);
+                        // clear texture data (if any)
+                        if (IsTextureReady(search_node->thumbnail)) 
+                            UnloadTexture(search_node->thumbnail);
+
                         search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
+
                         if (IsTextureReady(search_node->thumbnail)) {
                             // add new texture to cache
                             CachedThumbnailNode *cached_thumbnail_node = malloc(sizeof(CachedThumbnailNode));
@@ -1225,12 +1238,22 @@ int main()
             }
             pthread_mutex_unlock(&thumbnail_list.mutex);
         }
+
+        if (searching) {
+            SetWindowTitle(TextFormat("[%s(loading)] - metube", query.url_encoded_query));
+        }
         
+        else if (offline) {
+            SetWindowTitle("[offline] - metube");
+        }
+
+        else if (search_finished && search_results.count > 0) {
+            SetWindowTitle(TextFormat("[search results] - metube"));
+        }
+
         if (search) {
             search = false;
 
-            // clear search result list information
-            if (search_results.count > 0) unload_list(&search_results);
             current_node = -1;
 
             // configure thread arguements for routine
@@ -1243,6 +1266,21 @@ int main()
             pthread_t search_thread;
             pthread_create(&search_thread, NULL, get_results_from_query, targs);
             pthread_detach(search_thread);
+        }
+        
+        if (delete_old_search_results) {
+            delete_old_search_results = false;
+
+            // find out how many old elements there are
+            int old_elements = search_results.count - elements_added;
+            
+            // delete old nodes
+            for (int i = 0; (i < old_elements) && search_results.head; i++) {
+                YoutubeSearchNode *node = search_results.head;
+                search_results.head = search_results.head->next;
+                search_results.count--;
+                free(node);
+            }
         }
 
         BeginDrawing();
@@ -1326,7 +1364,7 @@ int main()
                 scroll_panel_area.x,
                 scroll_panel_area.y,
                 scroll_panel_area.width,
-                content_height * (search_results.count),
+                content_height * (search_results.count ? search_results.count : MAX_ITEMS_PER_PAGE),
             };
 
             // the width of the scrollbar is only felt when it's visible
@@ -1399,8 +1437,6 @@ int main()
                         // thumbnail
                         if (IsTextureReady(search_result->thumbnail)) 
                             DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
-                        
-                        
 
                         // title
                         DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
@@ -1454,17 +1490,17 @@ int main()
 }
 
 // to do
-    // cache thumbnails
-    // fetch_url decoding in place
-    // use worker thread structure to load thumbnails faster?
-    // convert search into worker thread
+    // update title when loading search
+    // clean everything
     // more search filters?
+        // no shorts
+        // live videos
+            // show how many active users in stream 
     // pagination 
     // show video information when double clicking video
     // actually play video when pressed
     // cleanup when prematurley deleting
         // thumbnail list
-        // thread node
         // search arguements
 
 // for read me
