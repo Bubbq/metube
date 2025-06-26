@@ -19,7 +19,7 @@
 #include "raygui.h"
 
 #define MINUTE 60
-#define CACHED_THUMBNAIL_LIFETIME (MINUTE * 5)
+#define CACHED_THUMBNAIL_LIFETIME (MINUTE * 1)
 #define MAX_ITEMS_PER_PAGE 20
 
 typedef struct
@@ -71,7 +71,8 @@ typedef enum {
     CONTENT_TYPE_VIDEO = 0,
     CONTENT_TYPE_CHANNEL = 1,
     CONTENT_TYPE_PLAYLIST = 2,
-    CONTENT_TYPE_ANY = 3,
+    CONTENT_TYPE_LIVE = 3,
+    CONTENT_TYPE_ANY = 4,
 } ContentType;
 
 typedef enum 
@@ -95,6 +96,7 @@ typedef struct YoutubeSearchNode {
     char thumbnail_link[128];
     Texture thumbnail;
     ContentType type;
+    bool is_live;
     struct YoutubeSearchNode* next;
 } YoutubeSearchNode;
 
@@ -188,6 +190,7 @@ void configure_search_url(const int maxlen, char search_url[maxlen], const Query
 {
     snprintf(search_url, maxlen, "/results?search_query=%s&sp=", query.url_encoded_query);
 
+
     // possible sorting params
     const char* relevance = "CAA";
     const char* upload_date = "CAI";
@@ -206,12 +209,14 @@ void configure_search_url(const int maxlen, char search_url[maxlen], const Query
     const char* channel = "SAhAC";
     const char* playlist = "SAhAD";
     const char* none = "%253D";
+    const char *live = "SBBABQAE%253D";
 
     switch (query.type) {
         case CONTENT_TYPE_VIDEO: strcat(search_url, video); break;
         case CONTENT_TYPE_CHANNEL: strcat(search_url, channel); break;
         case CONTENT_TYPE_PLAYLIST: strcat(search_url, playlist); break;
         case CONTENT_TYPE_ANY: strcat(search_url, none); break;
+        case CONTENT_TYPE_LIVE: strcat(search_url, live);
     }  
 }
 
@@ -293,6 +298,7 @@ char* content_type_to_text (const ContentType content_type)
         case CONTENT_TYPE_VIDEO: return "VIDEO";
         case CONTENT_TYPE_CHANNEL: return "CHANNEL";
         case CONTENT_TYPE_PLAYLIST: return "PLAYLIST";
+        case CONTENT_TYPE_LIVE: return "LIVE";
         case CONTENT_TYPE_ANY: return "ANY";
     }
 
@@ -568,6 +574,13 @@ typedef struct {
 #define MAX_THREADS 4
 pthread_t thread_pool[MAX_THREADS];
 int current_thread = 0;
+
+void add_thread_to_pool (void*(*thread_funct)(void*), void *args) 
+{
+    pthread_create(&thread_pool[current_thread], NULL, thread_funct, args);
+    pthread_detach(thread_pool[current_thread]);
+    current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
+}
 
 void add_thumbnail_node (ThumbnailData *node, ThumbnailList *list) 
 {
@@ -927,7 +940,7 @@ void* get_results_from_query(void* args)
     printf("path: %s\n", url);
 
     // get the page source of this url
-    MemoryBlock html = fetch_url("www.youtube.com", url, "443", "html.html");
+    MemoryBlock html = fetch_url("www.youtube.com", url, "443", NULL);
     if (!is_memory_ready(html)) {
         printf("get_results_from_query: fetch_url returned invalid\n");
         searching = false;
@@ -1018,10 +1031,25 @@ void* get_results_from_query(void* args)
                     }
                 }
 
-                // view count
-                cJSON *viewCountText = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
-                if (viewCountText && cJSON_IsString(viewCountText)) {
-                    format_youtube_views(viewCountText->valuestring, sizeof(node.views), node.views);
+                // checking if live video
+                cJSON *viewCountTextRuns = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "runs");
+                if (viewCountTextRuns && cJSON_IsArray(viewCountTextRuns)) {
+
+                    cJSON *first_element = cJSON_GetArrayItem(viewCountTextRuns, 0);
+                    cJSON *text = first_element ? cJSON_GetObjectItem(first_element, "text") : NULL;
+                    if (text && cJSON_IsString(text)) {
+                        format_youtube_views(text->valuestring, sizeof(node.views), node.views);
+                    }
+                    node.is_live = true;
+                }
+                
+                // normal video
+                else {
+                    cJSON *viewCountTextSimple = cJSON_GetObjectItem(cJSON_GetObjectItem(videoRenderer, "viewCountText"), "simpleText");
+                    if (viewCountTextSimple && cJSON_IsString(viewCountTextSimple)) {
+                        format_youtube_views(viewCountTextSimple->valuestring, sizeof(node.views), node.views);
+                    }
+                    node.is_live = false;
                 }
 
                 // publish date
@@ -1133,16 +1161,14 @@ void* get_results_from_query(void* args)
 
                 // only initalize thread if the texture is not found in the cache
                 if (!IsTextureReady(node.thumbnail)) {
+                    // create and add thread to pool
                     ThreadArgs *load_thumbnail_args = malloc(sizeof(ThreadArgs));
                     strcpy(load_thumbnail_args->link, node.thumbnail_link);
                     strcpy(load_thumbnail_args->id, node.id);
                     load_thumbnail_args->thumbnail_list = targs->thumbnail_list;
                     load_thumbnail_args->type = node.type;
                     
-                    // add to pool
-                    pthread_create(&thread_pool[current_thread], NULL, load_thumbnail, load_thumbnail_args);
-                    pthread_detach(thread_pool[current_thread]);
-                    current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
+                    add_thread_to_pool(load_thumbnail, load_thumbnail_args);
                 }
             }
         }
@@ -1201,7 +1227,8 @@ int main()
         CONTENT_TYPE_ANY, 
         CONTENT_TYPE_VIDEO, 
         CONTENT_TYPE_CHANNEL, 
-        CONTENT_TYPE_PLAYLIST 
+        CONTENT_TYPE_PLAYLIST,
+        CONTENT_TYPE_LIVE,
     };
     
     int current_sort = 0;
@@ -1267,7 +1294,7 @@ int main()
         }
 
         else if (search_finished && search_results.count > 0) {
-            SetWindowTitle(TextFormat("[search results] - metube"));
+            SetWindowTitle(TextFormat("[search results(%d)] - metube", elements_added));
         }
 
         if (search) {
@@ -1282,9 +1309,7 @@ int main()
             targs->thumbnail_list = &thumbnail_list;
 
             // get the results of this query in this thread
-            pthread_t search_thread;
-            pthread_create(&search_thread, NULL, get_results_from_query, targs);
-            pthread_detach(search_thread);
+            add_thread_to_pool(get_results_from_query, targs);
         }
         
         if (delete_old_search_results) {
@@ -1357,13 +1382,14 @@ int main()
                 
                 // update the index of filter params when pressed
                 if (GuiButton(sort_type_button, button_text)) current_sort = bound_index_to_array((current_sort + 1), 4);
-                if (GuiButton(content_type_button, button_text)) current_type = bound_index_to_array((current_type + 1), 4);
+                if (GuiButton(content_type_button, button_text)) current_type = bound_index_to_array((current_type + 1), 5);
                 if (GuiButton(toggle_yt_shorts_button, button_text)) query.allow_shorts = !query.allow_shorts;
                 
+                
                 // filters availible
-                DrawTextEx(FONT, "ORDER:", (Vector2){ filter_window_area.x + padding, sort_type_button.y + padding }, font_size, 2, BLACK);
-                DrawTextEx(FONT, "TYPE:", (Vector2){ filter_window_area.x + padding, content_type_button.y + padding }, font_size, 2, BLACK);
-                DrawTextEx(FONT, "ALLOW SHORTS:", (Vector2){ filter_window_area.x + padding, toggle_yt_shorts_button.y + padding }, font_size, 2, BLACK);
+                DrawTextEx(FONT, "Order:", (Vector2){ filter_window_area.x + padding, sort_type_button.y + padding }, font_size, 2, BLACK);
+                DrawTextEx(FONT, "Type:", (Vector2){ filter_window_area.x + padding, content_type_button.y + padding }, font_size, 2, BLACK);
+                DrawTextEx(FONT, "Allow Shorts:", (Vector2){ filter_window_area.x + padding, toggle_yt_shorts_button.y + padding }, font_size, 2, BLACK);
                 
                 // current param value
                 DrawTextEx(FONT, content_type_to_text(availible_types[current_type]), (Vector2){ ((filter_window_area.x + filter_window_area.width) * 0.4f), (content_type_button.y + padding) }, font_size, 2, BLACK);
@@ -1450,9 +1476,7 @@ int main()
                         const int spacing = 2;
                         const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
 
-                        Color background_color;
-                        if (i == current_node) background_color = SKYBLUE;
-                        else background_color = (i % 2) ? WHITE : RAYWHITE;
+                        Color background_color = (i % 2) ? WHITE : RAYWHITE;
 
                         // content backgound
                         DrawRectangleRec(content_rect, background_color);
@@ -1463,10 +1487,12 @@ int main()
 
                         // title
                         DrawTextBoxed(FONT, search_result->title, padded_rectangle(padding, title_bounds), font_size, spacing, wrap_word, BLACK);
-
                         switch(search_result->type) {
                             case CONTENT_TYPE_VIDEO:
-                                DrawTextBoxed(FONT, TextFormat("%s - %s views", search_result->date, search_result->views), padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
+                                // if video -> "date published - <view count> views" 
+                                // if live -> "<view count> watching" 
+                                DrawTextBoxed(FONT, TextFormat("%s %s %s %s", (search_result->date[0] ? search_result->date : ""), (search_result->date[0] ? "-" : ""), search_result->views, search_result->is_live ? "watching" : "views"), 
+                                            padded_rectangle(padding, subtext_bounds), font_size, spacing, wrap_word, BLACK);
                                 draw_thumbnail_subtext(thumbnail_bounds, FONT, RAYWHITE, font_size, spacing, 5, (search_result->length[0] != '\0' ? search_result->length : "LIVE"));
                                 break;
                             case CONTENT_TYPE_CHANNEL:
@@ -1515,7 +1541,6 @@ int main()
 // to do
     // clean everything
     // more search filters?
-        // no shorts
         // live videos
             // show how many active users in stream 
     // pagination 
