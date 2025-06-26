@@ -18,7 +18,8 @@
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
-#define CACHED_THUMBNAIL_LIFETIME 3
+#define MINUTE 60
+#define CACHED_THUMBNAIL_LIFETIME (MINUTE * 5)
 #define MAX_ITEMS_PER_PAGE 20
 
 typedef struct
@@ -180,6 +181,7 @@ typedef struct {
     char url_encoded_query[256];
     SortParameter sort;
     ContentType type;
+    bool allow_shorts;
 } Query;
 
 void configure_search_url(const int maxlen, char search_url[maxlen], const Query query)
@@ -925,7 +927,7 @@ void* get_results_from_query(void* args)
     printf("path: %s\n", url);
 
     // get the page source of this url
-    MemoryBlock html = fetch_url("www.youtube.com", url, "443", NULL);
+    MemoryBlock html = fetch_url("www.youtube.com", url, "443", "html.html");
     if (!is_memory_ready(html)) {
         printf("get_results_from_query: fetch_url returned invalid\n");
         searching = false;
@@ -966,6 +968,23 @@ void* get_results_from_query(void* args)
             cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel");
 
             if (videoRenderer) {
+                // check if the video is a short, i fucking hate yt shorts...
+                if (!targs->query.allow_shorts) {
+                    bool yt_short = false;
+                    cJSON *navigationEndpoint = cJSON_GetObjectItem(videoRenderer, "navigationEndpoint");
+                    cJSON *commandMetadata = navigationEndpoint ? cJSON_GetObjectItem(navigationEndpoint, "commandMetadata") : NULL;
+                    cJSON *webCommandMetadata = commandMetadata ? cJSON_GetObjectItem(commandMetadata, "webCommandMetadata") : NULL;
+                    cJSON *url = webCommandMetadata ? cJSON_GetObjectItem(webCommandMetadata, "url") : NULL;
+                    if (url && cJSON_IsString(url)) {
+                        yt_short = strstr(url->valuestring, "/shorts");
+                    }
+
+                    if (yt_short) {
+                        printf("ytshorts url: %s\n", url->valuestring);
+                        continue;
+                    }
+                }
+
                 node.type = CONTENT_TYPE_VIDEO;
 
                 // video id
@@ -975,9 +994,9 @@ void* get_results_from_query(void* args)
                 
                 // video title
                 cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
-                cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
-                if (runs && cJSON_IsArray(runs)) {
-                    cJSON* first_run = cJSON_GetArrayItem(runs, 0);
+                cJSON* title_runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
+                if (title_runs && cJSON_IsArray(title_runs)) {
+                    cJSON* first_run = cJSON_GetArrayItem(title_runs, 0);
                     if (first_run) {
                         cJSON *text = cJSON_GetObjectItem(first_run, "text");
                         if (text && cJSON_IsString(text))
@@ -1325,7 +1344,7 @@ int main()
             // toggle filter window on press
             if (GuiButton(filter_button, "FILTER")) show_filter_window = !show_filter_window;
             
-            const Rectangle filter_window_area = { padding, (search_bar.y + search_bar.height + padding), search_bar.width, 50 };
+            const Rectangle filter_window_area = { padding, (search_bar.y + search_bar.height + padding), search_bar.width, 75 };
             if (show_filter_window) {
                 DrawRectangleLinesEx(filter_window_area, 1, GRAY);
                 const int font_size = 11;
@@ -1334,18 +1353,22 @@ int main()
                 const char* button_text = "SWITCH";
                 const Rectangle sort_type_button = { (filter_window_area.x + filter_window_area.width - 55), (filter_window_area.y + padding), 50, 17.5 };
                 const Rectangle content_type_button = { (filter_window_area.x + filter_window_area.width - 55), (sort_type_button.y + sort_type_button.height + padding), 50, 17.5 };
+                const Rectangle toggle_yt_shorts_button = { (filter_window_area.x + filter_window_area.width - 55), (content_type_button.y + content_type_button.height + padding), 50, 17.5 };
                 
                 // update the index of filter params when pressed
                 if (GuiButton(sort_type_button, button_text)) current_sort = bound_index_to_array((current_sort + 1), 4);
                 if (GuiButton(content_type_button, button_text)) current_type = bound_index_to_array((current_type + 1), 4);
-
+                if (GuiButton(toggle_yt_shorts_button, button_text)) query.allow_shorts = !query.allow_shorts;
+                
                 // filters availible
                 DrawTextEx(FONT, "ORDER:", (Vector2){ filter_window_area.x + padding, sort_type_button.y + padding }, font_size, 2, BLACK);
                 DrawTextEx(FONT, "TYPE:", (Vector2){ filter_window_area.x + padding, content_type_button.y + padding }, font_size, 2, BLACK);
+                DrawTextEx(FONT, "ALLOW SHORTS:", (Vector2){ filter_window_area.x + padding, toggle_yt_shorts_button.y + padding }, font_size, 2, BLACK);
                 
                 // current param value
                 DrawTextEx(FONT, content_type_to_text(availible_types[current_type]), (Vector2){ ((filter_window_area.x + filter_window_area.width) * 0.4f), (content_type_button.y + padding) }, font_size, 2, BLACK);
                 DrawTextEx(FONT, sort_parameter_to_text(availible_sorts[current_sort]), (Vector2){ ((filter_window_area.x + filter_window_area.width) * 0.4f), (sort_type_button.y + padding) }, font_size, 2, BLACK);
+                DrawTextEx(FONT, (query.allow_shorts ? "YES" : "NO"), (Vector2){ ((filter_window_area.x + filter_window_area.width) * 0.4f), (toggle_yt_shorts_button.y + padding) }, font_size, 2, BLACK);
             }
 
             // display search results
@@ -1490,7 +1513,6 @@ int main()
 }
 
 // to do
-    // update title when loading search
     // clean everything
     // more search filters?
         // no shorts
