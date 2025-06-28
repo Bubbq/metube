@@ -700,94 +700,122 @@ size_t write_data_to_memory_block(const void* src, const size_t nbytes, MemoryBl
     return nbytes;
 }
 
-MemoryBlock decode_chunked_data(const char* chunked_data, const size_t size)
+size_t get_content_len (const char *header_response)
 {
-    MemoryBlock result = create_memory_block(0);
-    const char* current = chunked_data;
-    const char *needle = "\r\n";
-    const size_t needle_len = strlen(needle);
-    
-    while (current < (chunked_data + size)) {
-        // the chunk size (hex number) is followed by "\r\n"
-        char* line_end = strstr(current, needle);
-        if (!line_end) {
-            printf("chunk size marker not found\n");
-            break;
-        }
-        
-        // extracting hex number
-        const int nchars = line_end - current;
-        char hex_str[nchars + 1];
-        memcpy(hex_str, current, nchars);
-        hex_str[nchars] = '\0';
+    // find the content length parameter
+    char *location = strstr(header_response, "Content-Length:");
+    if (location) {
+        // find the first numeric char
+        char *first_numeric = location;
+        while (first_numeric && !isdigit(*first_numeric)) {
+            first_numeric++;
+        } 
 
-        // now we have the number of bytes this oncoming chunk of characters has
-        const long chunk_size = strtol(hex_str, NULL, 16);
-        if (chunk_size == 0) {
-            printf("chunk size is 0, finished reading\n");
-            break;
+        int i = 0;
+        char bytes[16] = {0};
+        while (first_numeric && isdigit(*first_numeric)) {
+            bytes[i++] = *first_numeric;
+            first_numeric++;
         }
-        
-        // printf("hex read: \"%s\" chunk size: %ld\n", hex_str, chunk_size);
-        
-        // move past the needle
-        current = line_end + needle_len;
 
-        // write the data
-        if (write_data_to_memory_block(current, chunk_size, &result) != chunk_size) {
-            printf("decode_chunked_data: failed to write %ld bytes to result\n", chunk_size);
-            break;
-        }
-        
-        // skip over data and trailing needle
-        current += chunk_size + needle_len;
+        // return its numeric representation
+        return atoi(bytes);
     }
-    
-    return result;
+
+    return 0;
 }
 
-char* find_http_body_start(const char* response)
+bool offline = false;
+
+SSL_CTX *ctx = NULL;
+struct addrinfo *cached_addr = NULL;
+
+// read up to n bytes from ssl read stream into buff 
+// returns the nchars read into the buffer
+size_t read_ssl_line (SSL *ssl, char *buff, const size_t n) 
 {
-    // the last portion of the raw HTTP request is a special end-of-line character
-    const char *needle = "\r\n\r\n";
-    char* body_start = strstr(response, needle);
-    
-    // return a ptr to the first character of the http body
-    if (body_start) 
-        return body_start + strlen(needle);
-    else
-        return NULL;
+    const char *line_end = "\r\n";
+    const size_t len = strlen(line_end);
+
+    size_t pos = 0;
+    char c;
+
+    while (pos < n - 1) {
+        // read one char
+        int byte = SSL_read(ssl, &c, 1);
+        if (byte <= 0) {
+            return 0;
+        }
+
+        // add character to buffer
+        buff[pos++] = c;
+
+        // checking if we've reached end of line
+        if (strstr(buff, line_end)) {
+            break;
+        }
+    }
+
+    buff[pos] = '\0';
+    return pos;
 }
 
-MemoryBlock fetch_url(const char *host, const char *path, const char *port, const char *debug_filename) {
-    // specify the type of address info you want and store the result
-    struct addrinfo desired_addr_info = {0}, *result;
-    desired_addr_info.ai_family = AF_UNSPEC;
-    desired_addr_info.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port, &desired_addr_info, &result) != 0) {
-        perror("getaddrinfo");
-        return (MemoryBlock) { 0 };
+// read the header of a http response into some buffer n bytes large 
+size_t read_header(SSL *ssl, char *buff, size_t n)
+{
+    size_t total_len = 0;
+    const char *header_end = "\r\n\r\n";
+
+    // until the end of a header is not found in the buffer, continue to read lines
+    while ((strstr(buff, header_end) == NULL) && (total_len < n - 1)) {
+        size_t line_len = read_ssl_line(ssl, buff + total_len, n - total_len);
+        if (line_len == 0) {
+            break;  
+        }
+
+        total_len += line_len;
+    }   
+
+    return total_len;
+}
+
+MemoryBlock fetch_url(const char *host, const char *path, const char *port, const char *debug_filename)
+{
+    // only reassign the cached address when offline to give chance to change status
+    if (offline) {
+        struct addrinfo desired_addr_info = {0};
+        desired_addr_info.ai_family = AF_UNSPEC;
+        desired_addr_info.ai_socktype = SOCK_STREAM;
+
+        if (getaddrinfo(host, port, &desired_addr_info, &cached_addr) != 0) {
+            perror("getaddrinfo");
+            return (MemoryBlock) { 0 };
+        }
+        else {
+            offline = false;
+        }
     }
-    
+
+    if (!cached_addr) {
+        printf( "fetch_url: addrinfo not initialized\n");
+        return (MemoryBlock){0};
+    }
+
     // initializing socket
-    int sockfd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (connect(sockfd, result->ai_addr, result->ai_addrlen) != 0) {
+    int sockfd = socket(cached_addr->ai_family, cached_addr->ai_socktype, cached_addr->ai_protocol);
+    if (connect(sockfd, cached_addr->ai_addr, cached_addr->ai_addrlen) != 0) {
         perror("connect");
         close(sockfd);
-        freeaddrinfo(result);
         return (MemoryBlock) { 0 };
     }
 
     // ssl setup
-    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     SSL *ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sockfd);
     if (SSL_connect(ssl) != 1) {
         ERR_print_errors_fp(stderr);
         SSL_free(ssl);
-        SSL_CTX_free(ctx);
         close(sockfd);
-        freeaddrinfo(result);
         return (MemoryBlock) { 0 };
     }
 
@@ -797,7 +825,7 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port, cons
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-        "Connection: close\r\n"
+        "Connection: keep-alive\r\n"
         "\r\n",
         path, host);
     
@@ -805,58 +833,89 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port, cons
     if ((write_status = SSL_write(ssl, request, strlen(request))) <= 0) {
         SSL_get_error(ssl, write_status);
         SSL_free(ssl);
-        SSL_CTX_free(ctx);
         close(sockfd);
-        freeaddrinfo(result);
         return (MemoryBlock) { 0 };
     } 
 
     // read the response of the created request
-    char buffer[4096];
-    int bytes;
     MemoryBlock raw_response = (MemoryBlock){ 0 };
-    
-    // read raw http
-    while ((bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1)) > 0) 
-        write_data_to_memory_block(buffer, bytes, &raw_response);
 
-    // deinit
+    // read headers first
+    size_t header_len = 0;
+    char header[4096] = {0};
+    header_len = read_header(ssl, header, sizeof(header));
+    header[header_len] = '\0';
+
+    // debug
+    create_file_from_memory("headers.txt", header, header_len);
+
+    // read the exact amount of bytes if the length is availible
+    size_t content_len = get_content_len(header);
+    if (content_len > 0) {
+        printf("the response has a length of %lu bytes\n", content_len);
+
+        char buffer[4096];
+        while (content_len > 0) {
+            const size_t to_read  = content_len < (sizeof(buffer) - 1) ? content_len : (sizeof(buffer) - 1);
+            int bytes_read = SSL_read(ssl, buffer, to_read);
+            write_data_to_memory_block(buffer, bytes_read, &raw_response);
+            content_len -= bytes_read;
+        }
+    }
+
+    else if (is_chunked_encoding(header)) {
+        printf("the response is chunk encoded\n");
+        
+        const char *line_end = "\r\n";
+        const size_t line_end_len = strlen(line_end);
+        
+        // read until there's no chunk data left
+        size_t chunk_size = -1;
+        while (chunk_size != 0) {
+            // the first line will be the the nbytes the nth chunk is (hexadecimal)
+
+            // parsing the hex string
+            char hex[16] = {0};
+            int len = read_ssl_line(ssl, hex, sizeof(hex));
+            hex[len - line_end_len] = '\0';
+
+            // getting numerical representation
+            chunk_size = strtoul(hex, NULL, 16);
+            printf("hexadecimal \"%s\" encountered (%lu in bytes) \n", hex, chunk_size);
+
+            // need to read that many bytes into raw response
+            size_t remaining = chunk_size;
+
+            while (remaining > 0) {
+                // read bytes into the buffer
+                char buffer[4096] = {0};
+                const size_t to_read = remaining < (sizeof(buffer) - 1) ? remaining : (sizeof(buffer) - 1);
+                int bytes_read = SSL_read(ssl, buffer, to_read);
+                if (bytes_read <= 0) {
+                    printf("fetch_url: error reading data\n");
+                    break;
+                }
+
+                // add the data to the raw response
+                write_data_to_memory_block(buffer, bytes_read, &raw_response);
+                
+                // update the amount of bytes remaining
+                remaining -= bytes_read;
+            }
+
+            // absorb the trailing "\r\n" at the end of every chunk
+            char last_line[16];
+            read_ssl_line(ssl, last_line, sizeof(last_line));
+        }
+    }
+    
+    // // deinit ssl stuff
     SSL_shutdown(ssl);
     SSL_free(ssl);
-    SSL_CTX_free(ctx);
     close(sockfd);
-    freeaddrinfo(result);
-    
-    if (!is_memory_ready(raw_response)) {
-        printf("fetch_url: raw data block is invalid\n");
-        return (MemoryBlock) { 0 };
-    }
-    
-    // extract http body
-    char* body_start = find_http_body_start(raw_response.memory);
-    if (!body_start) {
-        printf("fetch_url: no http body was found in raw_response\n");
-        unload_memory_block(&raw_response);
-        return (MemoryBlock) { 0 };
-    }
-    
-    // cant use strlen as '\0' is used for binary data like PNG, JPEG, etc. 
-    const size_t body_len = raw_response.size - (body_start - raw_response.memory);
 
-    // decode chunked data if needed
-    MemoryBlock final_response = (MemoryBlock){ 0 };
-    if (is_chunked_encoding(raw_response.memory)) {
-        printf("raw response is chunked, decoding...\n"); 
-        final_response = decode_chunked_data(body_start, body_len);
-    }
-    else 
-        write_data_to_memory_block(body_start, body_len, &final_response);
-
-    if (debug_filename) 
-        create_file_from_memory(debug_filename, final_response.memory, final_response.size);
-
-    unload_memory_block(&raw_response);
-    return final_response;
+    create_file_from_memory("raw.html", raw_response.memory, raw_response.size);
+    return raw_response;
 }
 
 // returns an allocated string that is the URL encoding of the argument passed
@@ -920,7 +979,6 @@ void *load_thumbnail(void *args)
 
 // writes a list of search result nodes to some list
 int elements_added = 0;
-bool offline = false;
 void* get_results_from_query(void* args)
 {
     search_finished = false;
@@ -935,12 +993,12 @@ void* get_results_from_query(void* args)
     free(buff);
 
     // append the query to the yt query string
-    char url[512] = "\0";
-    configure_search_url(512, url, targs->query);
-    printf("path: %s\n", url);
+    char path[512] = "\0";
+    configure_search_url(512, path, targs->query);
+    printf("path: %s\n", path);
 
     // get the page source of this url
-    MemoryBlock html = fetch_url("www.youtube.com", url, "443", NULL);
+    MemoryBlock html = fetch_url("www.youtube.com", path, "443", NULL);
     if (!is_memory_ready(html)) {
         printf("get_results_from_query: fetch_url returned invalid\n");
         searching = false;
@@ -1149,7 +1207,7 @@ void* get_results_from_query(void* args)
                 }
             }
 
-            if ((node.id[0] != '\0')) {
+            if ((node.id[0] != '\0') && elements_added < MAX_ITEMS_PER_PAGE) {
                 elements_added++;
                 // get cached thumbnail, if it exists
                 CachedThumbnailNode *cached_thumbnail = get_cached_node_by_id(node.id, &cached_thumbnails);
@@ -1178,7 +1236,7 @@ void* get_results_from_query(void* args)
 
     search_finished = true;
     searching = false;
-    delete_old_search_results = (elements_added > 0);
+    delete_old_search_results = true;
     end_search_time = clock();
     free(args);
     
@@ -1190,6 +1248,17 @@ void* get_results_from_query(void* args)
 
 int main()
 {
+    struct addrinfo desired_addr_info = { 0 };
+    desired_addr_info.ai_family = AF_UNSPEC;
+    desired_addr_info.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo("www.youtube.com", "443", &desired_addr_info, &cached_addr) != 0) {
+        perror("getaddrinfo");
+        offline = true;
+    }
+
+    ctx = SSL_CTX_new(TLS_client_method());
+
     // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
 
@@ -1309,7 +1378,9 @@ int main()
             targs->thumbnail_list = &thumbnail_list;
 
             // get the results of this query in this thread
-            add_thread_to_pool(get_results_from_query, targs);
+            pthread_t thread;
+            pthread_create(&thread, NULL, get_results_from_query, targs);
+            pthread_detach(thread);
         }
         
         if (delete_old_search_results) {
@@ -1319,7 +1390,7 @@ int main()
             int old_elements = search_results.count - elements_added;
             
             // delete old nodes
-            for (int i = 0; (i < old_elements) && search_results.head; i++) {
+            for (int i = 0; (i < old_elements) && (search_results.head); i++) {
                 YoutubeSearchNode *node = search_results.head;
                 search_results.head = search_results.head->next;
                 search_results.count--;
@@ -1384,7 +1455,6 @@ int main()
                 if (GuiButton(sort_type_button, button_text)) current_sort = bound_index_to_array((current_sort + 1), 4);
                 if (GuiButton(content_type_button, button_text)) current_type = bound_index_to_array((current_type + 1), 5);
                 if (GuiButton(toggle_yt_shorts_button, button_text)) query.allow_shorts = !query.allow_shorts;
-                
                 
                 // filters availible
                 DrawTextEx(FONT, "Order:", (Vector2){ filter_window_area.x + padding, sort_type_button.y + padding }, font_size, 2, BLACK);
@@ -1513,7 +1583,10 @@ int main()
 
     // deinit app
     {
+        SSL_CTX_free(ctx);
+        EVP_cleanup();
         if (search_results.count > 0) unload_list(&search_results);
+        freeaddrinfo(cached_addr);
 
         pthread_mutex_lock(&thumbnail_list.mutex);
         while (thumbnail_list.head) {
@@ -1539,12 +1612,11 @@ int main()
 }
 
 // to do
-    // clean everything
-    // more search filters?
-        // live videos
-            // show how many active users in stream 
+    // persistent socket connection 
+    // check speed
     // pagination 
     // show video information when double clicking video
+    // clean everything
     // actually play video when pressed
     // cleanup when prematurley deleting
         // thumbnail list
