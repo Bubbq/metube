@@ -1,4 +1,6 @@
 #include <ctype.h>
+#include <openssl/types.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +13,6 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
-#include <openssl/err.h>
 
 #include "raylib.h"
 
@@ -711,6 +712,7 @@ size_t get_content_len (const char *header_response)
             first_numeric++;
         } 
 
+        // read every numeric char into a buffer
         int i = 0;
         char bytes[16] = {0};
         while (first_numeric && isdigit(*first_numeric)) {
@@ -718,24 +720,25 @@ size_t get_content_len (const char *header_response)
             first_numeric++;
         }
 
-        // return its numeric representation
+        // return numeric representation
         return atoi(bytes);
     }
 
     return 0;
 }
 
-bool offline = false;
-
-SSL_CTX *ctx = NULL;
-struct addrinfo *cached_addr = NULL;
-
-// read up to n bytes from ssl read stream into buff 
-// returns the nchars read into the buffer
-size_t read_ssl_line (SSL *ssl, char *buff, const size_t n) 
+// reads until a line or buffer end from ssl read stream
+size_t ssl_read_line (SSL *ssl, char *buff, const size_t n) 
 {
+    if (!buff) {
+        printf("ssl_read_line: buffer is NULL\n");
+        return 0;
+    }
+
+    memset(buff, 0, n);
+    
     const char *line_end = "\r\n";
-    const size_t len = strlen(line_end);
+    const size_t line_end_length = strlen(line_end);
 
     size_t pos = 0;
     char c;
@@ -744,6 +747,7 @@ size_t read_ssl_line (SSL *ssl, char *buff, const size_t n)
         // read one char
         int byte = SSL_read(ssl, &c, 1);
         if (byte <= 0) {
+            printf("ssl_read_line: SSL_read returned %d\n", byte);
             return 0;
         }
 
@@ -751,7 +755,7 @@ size_t read_ssl_line (SSL *ssl, char *buff, const size_t n)
         buff[pos++] = c;
 
         // checking if we've reached end of line
-        if (strstr(buff, line_end)) {
+        if ((pos >= line_end_length) && strstr(buff, line_end)) {
             break;
         }
     }
@@ -760,7 +764,7 @@ size_t read_ssl_line (SSL *ssl, char *buff, const size_t n)
     return pos;
 }
 
-// read the header of a http response into some buffer n bytes large 
+// read up to n bytes of the header of a http response into some buffer
 size_t read_header(SSL *ssl, char *buff, size_t n)
 {
     size_t total_len = 0;
@@ -768,8 +772,9 @@ size_t read_header(SSL *ssl, char *buff, size_t n)
 
     // until the end of a header is not found in the buffer, continue to read lines
     while ((strstr(buff, header_end) == NULL) && (total_len < n - 1)) {
-        size_t line_len = read_ssl_line(ssl, buff + total_len, n - total_len);
+        size_t line_len = ssl_read_line(ssl, (buff + total_len), (n - total_len));
         if (line_len == 0) {
+            printf("read_header: read_line returned 0 bytes read\n");
             break;  
         }
 
@@ -779,47 +784,62 @@ size_t read_header(SSL *ssl, char *buff, size_t n)
     return total_len;
 }
 
+// writes up to n bytes to a memory block object from ssl read stream
+void ssl_read_n (SSL *ssl, MemoryBlock *dst, const size_t n)
+{
+    size_t bytes_remaining = n;
+    while (bytes_remaining > 0) {
+        // find how many bytes are to be read and process into temp buffer 
+        char buffer[4096] = {0};
+        const size_t bytess_to_read = bytes_remaining < sizeof(buffer) - 1 ? bytes_remaining : sizeof(buffer) - 1;
+        const int bytes_read = SSL_read(ssl, buffer, bytess_to_read);
+        if (bytes_read < 0) {
+            printf("ssl_read_end: error with SSL_read\n");
+            break;
+        }
+
+        // read the processed data into the memory block object
+        write_data_to_memory_block(buffer, bytes_read, dst);
+        bytes_remaining -= bytes_read;
+    }       
+}
+
+bool offline = false;
+SSL_CTX *ctx = NULL;
+struct addrinfo *cached_addr = NULL;
+
 MemoryBlock fetch_url(const char *host, const char *path, const char *port, const char *debug_filename)
 {
-    // only reassign the cached address when offline to give chance to change status
+    // only retry connection if application is offline
     if (offline) {
         struct addrinfo desired_addr_info = {0};
         desired_addr_info.ai_family = AF_UNSPEC;
         desired_addr_info.ai_socktype = SOCK_STREAM;
-
         if (getaddrinfo(host, port, &desired_addr_info, &cached_addr) != 0) {
             perror("getaddrinfo");
-            return (MemoryBlock) { 0 };
+            printf("fetch_url: failed reconnection attempt using getaddrinfo\n");
+            return (MemoryBlock){0};
         }
-        else {
-            offline = false;
-        }
-    }
-
-    if (!cached_addr) {
-        printf( "fetch_url: addrinfo not initialized\n");
-        return (MemoryBlock){0};
     }
 
     // initializing socket
     int sockfd = socket(cached_addr->ai_family, cached_addr->ai_socktype, cached_addr->ai_protocol);
     if (connect(sockfd, cached_addr->ai_addr, cached_addr->ai_addrlen) != 0) {
-        perror("connect");
+        printf("fetch_url: issue with establishing socket connection\n");
         close(sockfd);
-        return (MemoryBlock) { 0 };
+        return (MemoryBlock){0};
     }
 
-    // ssl setup
+    // initializing ssl
     SSL *ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sockfd);
     if (SSL_connect(ssl) != 1) {
-        ERR_print_errors_fp(stderr);
         SSL_free(ssl);
         close(sockfd);
-        return (MemoryBlock) { 0 };
+        return (MemoryBlock){0};
     }
 
-    // constructing and sending request
+    // constructing request
     char request[512];
     snprintf(request, sizeof(request),
         "GET %s HTTP/1.1\r\n"
@@ -829,38 +849,30 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port, cons
         "\r\n",
         path, host);
     
+    // sending request
     int write_status;
     if ((write_status = SSL_write(ssl, request, strlen(request))) <= 0) {
         SSL_get_error(ssl, write_status);
         SSL_free(ssl);
         close(sockfd);
-        return (MemoryBlock) { 0 };
+        return (MemoryBlock){0};
     } 
 
-    // read the response of the created request
-    MemoryBlock raw_response = (MemoryBlock){ 0 };
+    MemoryBlock http_response = (MemoryBlock){0};
 
-    // read headers first
-    size_t header_len = 0;
+    // read header of GET request to see the charateristics of the response
     char header[4096] = {0};
-    header_len = read_header(ssl, header, sizeof(header));
+    size_t header_len = header_len = read_header(ssl, header, sizeof(header));
     header[header_len] = '\0';
-
-    // debug
-    create_file_from_memory("headers.txt", header, header_len);
+    if (header_len == 0) {
+        printf("fetch_url: read_header data is invalid\n");
+        return (MemoryBlock){0};
+    }
 
     // read the exact amount of bytes if the length is availible
     size_t content_len = get_content_len(header);
     if (content_len > 0) {
-        printf("the response has a length of %lu bytes\n", content_len);
-
-        char buffer[4096];
-        while (content_len > 0) {
-            const size_t to_read  = content_len < (sizeof(buffer) - 1) ? content_len : (sizeof(buffer) - 1);
-            int bytes_read = SSL_read(ssl, buffer, to_read);
-            write_data_to_memory_block(buffer, bytes_read, &raw_response);
-            content_len -= bytes_read;
-        }
+        ssl_read_n(ssl, &http_response, content_len);
     }
 
     else if (is_chunked_encoding(header)) {
@@ -872,50 +884,29 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port, cons
         // read until there's no chunk data left
         size_t chunk_size = -1;
         while (chunk_size != 0) {
-            // the first line will be the the nbytes the nth chunk is (hexadecimal)
-
             // parsing the hex string
             char hex[16] = {0};
-            int len = read_ssl_line(ssl, hex, sizeof(hex));
+            int len = ssl_read_line(ssl, hex, sizeof(hex));
             hex[len - line_end_len] = '\0';
 
-            // getting numerical representation
+            // numerical representation
             chunk_size = strtoul(hex, NULL, 16);
-            printf("hexadecimal \"%s\" encountered (%lu in bytes) \n", hex, chunk_size);
 
-            // need to read that many bytes into raw response
-            size_t remaining = chunk_size;
+            // now there are 'chunk_size' bytes of response data that must be read 
+            ssl_read_n(ssl, &http_response, chunk_size); 
 
-            while (remaining > 0) {
-                // read bytes into the buffer
-                char buffer[4096] = {0};
-                const size_t to_read = remaining < (sizeof(buffer) - 1) ? remaining : (sizeof(buffer) - 1);
-                int bytes_read = SSL_read(ssl, buffer, to_read);
-                if (bytes_read <= 0) {
-                    printf("fetch_url: error reading data\n");
-                    break;
-                }
-
-                // add the data to the raw response
-                write_data_to_memory_block(buffer, bytes_read, &raw_response);
-                
-                // update the amount of bytes remaining
-                remaining -= bytes_read;
-            }
-
-            // absorb the trailing "\r\n" at the end of every chunk
+            // absorb trailing line end ("\r\n") found at the end of every chunk
             char last_line[16];
-            read_ssl_line(ssl, last_line, sizeof(last_line));
+            ssl_read_line(ssl, last_line, sizeof(last_line));
         }
     }
     
-    // // deinit ssl stuff
+    // deinit ssl stuff
     SSL_shutdown(ssl);
     SSL_free(ssl);
     close(sockfd);
 
-    create_file_from_memory("raw.html", raw_response.memory, raw_response.size);
-    return raw_response;
+    return http_response;
 }
 
 // returns an allocated string that is the URL encoding of the argument passed
@@ -952,9 +943,8 @@ char *url_encode(const char *str)
 void *load_thumbnail(void *args)
 {
     ThreadArgs *targs = (ThreadArgs *) args;
-       
-    // Load the thumbnail
-    MemoryBlock chunk = fetch_url(content_type_to_host(targs->type), targs->link, "443", NULL);
+    const char *host = content_type_to_host(targs->type);
+    MemoryBlock chunk = fetch_url(host, targs->link, "443", NULL);
     if (is_memory_ready(chunk)) {
         ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
         if (thumbnail_data) {
@@ -962,16 +952,17 @@ void *load_thumbnail(void *args)
             strcpy(thumbnail_data->id, targs->id);
             thumbnail_data->next = NULL;
             
-            // Add to thumbnail list with minimal lock time
             pthread_mutex_lock(&targs->thumbnail_list->mutex);
             add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
             pthread_mutex_unlock(&targs->thumbnail_list->mutex);
         }
-        else 
+        else {
             printf("load_thumbnail: malloc returned NULL for thumbnail_data\n");
+        }
     }
-    else 
+    else {
         printf("load_thumbnail: fetched data is not valid\n");
+    }
     
     free(targs);
     return NULL;
@@ -999,15 +990,14 @@ void* get_results_from_query(void* args)
 
     // get the page source of this url
     MemoryBlock html = fetch_url("www.youtube.com", path, "443", NULL);
-    if (!is_memory_ready(html)) {
+    
+    offline = (is_memory_ready(html) == false);
+    if (offline) {
         printf("get_results_from_query: fetch_url returned invalid\n");
         searching = false;
         search_finished = true;
-        offline = true;
         return NULL;
     }
-
-    offline = false;
     
     extract_yt_data(&html);
     if (!is_memory_ready(html)) {
@@ -1207,12 +1197,13 @@ void* get_results_from_query(void* args)
                 }
             }
 
-            if ((node.id[0] != '\0') && elements_added < MAX_ITEMS_PER_PAGE) {
+            if ((node.id[0] != '\0')) {
                 elements_added++;
                 // get cached thumbnail, if it exists
                 CachedThumbnailNode *cached_thumbnail = get_cached_node_by_id(node.id, &cached_thumbnails);
-                if (cached_thumbnail)
+                if (cached_thumbnail) {
                     node.thumbnail = cached_thumbnail->texture;
+                }
                 
                 // append node to search results
                 add_node(targs->search_results, node);
@@ -1253,11 +1244,14 @@ int main()
     desired_addr_info.ai_socktype = SOCK_STREAM;
 
     if (getaddrinfo("www.youtube.com", "443", &desired_addr_info, &cached_addr) != 0) {
-        perror("getaddrinfo");
+        printf("main: failed inital connection attempt using getaddrinfo\n");
         offline = true;
     }
 
     ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) {
+        printf("main: error initalizing SSL_CTX object\n");
+    } 
 
     // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
@@ -1267,6 +1261,7 @@ int main()
 
     cached_thumbnails.head = cached_thumbnails.tail = NULL;
     cached_thumbnails.count = 0;
+
     // init app
     SetTargetFPS(60);
     SetTraceLogLevel(LOG_ERROR);
@@ -1312,8 +1307,7 @@ int main()
     Vector2 scroll = { 10, 10 };
     Rectangle scrollView = { 0, 0 };
 
-    // the current search result the user has selected
-    int current_node = -1;
+    char search_buffer[256] = {0};
 
     while (!WindowShouldClose()) {
         // deleting cached thumbnails after they've been unused for CACHED_THUMBNAIL_LIFETIME seconds 
@@ -1330,7 +1324,7 @@ int main()
                         if (IsTextureReady(search_node->thumbnail)) 
                             UnloadTexture(search_node->thumbnail);
 
-                        search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 100);
+                        search_node->thumbnail = get_thumbnail_from_memory(thumbnail_data->data, 150, 80);
 
                         if (IsTextureReady(search_node->thumbnail)) {
                             // add new texture to cache
@@ -1369,8 +1363,6 @@ int main()
         if (search) {
             search = false;
 
-            current_node = -1;
-
             // configure thread arguements for routine
             ThreadArgs *targs = malloc(sizeof(ThreadArgs));
             targs->query = query;
@@ -1382,8 +1374,8 @@ int main()
             pthread_create(&thread, NULL, get_results_from_query, targs);
             pthread_detach(thread);
 
-	    query.url_encoded_query[0] = '\0';
-	}
+            search_buffer[0] = '\0';
+	    }
         
         if (delete_old_search_results) {
             delete_old_search_results = false;
@@ -1414,15 +1406,16 @@ int main()
             // pressing enter returns 1
             // clicking out of the window returns 2
             int text_box_status; 
-            if ((text_box_status = GuiTextBox(search_bar, query.url_encoded_query, 256, edit_mode))) {
+            if ((text_box_status = GuiTextBox(search_bar, search_buffer, sizeof(search_buffer), edit_mode))) {
                 edit_mode = !edit_mode;
             } 
             
             const bool start_search = GuiButton(search_button, "SEARCH") || (text_box_status == 1);
-            const bool query_entered = (query.url_encoded_query[0] != '\0') && (!edit_mode);
+            const bool query_entered = (search_buffer[0] != '\0') && (!edit_mode);
 
             // pressing the search button or pressing enter in the search bar will search 
             if (start_search && query_entered) {
+                strcpy(query.url_encoded_query, search_buffer);
                 query.sort = availible_sorts[current_sort];
                 query.type = availible_types[current_type];
                 
@@ -1480,12 +1473,12 @@ int main()
             };
             
             // the area of the content drawn in the window
-            const int content_height = 100;
+            const int content_height = 80;
             const Rectangle content_area = {
                 scroll_panel_area.x,
                 scroll_panel_area.y,
                 scroll_panel_area.width,
-                content_height * (search_results.count ? search_results.count : MAX_ITEMS_PER_PAGE),
+                content_height * search_results.count,
             };
 
             // the width of the scrollbar is only felt when it's visible
@@ -1515,11 +1508,6 @@ int main()
                         start_timer(&cached_node->lifespan, CACHED_THUMBNAIL_LIFETIME);
                     }
 
-                    const Vector2 mouse_position = GetMousePosition();
-                    if (CheckCollisionPointRec(mouse_position, scroll_panel_area) && CheckCollisionPointRec(mouse_position, content_rect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                        current_node = i;
-                    }
-
                     // only process items that are onscreen
                     if (CheckCollisionRecs(content_rect, scroll_panel_area)) {
                         const Rectangle thumbnail_bounds = { 
@@ -1544,7 +1532,7 @@ int main()
                         };
 
                         const int padding = 5;
-                        const int font_size = 11;
+                        const int font_size = 12;
                         const int spacing = 2;
                         const bool wrap_word = true; // words move to next line if there's enough space, rather than getting cut in half
 
@@ -1585,19 +1573,21 @@ int main()
 
     // deinit app
     {
-        SSL_CTX_free(ctx);
         EVP_cleanup();
-        if (search_results.count > 0) unload_list(&search_results);
+        SSL_CTX_free(ctx);
         freeaddrinfo(cached_addr);
+        
+        if (search_results.count > 0) {
+            unload_list(&search_results);
+        }
 
-        pthread_mutex_lock(&thumbnail_list.mutex);
         while (thumbnail_list.head) {
             ThumbnailData *node = thumbnail_list.head;
             thumbnail_list.head = thumbnail_list.head->next;
             unload_memory_block(&node->data);
             free(node);
         }
-        pthread_mutex_unlock(&thumbnail_list.mutex);
+
         pthread_mutex_destroy(&thumbnail_list.mutex);
 
         while (cached_thumbnails.head) {
@@ -1614,9 +1604,9 @@ int main()
 }
 
 // to do
-    // persistent socket connection 
-    // check speed
+    // persistent socket connection
     // pagination 
+    // clean code
     // show video information when double clicking video
     // clean everything
     // actually play video when pressed
