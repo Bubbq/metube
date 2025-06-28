@@ -1381,7 +1381,9 @@ int main()
             pthread_t thread;
             pthread_create(&thread, NULL, get_results_from_query, targs);
             pthread_detach(thread);
-        }
+
+	    query.url_encoded_query[0] = '\0';
+	}
         
         if (delete_old_search_results) {
             delete_old_search_results = false;
