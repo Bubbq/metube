@@ -284,9 +284,9 @@ int bound_index_to_array (const int pos, const int array_size)
 char *content_type_to_host (const ContentType content_type)
 {
     switch (content_type) {
-        case CONTENT_TYPE_VIDEO: return "img.youtube.com";
-        case CONTENT_TYPE_CHANNEL: return "yt3.ggpht.com";
+        case CONTENT_TYPE_VIDEO: 
         case CONTENT_TYPE_PLAYLIST: return "i.ytimg.com";
+        case CONTENT_TYPE_CHANNEL: return "yt3.ggpht.com";
         default: break;
     }
 
@@ -806,40 +806,151 @@ void ssl_read_n (SSL *ssl, MemoryBlock *dst, const size_t n)
 
 bool offline = false;
 SSL_CTX *ctx = NULL;
-struct addrinfo *cached_addr = NULL;
+// struct addrinfo *cached_addr = NULL;
 
-MemoryBlock fetch_url(const char *host, const char *path, const char *port, const char *debug_filename)
+// SSL *ssl;
+// int sockfd;
+
+typedef struct {
+    SSL *ssl;
+    int sockfd;
+    bool connected;
+    char host[64];
+    char port[64];
+    struct addrinfo *address_information;
+    pthread_mutex_t mutex;
+} PersistentConnection;
+
+PersistentConnection youtube_connection = {0};
+PersistentConnection video_thumbnail_connection = {0};
+PersistentConnection channel_thumbnail_connection = {0};
+
+void init_connection(PersistentConnection *connection, const char *host, const char *port)
 {
-    // only retry connection if application is offline
-    if (offline) {
-        struct addrinfo desired_addr_info = {0};
-        desired_addr_info.ai_family = AF_UNSPEC;
-        desired_addr_info.ai_socktype = SOCK_STREAM;
-        if (getaddrinfo(host, port, &desired_addr_info, &cached_addr) != 0) {
-            perror("getaddrinfo");
-            printf("fetch_url: failed reconnection attempt using getaddrinfo\n");
+    memset(connection, 0, sizeof(PersistentConnection));
+    strncpy(connection->host, host, sizeof(connection->host) - 1);
+    strncpy(connection->port, port, sizeof(connection->port) - 1);
+    connection->sockfd = -1; 
+    connection->connected = false;
+    pthread_mutex_init(&connection->mutex, NULL);
+}
+
+void disconnect(PersistentConnection *connection)
+{
+    if (!connection) return;
+
+    if (connection->ssl) {
+        SSL_shutdown(connection->ssl);
+        SSL_free(connection->ssl);
+        connection->ssl = NULL;
+    }
+
+    if (connection->sockfd >= 0) {
+        close(connection->sockfd);
+        connection->sockfd = -1;
+    }
+
+    if (connection->address_information) {
+        freeaddrinfo(connection->address_information);
+        connection->address_information = NULL;
+    }
+
+    connection->connected = false;
+}
+
+bool establish_persistent_connection(PersistentConnection *connection)
+{
+    if (!connection) {
+        printf("establish_persistent_connection: 'connection' argument is NULL\n");
+        return false;
+    }
+
+    if (!connection->host[0]) {
+        printf("establish_persistent_connection: 'host' argument is empty\n");
+        return false;
+    }
+
+    if (!connection->port[0]) {
+        printf("establish_persistent_connection: 'port' argument is empty\n");
+        return false;
+    }
+
+    // clean existing connection
+    disconnect(connection);
+
+    // preform DNS resolution: getting the address information that is used to connect to a host over a network (in this case, sockets)
+    struct addrinfo desired_address_information = {0};
+    desired_address_information.ai_family = AF_UNSPEC;
+    desired_address_information.ai_socktype = SOCK_STREAM;
+    
+    if (getaddrinfo(connection->host, connection->port, &desired_address_information, &connection->address_information) != 0) {
+        printf("establish_persistent_connection: getaddrinfo failed for %s:%s\n", connection->host, connection->port);
+        return false;
+    }
+
+    // initalizing socket
+    connection->sockfd = socket(connection->address_information->ai_family, connection->address_information->ai_socktype, connection->address_information->ai_protocol);
+    if (connection->sockfd < 0) {
+        printf("establish_persistent_connection: socket creation failed\n");
+        freeaddrinfo(connection->address_information);
+        connection->address_information = NULL;
+        return false;
+    }
+
+    // connecting to host
+    if (connect(connection->sockfd, connection->address_information->ai_addr, connection->address_information->ai_addrlen) != 0) {
+        printf("establish_persistent_connection: connect failed for host \"%s\"\n", connection->host);
+        close(connection->sockfd);
+        connection->sockfd = -1;
+        freeaddrinfo(connection->address_information);
+        connection->address_information = NULL;
+        return false;
+    }
+
+    // intializing ssl
+    connection->ssl = SSL_new(ctx);
+    if (!connection->ssl) {
+        printf("establish_persistent_connection: SSL_new failed\n");
+        close(connection->sockfd);
+        connection->sockfd = -1;
+        freeaddrinfo(connection->address_information);
+        connection->address_information = NULL;
+        return false;
+    }
+
+    SSL_set_fd(connection->ssl, connection->sockfd);
+    if (SSL_connect(connection->ssl) != 1) {
+        printf("establish_persistent_connection: SSL_connect failed for host %s\n", connection->host);
+        SSL_free(connection->ssl);
+        connection->ssl = NULL;
+        close(connection->sockfd);
+        connection->sockfd = -1;
+        freeaddrinfo(connection->address_information);
+        connection->address_information = NULL;
+        return false;
+    }
+
+    connection->connected = true;
+    return true;
+}
+
+MemoryBlock fetch_url(PersistentConnection *connection, const char *path, const char *debug_filename) {
+    if (!connection) {
+        printf("fetch_url: connection is NULL\n");
+        return (MemoryBlock){0};
+    }
+
+    pthread_mutex_lock(&connection->mutex);
+    // establish connection if obj is not currently connected
+    if (!connection->connected) {
+        printf("fetch_url: attempting to establish connection to %s:%s\n", connection->host, connection->port);
+        if (!establish_persistent_connection(connection)) {
+            printf("fetch_url: failed to establish connection\n");
             return (MemoryBlock){0};
         }
     }
 
-    // initializing socket
-    int sockfd = socket(cached_addr->ai_family, cached_addr->ai_socktype, cached_addr->ai_protocol);
-    if (connect(sockfd, cached_addr->ai_addr, cached_addr->ai_addrlen) != 0) {
-        printf("fetch_url: issue with establishing socket connection\n");
-        close(sockfd);
-        return (MemoryBlock){0};
-    }
-
-    // initializing ssl
-    SSL *ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sockfd);
-    if (SSL_connect(ssl) != 1) {
-        SSL_free(ssl);
-        close(sockfd);
-        return (MemoryBlock){0};
-    }
-
-    // constructing request
+    // creating request
     char request[512];
     snprintf(request, sizeof(request),
         "GET %s HTTP/1.1\r\n"
@@ -847,65 +958,68 @@ MemoryBlock fetch_url(const char *host, const char *path, const char *port, cons
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
         "Connection: keep-alive\r\n"
         "\r\n",
-        path, host);
+        path, connection->host);
     
     // sending request
-    int write_status;
-    if ((write_status = SSL_write(ssl, request, strlen(request))) <= 0) {
-        SSL_get_error(ssl, write_status);
-        SSL_free(ssl);
-        close(sockfd);
-        return (MemoryBlock){0};
-    } 
+    int write_status = SSL_write(connection->ssl, request, strlen(request));
+    if (write_status <= 0) {
+        int ssl_error = SSL_get_error(connection->ssl, write_status);
+        printf("fetch_url: SSL_write error: %d\n", ssl_error);
+        disconnect(connection); 
+    }
 
-    MemoryBlock http_response = (MemoryBlock){0};
+    // the obj containing the response body
+    MemoryBlock http_response = {0};
 
-    // read header of GET request to see the charateristics of the response
+    // read header to determine response characteristics
     char header[4096] = {0};
-    size_t header_len = header_len = read_header(ssl, header, sizeof(header));
+    size_t header_len = read_header(connection->ssl, header, sizeof(header));
     header[header_len] = '\0';
     if (header_len == 0) {
-        printf("fetch_url: read_header data is invalid\n");
+        printf("fetch_url: header is empty\n");
+        disconnect(connection);
         return (MemoryBlock){0};
     }
 
-    // read the exact amount of bytes if the length is availible
+    // read the response body, the response is either chunk encoded, or contains its size in a label called 'Connection-Length'
     size_t content_len = get_content_len(header);
     if (content_len > 0) {
-        ssl_read_n(ssl, &http_response, content_len);
+        ssl_read_n(connection->ssl, &http_response, content_len);
     }
 
     else if (is_chunked_encoding(header)) {
-        printf("the response is chunk encoded\n");
+        printf("fetch_url: processing chunked encoding\n");
         
-        const char *line_end = "\r\n";
-        const size_t line_end_len = strlen(line_end);
+        const char *CRLF = "\r\n";
+        const size_t CRLF_len = strlen(CRLF);
         
-        // read until there's no chunk data left
-        size_t chunk_size = -1;
+        size_t chunk_size = 1; 
         while (chunk_size != 0) {
-            // parsing the hex string
+            // read chunk size line
             char hex[16] = {0};
-            int len = ssl_read_line(ssl, hex, sizeof(hex));
-            hex[len - line_end_len] = '\0';
+            int len = ssl_read_line(connection->ssl, hex, sizeof(hex));
+            if (len <= 0) {
+                printf("fetch_url: failed to read chunk size\n");
+                connection->connected = false;
+                break;
+            }
 
-            // numerical representation
+            // parse hex
+            if (len >= CRLF_len) {
+                hex[len - CRLF_len] = '\0';
+            }
             chunk_size = strtoul(hex, NULL, 16);
-
-            // now there are 'chunk_size' bytes of response data that must be read 
-            ssl_read_n(ssl, &http_response, chunk_size); 
-
-            // absorb trailing line end ("\r\n") found at the end of every chunk
-            char last_line[16];
-            ssl_read_line(ssl, last_line, sizeof(last_line));
+            
+            // read 'chunk_size' bytes in memory block
+            ssl_read_n(connection->ssl, &http_response, chunk_size);
+                
+            // absorb trailing CRLF from ssl read stream
+            char trailing[16];
+            ssl_read_line(connection->ssl, trailing, sizeof(trailing));
         }
     }
-    
-    // deinit ssl stuff
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    close(sockfd);
 
+    pthread_mutex_unlock(&connection->mutex);
     return http_response;
 }
 
@@ -940,28 +1054,43 @@ char *url_encode(const char *str)
     return encoded_str;
 }
 
+PersistentConnection *content_type_to_connection (const ContentType content_type)
+{
+    switch (content_type) {
+        case CONTENT_TYPE_PLAYLIST:
+        case CONTENT_TYPE_LIVE:
+        case CONTENT_TYPE_VIDEO: return &video_thumbnail_connection;
+        case CONTENT_TYPE_CHANNEL: return &channel_thumbnail_connection;
+        default: break;
+    }
+    return NULL;
+}
+
 void *load_thumbnail(void *args)
 {
     ThreadArgs *targs = (ThreadArgs *) args;
-    const char *host = content_type_to_host(targs->type);
-    MemoryBlock chunk = fetch_url(host, targs->link, "443", NULL);
-    if (is_memory_ready(chunk)) {
-        ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
-        if (thumbnail_data) {
-            thumbnail_data->data = chunk;
-            strcpy(thumbnail_data->id, targs->id);
-            thumbnail_data->next = NULL;
-            
-            pthread_mutex_lock(&targs->thumbnail_list->mutex);
-            add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
-            pthread_mutex_unlock(&targs->thumbnail_list->mutex);
+    PersistentConnection * connection = content_type_to_connection(targs->type);
+    
+    if (connection) {
+        MemoryBlock chunk = fetch_url(connection, targs->link, NULL);
+        if (is_memory_ready(chunk)) {
+            ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
+            if (thumbnail_data) {
+                thumbnail_data->data = chunk;
+                strcpy(thumbnail_data->id, targs->id);
+                thumbnail_data->next = NULL;
+                
+                pthread_mutex_lock(&targs->thumbnail_list->mutex);
+                add_thumbnail_node(thumbnail_data, targs->thumbnail_list);
+                pthread_mutex_unlock(&targs->thumbnail_list->mutex);
+            }
+            else {
+                printf("load_thumbnail: malloc returned NULL for thumbnail_data\n");
+            }
         }
         else {
-            printf("load_thumbnail: malloc returned NULL for thumbnail_data\n");
+            printf("load_thumbnail: fetched data is not valid\n");
         }
-    }
-    else {
-        printf("load_thumbnail: fetched data is not valid\n");
     }
     
     free(targs);
@@ -989,7 +1118,7 @@ void* get_results_from_query(void* args)
     printf("path: %s\n", path);
 
     // get the page source of this url
-    MemoryBlock html = fetch_url("www.youtube.com", path, "443", NULL);
+    MemoryBlock html = fetch_url(&youtube_connection, path, NULL);
     
     offline = (is_memory_ready(html) == false);
     if (offline) {
@@ -1199,7 +1328,7 @@ void* get_results_from_query(void* args)
 
             if ((node.id[0] != '\0')) {
                 elements_added++;
-                // get cached thumbnail, if it exists
+                // // get cached thumbnail, if it exists
                 CachedThumbnailNode *cached_thumbnail = get_cached_node_by_id(node.id, &cached_thumbnails);
                 if (cached_thumbnail) {
                     node.thumbnail = cached_thumbnail->texture;
@@ -1239,19 +1368,15 @@ void* get_results_from_query(void* args)
 
 int main()
 {
-    struct addrinfo desired_addr_info = { 0 };
-    desired_addr_info.ai_family = AF_UNSPEC;
-    desired_addr_info.ai_socktype = SOCK_STREAM;
-
-    if (getaddrinfo("www.youtube.com", "443", &desired_addr_info, &cached_addr) != 0) {
-        printf("main: failed inital connection attempt using getaddrinfo\n");
-        offline = true;
-    }
-
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) {
         printf("main: error initalizing SSL_CTX object\n");
+        return 1;
     } 
+
+    init_connection(&youtube_connection, "www.youtube.com", "443");
+    init_connection(&video_thumbnail_connection, "i.ytimg.com", "443");
+    init_connection(&channel_thumbnail_connection, "yt3.ggpht.com", "443");
 
     // list containing the search results from a query
     YoutubeSearchList search_results = create_youtube_search_list();
@@ -1575,7 +1700,13 @@ int main()
     {
         EVP_cleanup();
         SSL_CTX_free(ctx);
-        freeaddrinfo(cached_addr);
+        disconnect(&youtube_connection);
+        disconnect(&video_thumbnail_connection);        
+        disconnect(&channel_thumbnail_connection);        
+        
+        pthread_mutex_destroy(&youtube_connection.mutex);
+        pthread_mutex_destroy(&video_thumbnail_connection.mutex);
+        pthread_mutex_destroy(&channel_thumbnail_connection.mutex);
         
         if (search_results.count > 0) {
             unload_list(&search_results);
@@ -1605,6 +1736,7 @@ int main()
 
 // to do
     // persistent socket connection
+        // connection to the wifi
     // pagination 
     // clean code
     // show video information when double clicking video
