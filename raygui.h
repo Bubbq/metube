@@ -1845,7 +1845,11 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
     }
 
     if (scrollPos.y > -verticalMin) scrollPos.y = -verticalMin;
-    if (scrollPos.y < -verticalMax) scrollPos.y = -verticalMax;
+    else if (scrollPos.y <= -verticalMax)
+    {
+        scrollPos.y = -verticalMax;
+        result = 1; 
+    }
 
     if (text != NULL) GuiStatusBar(statusBar, text);
     GuiDrawRectangle(bounds, 0, BLANK, GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
@@ -1868,6 +1872,7 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
 
     return result;
 }
+
 
 // Label control
 int GuiLabel(Rectangle bounds, const char *text)
@@ -2610,13 +2615,13 @@ int GuiTextBox(Rectangle bounds, char *text, int bufferSize, bool editMode)
             if (!multiline && IsKeyPressed(KEY_ENTER))
             {
                 textBoxCursorIndex = 0;     // GLOBAL: Reset the shared cursor index
-                result = 1;
+                result = 2;
             }
 
             else if (!CheckCollisionPointRec(mousePosition, bounds) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
             {
                 textBoxCursorIndex = 0;     // GLOBAL: Reset the shared cursor index
-                result = 2;
+                result = 1;
             }
         }
         else
