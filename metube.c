@@ -897,27 +897,6 @@ void remove_trailing_whitespace(char *string)
     *(last_char + 1) = '\0';
 }
 
-#define HTTPS_PORT "443"
-// HTTP_Request configure_http_request(const Query query, const char *method, const char* continuation_token)
-// {
-//     HTTP_Request http_req = (HTTP_Request){0};
-//     http_req.port = HTTPS_PORT;
-//     http_req.host = media_type_to_host(query.media);
-    
-//     if (continuation_token) {
-//         strcpy(http_req.path, "/youtubei/v1/search");
-//         configure_post_body(sizeof(http_req.body), http_req.body, continuation_token);
-//         configure_post_header(sizeof(http_req.header), http_req.header, http_req.host, http_req.path, strlen(http_req.body));
-//     }
-
-//     else {
-//         configure_youtube_search_query_path(sizeof(http_req.path), http_req.path, query);
-//         configure_get_header(sizeof(http_req.header), http_req.header, method, http_req.host, http_req.path);
-//     }
-
-//     return http_req;
-// }
-
 bool video_is_youtube_short(const cJSON *videoRenderer) 
 {
     cJSON *navigationEndpoint = cJSON_GetObjectItem(videoRenderer, "navigationEndpoint");
@@ -1186,16 +1165,7 @@ void create_search_node_from_json(SearchResult *search_result, cJSON *item, cons
     }
 }
 
-#define MAX_THREADS 8
-static int current_thread = 0;
-static pthread_t thread_pool[MAX_THREADS];
-
-void add_thread_to_pool (void*(*thread_funct)(void*), void *args) 
-{
-    pthread_create(&thread_pool[current_thread], NULL, thread_funct, args);
-    pthread_detach(thread_pool[current_thread]);
-    current_thread = bound_index_to_array((current_thread + 1), MAX_THREADS);
-}
+#define MAX_THREADS 4
 
 typedef struct 
 {
@@ -1250,6 +1220,123 @@ void extract_continuation_token(const cJSON *continuationItemRenderer)
     }
 }
 
+typedef struct ThreadTask
+{
+    void *(*funct)(void *);
+    void *args;
+    struct ThreadTask *next;
+} ThreadTask;
+
+typedef struct
+{
+    ThreadTask *head;
+    ThreadTask *tails;
+    size_t count;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} TaskQueue;
+
+static TaskQueue task_queue;
+
+TaskQueue init_task_queue()
+{
+    TaskQueue tq;
+    tq.count = 0;
+    tq.head = tq.tails = NULL;
+    pthread_mutex_init(&tq.mutex, NULL);
+    pthread_cond_init(&tq.cond, NULL);
+    return tq;
+}
+
+void enqueue_task(ThreadTask *task, TaskQueue *queue)
+{
+    if (!task) {
+        printf("enqueue_task: Task arg is NULL\n");
+        return;
+    }
+
+    else if (!queue) {
+        printf("enqueue_task: TaskQueue arg is NULL\n");
+        return;
+    }
+    
+    if (queue->count == 0 || !queue->head) 
+        queue->head = queue->tails = task;
+    else {
+        task->next = NULL;
+        queue->tails->next = task;
+        queue->tails = task;
+    }
+
+    queue->count++;
+}
+
+ThreadTask* dequeue_task(TaskQueue *queue)
+{
+    if (!queue) {
+        printf("dequeue_task: TaskQueue arg is NULL\n");
+        return NULL;
+    }
+
+    if (queue->count == 0 || !queue->head) {
+        printf("dequeue_task: TaskQueue arg is empty\n");
+        return NULL;
+    }
+
+    ThreadTask *ret = queue->head;
+    queue->head = queue->head->next;
+    queue->count--;
+    
+    return ret; 
+}
+
+void free_task_queue(TaskQueue *queue)
+{
+    while (queue->head) 
+        free(dequeue_task(queue));
+
+    pthread_mutex_destroy(&queue->mutex);
+    pthread_cond_destroy(&queue->cond);
+}
+
+bool application_running = true;
+void* worker_thread_funct(void* args)
+{
+    const long int id = pthread_self();
+
+    while (application_running) {
+        pthread_mutex_lock(&task_queue.mutex);
+        while (task_queue.count == 0 && application_running) 
+            pthread_cond_wait(&task_queue.cond, &task_queue.mutex);
+
+        if (!application_running) {
+            pthread_mutex_unlock(&task_queue.mutex);
+            break;
+        }
+
+        ThreadTask *task = dequeue_task(&task_queue);
+
+        pthread_mutex_unlock(&task_queue.mutex);  // Release lock while processing
+        // printf("thread %lX is preforming function\n", id);
+        task->funct(task->args);
+        free(task);
+    }
+
+    return NULL;
+}
+
+void init_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads], void* (*worker_funct)(void*), void* worker_args)
+{
+    for (int t = 0; t < nthreads; t++) 
+        pthread_create(&thread_pool[t], NULL, worker_funct, worker_args);
+}
+
+void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
+{
+    for (int t = 0; t < nthreads; t++) 
+        pthread_join(thread_pool[t], NULL);
+}
+
 typedef enum
 {
     NEW,
@@ -1274,7 +1361,6 @@ static bool search_finished = true;
 void* get_results_from_query(void* args)
 {
     SearchThreadArgs* targs = (SearchThreadArgs*)args;
-    
     elements_added = 0;
     clock_t start_time = clock(); 
 
@@ -1362,12 +1448,22 @@ void* get_results_from_query(void* args)
                         strcpy(http_req.path, search_result->thumbnail_path);
                         configure_get_header(sizeof(http_req.header), http_req.header, http_req.host, http_req.path);
 
-                        // // configure the thread arguements to load thumbnail
+                        // configure the thread arguements to load thumbnail
                         thumbnailargs->http_request = http_req;
                         strcpy(thumbnailargs->search_result_id, search_result->id);
                         thumbnailargs->thumbnail_queue = targs->thumbnail_queue;
 
-                        add_thread_to_pool(load_thumbnail, thumbnailargs);
+                        ThreadTask *async_thumbnail_load = malloc(sizeof(ThreadTask));
+                        (*async_thumbnail_load) = (ThreadTask) {
+                            .next = NULL,
+                            .args = thumbnailargs,
+                            .funct = load_thumbnail,
+                        };
+
+                        pthread_mutex_lock(&task_queue.mutex);
+                            enqueue_task(async_thumbnail_load, &task_queue);
+                            pthread_cond_signal(&task_queue.cond);
+                        pthread_mutex_unlock(&task_queue.mutex);
                     }
                 }
                 else 
@@ -1655,15 +1751,45 @@ void draw_filter_window(Query *query, const Rectangle container, const Font font
     }
 }
 
-// load more items by scrolling down
-    // having a flag wether to start search based when the scroll panel is exahusted
-    // make a different request (POST) when doing an appending search
-        // have an enum specifying the type of search
+void process_async_loaded_thumbnails(ThumbnailQueue *thumbnail_queue, Results *results)
+{
+    pthread_mutex_lock(&thumbnail_queue->mutex);
+    while (thumbnail_queue->head) {
+        ThumbnailData *thumbnail_data = dequeue_thumbnail(thumbnail_queue);
+        
+        // find matching search node and load texture
+        for (SearchResult *search_node = results->head; search_node; search_node = search_node->next) {
+            if (strcmp(thumbnail_data->search_result_id, search_node->id) == 0) {
+                // clear thumbnail
+                if (IsTextureReady(search_node->thumbnail))
+                    UnloadTexture(search_node->thumbnail);
+                
+                // add texture to cache
+                search_node->thumbnail = load_thumbnail_from_memory(thumbnail_data->image_data, 160, 80);
+                if (!IsTextureReady(search_node->thumbnail)) {
+                    printf("%s failed to load texture\n", search_node->id);
+                }
+                break;
+            }
+        }
+
+        // remove processed thumbnail data
+        free_thumbnail_data(thumbnail_data);
+    }
+    pthread_mutex_unlock(&thumbnail_queue->mutex);
+}
+
+
 int main()
 {
     Results results = init_results();
     ThumbnailQueue thumbnail_queue = init_thumbnail_queue();
-
+    
+    // TaskQueue task_queue = init_task_queue();
+    task_queue = init_task_queue();
+    pthread_t thread_pool[MAX_THREADS];
+    init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
+    
     // when true, the application starts the search process
     bool search = false;
     char search_buffer[256] = {0};
@@ -1693,31 +1819,7 @@ int main()
 
     while (!WindowShouldClose())
     {
-        // loading thumbnails from data list
-        if (pthread_mutex_trylock(&thumbnail_queue.mutex) == 0) {
-            while (thumbnail_queue.head) {
-                ThumbnailData *thumbnail_data = dequeue_thumbnail(&thumbnail_queue);
-                
-                // find matching search node and load texture
-                for (SearchResult *search_node = results.head; search_node; search_node = search_node->next) {
-                    if (strcmp(thumbnail_data->search_result_id, search_node->id) == 0) {
-                        // clear thumbnail
-                        if (IsTextureReady(search_node->thumbnail))
-                            UnloadTexture(search_node->thumbnail);
-                        
-                        // add texture to cache
-                        search_node->thumbnail = load_thumbnail_from_memory(thumbnail_data->image_data, 160, 80);
-                        
-                        break;
-                    }
-                }
-                
-                // remove processed thumbnail data
-                free_thumbnail_data(thumbnail_data);
-            }
-
-            pthread_mutex_unlock(&thumbnail_queue.mutex);
-        }
+        process_async_loaded_thumbnails(&thumbnail_queue, &results);
 
         if (delete_old_nodes) {
             scroll.y = 0;
@@ -1741,34 +1843,45 @@ int main()
                 printf("query: \"%s\"\n", query.encoded_query);
                 SetWindowTitle(TextFormat("[%s(loading)] - metube", search_buffer));
 
-                free_thumbnail_queue(&thumbnail_queue);
-                thumbnail_queue = init_thumbnail_queue();
-                
-                targs->search_type = search_type;
-                targs->allow_youtube_shorts = query.allow_youtube_shorts;
-                targs->search_results = &results;
-                targs->thumbnail_queue = &thumbnail_queue;
-
                 HTTP_Request http_request = {0};
                 http_request.host = "www.youtube.com";
                 http_request.port = "443";
 
-                if (targs->search_type == NEW) {
+                if (search_type == NEW) {
                     configure_youtube_search_query_path(sizeof(http_request.path), http_request.path, query);
                     configure_get_header(sizeof(http_request.header), http_request.header, http_request.host, http_request.path);
                 }
 
-                else if (targs->search_type == APPENDING) {
+                else if (search_type == APPENDING) {
                     strcpy(http_request.path, "/youtubei/v1/search");
                     configure_post_body(sizeof(http_request.body), http_request.body, next_page_token);
                     configure_post_header(sizeof(http_request.header), http_request.header, http_request.host, http_request.path, strlen(http_request.body));
                 }
 
+                targs->search_type = search_type;
+                targs->allow_youtube_shorts = query.allow_youtube_shorts;
+                targs->search_results = &results;
+                targs->thumbnail_queue = &thumbnail_queue;
                 targs->http_request = http_request;
                 
-                pthread_t thread;
-                pthread_create(&thread, NULL, get_results_from_query, targs);
-                pthread_detach(thread);
+                // awaken a worker thread to handle 'get_results_from_query' function
+                ThreadTask *search_task = malloc(sizeof(ThreadTask));
+                if (!search_task) {
+                    printf("main: malloc returned NULL for ThreadTask object\n");
+                    free(targs);
+                } 
+                else {
+                    (*search_task) = (ThreadTask) {
+                        .next = NULL,
+                        .args = targs,
+                        .funct = get_results_from_query,
+                    };
+                    
+                    pthread_mutex_lock(&task_queue.mutex);
+                        enqueue_task(search_task, &task_queue);
+                        pthread_cond_signal(&task_queue.cond);
+                    pthread_mutex_unlock(&task_queue.mutex);
+                }
             }   
         }
 
@@ -1901,7 +2014,6 @@ int main()
                         
                         if (IsTextureReady(search_result->thumbnail)) 
                             DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
-                    
                         const Rectangle title_bounds = {
                             thumbnail_bounds.x + thumbnail_bounds.width,
                             content_rect.y,
@@ -1948,20 +2060,22 @@ int main()
     free_results(&results);
     free_thumbnail_queue(&thumbnail_queue);
     if (query.encoded_query) free(query.encoded_query);
+    
     // ssl stuff
-    if (ctx)
-        SSL_CTX_free(ctx);
-    if (addrinfo)
-        freeaddrinfo(addrinfo);
+    if (ctx) SSL_CTX_free(ctx);
+    if (addrinfo) freeaddrinfo(addrinfo);
+    
+    // free worker thread stuff
+    application_running = false;
+    pthread_cond_broadcast(&task_queue.cond);
+    free_thread_pool(MAX_THREADS, thread_pool);
+    free_task_queue(&task_queue);         
     
     CloseWindow();
-
     return 0;
 }
 
-// TODO for the rewrite
-// configure http function
-// next page token
+// fix worker thread, crashes on fast load and missing images
 
 // searching feature
     // clean everything
