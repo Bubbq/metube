@@ -13,6 +13,7 @@
 #include <openssl/ssl.h>
 
 #include "raylib.h"
+#include "raylib/src/raylib.h"
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
@@ -234,7 +235,7 @@ typedef struct SearchResult
     char video_count[32];       // # of videos that a playlist contains        
     bool thumbnail_loaded;
     char thumbnail_path[256];   // path to thumbnail link, relative to its host (see media type to host)    
-    Texture thumbnail;
+    Texture2D thumbnail;
 
     struct SearchResult* next; 
 } SearchResult;
@@ -242,6 +243,7 @@ typedef struct SearchResult
 void free_search_result(SearchResult *search_result)
 {
     if (!search_result) return;
+    if (IsTextureReady(search_result->thumbnail)) UnloadTexture(search_result->thumbnail);
     free(search_result);
 }
 
@@ -965,7 +967,7 @@ void format_view_count(char* view_count)
 void create_search_node_from_json(SearchResult *search_result, cJSON *item, const bool allow_shorts)
 {
     search_result->media_type = UNDF;
-    search_result->thumbnail = (Texture){0};
+    search_result->thumbnail = (Texture2D){0};
     search_result->thumbnail_loaded = false;
     memset(search_result->id, 0, sizeof(search_result->id));
     memset(search_result->title, 0, sizeof(search_result->title));
@@ -1165,7 +1167,7 @@ void create_search_node_from_json(SearchResult *search_result, cJSON *item, cons
     }
 }
 
-#define MAX_THREADS 4
+#define MAX_THREADS 2
 
 typedef struct 
 {
@@ -1236,8 +1238,6 @@ typedef struct
     pthread_cond_t cond;
 } TaskQueue;
 
-static TaskQueue task_queue;
-
 TaskQueue init_task_queue()
 {
     TaskQueue tq;
@@ -1302,22 +1302,19 @@ void free_task_queue(TaskQueue *queue)
 bool application_running = true;
 void* worker_thread_funct(void* args)
 {
-    const long int id = pthread_self();
-
+    TaskQueue* task_queue = (TaskQueue*)args;
     while (application_running) {
-        pthread_mutex_lock(&task_queue.mutex);
-        while (task_queue.count == 0 && application_running) 
-            pthread_cond_wait(&task_queue.cond, &task_queue.mutex);
+        pthread_mutex_lock(&task_queue->mutex);
+        while ((task_queue->count == 0) && application_running) 
+            pthread_cond_wait(&task_queue->cond, &task_queue->mutex);
 
         if (!application_running) {
-            pthread_mutex_unlock(&task_queue.mutex);
+            pthread_mutex_unlock(&task_queue->mutex);
             break;
         }
 
-        ThreadTask *task = dequeue_task(&task_queue);
-
-        pthread_mutex_unlock(&task_queue.mutex);  // Release lock while processing
-        // printf("thread %lX is preforming function\n", id);
+        ThreadTask *task = dequeue_task(task_queue);
+        pthread_mutex_unlock(&task_queue->mutex); 
         task->funct(task->args);
         free(task);
     }
@@ -1352,8 +1349,6 @@ typedef struct
     Results *search_results;
     ThumbnailQueue *thumbnail_queue;
 } SearchThreadArgs;
-
-#define MAX_SEARCH_ITEMS 100
 
 static int elements_added = 0; 
 static bool delete_old_nodes = false;
@@ -1425,50 +1420,23 @@ void* get_results_from_query(void* args)
         // loop through every item and get the node equivalent 
         cJSON *item;
         cJSON_ArrayForEach (item, contents) {
-            if ((targs->search_results->count < MAX_SEARCH_ITEMS) || (targs->search_type == NEW)) {
-                SearchResult *search_result = (SearchResult*) malloc(sizeof(SearchResult));
-                if (!search_result) {
-                    printf("get_results_from_query: malloc returned NULL for search_result\n");
-                    cJSON_Delete(sectionListRenderer);
-                    free_buffer(&http);
-                    free(targs);
-                    search_finished = true;
-                    return NULL;
-                }
-
-                create_search_node_from_json(search_result, item, targs->allow_youtube_shorts);
-                if (search_result->media_type != UNDF) {
-                    add_search_result(targs->search_results, search_result);
-                    elements_added++;
-                    LoadThumbnailThreadArgs *thumbnailargs = malloc(sizeof(LoadThumbnailThreadArgs));
-                    if (thumbnailargs) {
-                        HTTP_Request http_req = {0};
-                        http_req.port = "443";
-                        http_req.host = media_type_to_host(search_result->media_type);
-                        strcpy(http_req.path, search_result->thumbnail_path);
-                        configure_get_header(sizeof(http_req.header), http_req.header, http_req.host, http_req.path);
-
-                        // configure the thread arguements to load thumbnail
-                        thumbnailargs->http_request = http_req;
-                        strcpy(thumbnailargs->search_result_id, search_result->id);
-                        thumbnailargs->thumbnail_queue = targs->thumbnail_queue;
-
-                        ThreadTask *async_thumbnail_load = malloc(sizeof(ThreadTask));
-                        (*async_thumbnail_load) = (ThreadTask) {
-                            .next = NULL,
-                            .args = thumbnailargs,
-                            .funct = load_thumbnail,
-                        };
-
-                        pthread_mutex_lock(&task_queue.mutex);
-                            enqueue_task(async_thumbnail_load, &task_queue);
-                            pthread_cond_signal(&task_queue.cond);
-                        pthread_mutex_unlock(&task_queue.mutex);
-                    }
-                }
-                else 
-                    free_search_result(search_result);
+            SearchResult *search_result = (SearchResult*) malloc(sizeof(SearchResult));
+            if (!search_result) {
+                printf("get_results_from_query: malloc returned NULL for search_result\n");
+                cJSON_Delete(sectionListRenderer);
+                free_buffer(&http);
+                free(targs);
+                search_finished = true;
+                return NULL;
             }
+
+            create_search_node_from_json(search_result, item, targs->allow_youtube_shorts);
+            if (search_result->media_type != UNDF) {
+                elements_added++;
+                add_search_result(targs->search_results, search_result);
+            }
+            else 
+                free_search_result(search_result);
         }
     }
 
@@ -1515,23 +1483,35 @@ void init_app()
     InitWindow(1000, 750, "metube");
 }
 
-Texture load_thumbnail_from_memory(const Buffer buffer, const float width, const float height)
+Texture2D load_thumbnail_from_memory(const Buffer buffer, const float width, const float height)
 {
-    if (buffer_ready(&buffer)) {
-        Image image = LoadImageFromMemory(".jpeg", (unsigned char*) buffer.data, buffer.size);
-        if (IsImageReady(image)) {
-            ImageResize(&image, width, height);
-            Texture2D ret = LoadTextureFromImage(image);
-            UnloadImage(image);
-            return ret;
-        }
-        else 
-            printf("load_thumbnail_from_memory: failed to load image data\n");
+    if (!buffer_ready(&buffer)) {
+        printf("load_thumbnail_from_mem: buffer obj passed is invalid\n");
+        return (Texture2D){0};
     }
-    else
-        printf("load_thumbnail_from_memory: buffer arg is invalid\n");
+
+    else if (width < 0 || height < 0) {
+        printf("load_thumbnail_from_mem: thumbnail dimensions are invalid\n");
+        return (Texture2D){0};
+    }
+
+    Image image = LoadImageFromMemory(".jpg", (unsigned char *)buffer.data, buffer.size);
+    if (!IsImageReady(image)) {
+        printf("load_thumbnail_from_mem: LoadImageFromMemory returned invalid image obj\n");
+        return (Texture2D){0};
+    }
+
+    ImageResize(&image, width, height);
     
-    return (Texture){0};
+    Texture2D ret = LoadTextureFromImage(image);
+    if (!IsTextureReady(ret)) {
+        printf("load_thumbnail_from_mem: LoadTextureFromImage returned invalid Texture obj\n");
+        return (Texture2D){0};
+    }
+
+    UnloadImage(image);
+
+    return ret;
 }
 
 typedef struct
@@ -1760,15 +1740,9 @@ void process_async_loaded_thumbnails(ThumbnailQueue *thumbnail_queue, Results *r
         // find matching search node and load texture
         for (SearchResult *search_node = results->head; search_node; search_node = search_node->next) {
             if (strcmp(thumbnail_data->search_result_id, search_node->id) == 0) {
-                // clear thumbnail
-                if (IsTextureReady(search_node->thumbnail))
-                    UnloadTexture(search_node->thumbnail);
-                
-                // add texture to cache
                 search_node->thumbnail = load_thumbnail_from_memory(thumbnail_data->image_data, 160, 80);
-                if (!IsTextureReady(search_node->thumbnail)) {
+                if (!IsTextureReady(search_node->thumbnail)) 
                     printf("%s failed to load texture\n", search_node->id);
-                }
                 break;
             }
         }
@@ -1779,14 +1753,11 @@ void process_async_loaded_thumbnails(ThumbnailQueue *thumbnail_queue, Results *r
     pthread_mutex_unlock(&thumbnail_queue->mutex);
 }
 
-
 int main()
 {
     Results results = init_results();
     ThumbnailQueue thumbnail_queue = init_thumbnail_queue();
-    
-    // TaskQueue task_queue = init_task_queue();
-    task_queue = init_task_queue();
+    TaskQueue task_queue = init_task_queue();
     pthread_t thread_pool[MAX_THREADS];
     init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
     
@@ -1842,6 +1813,9 @@ int main()
             else {
                 printf("query: \"%s\"\n", query.encoded_query);
                 SetWindowTitle(TextFormat("[%s(loading)] - metube", search_buffer));
+
+                free_thumbnail_queue(&thumbnail_queue);
+                thumbnail_queue = init_thumbnail_queue();
 
                 HTTP_Request http_request = {0};
                 http_request.host = "www.youtube.com";
@@ -1971,34 +1945,56 @@ int main()
                 .x = scroll_window_bounds.x,
                 .y = scroll_window_bounds.y,
                 .width = scroll_window_bounds.width,
-                .height = content_height * results.count,
+                .height = content_height * (results.count + .5),
             };
 
             const bool vertical_scrollbar_visible = (content_area.height > scroll_window_bounds.height);
             const int SCROLLBAR_WIDTH = vertical_scrollbar_visible ? 13 : 0;
 
-            bool scrollbar_out_of_bounds = GuiScrollPanel(scroll_window_bounds, NULL, content_area, &scroll, &scrollView);
-            if (scrollbar_out_of_bounds && query.encoded_query && query.encoded_query[0] != '\0' && next_page_token[0] != '\0') {
-                search_type = APPENDING;
-                search = search_finished && results.count < MAX_SEARCH_ITEMS;
-            }
+            GuiScrollPanel(scroll_window_bounds, NULL, content_area, &scroll, &scrollView);
 
             const Rectangle scissor_rect = padded_rectangle(1, scroll_window_bounds);
             
             BeginScissorMode(scissor_rect.x, scissor_rect.y, scissor_rect.width, scissor_rect.height);
-                // the y value of the ith rectangle to be drawn
-                float y_level = scissor_rect.y;
+                // area of the ith rectangle
+                Rectangle content_rect = { 
+                    .x = ui.padding, 
+                    .y = scissor_rect.y + scroll.y, // scroll is added so moving the scrollbar offsets all elements
+                    .width = scissor_rect.width - SCROLLBAR_WIDTH,
+                    .height = content_height 
+                };
                 
                 // for every search result, draw a container and display its data
                 int i = 0;
-                for (SearchResult *search_result = results.head; search_result; search_result = search_result->next, i++, y_level += content_height) {
-                    // area of the ith rectangle
-                    Rectangle content_rect = { 
-                        .x = ui.padding, 
-                        .y = y_level + scroll.y, // scroll is added so moving the scrollbar offsets all elements
-                        .width = scissor_rect.width - SCROLLBAR_WIDTH,
-                        .height = content_height 
-                    };
+                for (SearchResult *search_result = results.head; search_result; search_result = search_result->next, i++, content_rect.y += content_height) {
+                    if (search_result->thumbnail_loaded == false) {
+                        search_result->thumbnail_loaded = true;
+                        LoadThumbnailThreadArgs *thumbnailargs = malloc(sizeof(LoadThumbnailThreadArgs));
+                        if (thumbnailargs) {
+                            HTTP_Request http_req = {0};
+                            http_req.port = "443";
+                            http_req.host = media_type_to_host(search_result->media_type);
+                            strcpy(http_req.path, search_result->thumbnail_path);
+                            configure_get_header(sizeof(http_req.header), http_req.header, http_req.host, http_req.path);
+
+                            // configure the thread arguements to load thumbnail
+                            thumbnailargs->http_request = http_req;
+                            strcpy(thumbnailargs->search_result_id, search_result->id);
+                            thumbnailargs->thumbnail_queue = &thumbnail_queue;
+
+                            ThreadTask *async_thumbnail_load = malloc(sizeof(ThreadTask));
+                            (*async_thumbnail_load) = (ThreadTask) {
+                                .next = NULL,
+                                .args = thumbnailargs,
+                                .funct = load_thumbnail,
+                            };
+
+                            pthread_mutex_lock(&task_queue.mutex);
+                                enqueue_task(async_thumbnail_load, &task_queue);
+                                pthread_cond_signal(&task_queue.cond);
+                            pthread_mutex_unlock(&task_queue.mutex);
+                        }
+                    }
 
                     // only process items that are onscreen
                     if (CheckCollisionRecs(content_rect, scissor_rect)) {
@@ -2013,7 +2009,8 @@ int main()
                         };
                         
                         if (IsTextureReady(search_result->thumbnail)) 
-                            DrawTextureEx(search_result->thumbnail, (Vector2){ thumbnail_bounds.x, thumbnail_bounds.y }, 0.0f, 1.0f, RAYWHITE);
+                            DrawTexturePro(search_result->thumbnail, (Rectangle){0,0,160,80}, thumbnail_bounds, (Vector2){0,0}, 0, WHITE);
+
                         const Rectangle title_bounds = {
                             thumbnail_bounds.x + thumbnail_bounds.width,
                             content_rect.y,
@@ -2050,10 +2047,23 @@ int main()
                         }
                     }
                 }
+
+                // button to load more search results
+                if (results.count > 0 && (next_page_token[0] != '\0')) {
+                    content_rect.height /= 2;
+                    if (GuiButton(padded_rectangle(ui.padding, content_rect), "LOAD MORE")) {
+                        if (query.encoded_query && (query.encoded_query[0] != '\0') && search_finished) {
+                            search_type = APPENDING;
+                            search = true;
+                        }
+                    }
+                }
             EndScissorMode();
         //---------------------------------------------------------------displaying UI--------------------------------------------------------------------------//
         EndDrawing();
     }
+
+    system("rm *.jpg");
 
     // deinit app
     UnloadFont(ui.font);
@@ -2074,8 +2084,8 @@ int main()
     CloseWindow();
     return 0;
 }
-
-// fix worker thread, crashes on fast load and missing images
+// for worker thread structure
+    // fix missing images
 
 // searching feature
     // clean everything
