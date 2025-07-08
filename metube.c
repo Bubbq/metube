@@ -233,9 +233,7 @@ typedef struct SearchResult
     char date_published[32];    // 'X years/months/weeks/seconds ago'    
     char duration[16];          // HH:MM:SS formatted           
     char video_count[32];       // # of videos that a playlist contains        
-    bool thumbnail_loaded;
     char thumbnail_path[256];   // path to thumbnail link, relative to its host (see media type to host)    
-    Texture2D thumbnail;
 
     struct SearchResult* next; 
 } SearchResult;
@@ -243,14 +241,13 @@ typedef struct SearchResult
 void free_search_result(SearchResult *search_result)
 {
     if (!search_result) return;
-    if (IsTextureReady(search_result->thumbnail)) UnloadTexture(search_result->thumbnail);
     free(search_result);
 }
 
 void print_search_result(const SearchResult *search_result) 
 {
-    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %s thumbnail id) %d type) %d\n", 
-            search_result->id, search_result->title, search_result->author, search_result->subscriber_count, search_result->view_count, search_result->date_published, search_result->duration, search_result->video_count, search_result->thumbnail.id, search_result->media_type);
+    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %s type) %d\n", 
+            search_result->id, search_result->title, search_result->author, search_result->subscriber_count, search_result->view_count, search_result->date_published, search_result->duration, search_result->video_count, search_result->media_type);
 }
 
 // linked list of search results returned from a query
@@ -531,7 +528,7 @@ size_t ssl_read_line(SSL *ssl, char *buffer, const size_t n)
     return pos;
 }
 
-// read the header of a http response or n bytes into buffer (whichever comes first)
+// read the header from ssl stream
 size_t read_header(SSL *ssl, char *header, size_t n)
 {
     size_t total_len = 0;
@@ -572,19 +569,17 @@ void ssl_read_n(SSL *ssl, Buffer *buffer, const size_t n)
 
 typedef struct
 {
-    char *port;
-    char *host;
     char path[256];
     char body[1024];
     char header[1024];
-} HTTP_Request;
+} PreparedRequest;
 
 bool header_contains_tag(const char *header, const char *tag)
 {
     return strstr(header, tag);
 }
 
-size_t get_content_len (const char *header)
+size_t get_content_len_from_header(const char *header)
 {
     // find the content length parameter
     char *location = strstr(header, "Content-Length:");
@@ -610,112 +605,167 @@ size_t get_content_len (const char *header)
 }
 
 SSL_CTX *ctx = NULL;
-struct addrinfo *addrinfo = NULL;
 
-// returns the response body of a http request in a Buffer
-Buffer send_https_request(const HTTP_Request req)
+typedef struct {
+    SSL *ssl;
+    int sockfd;
+    char host[64];
+    char port[64];
+    bool connected;
+    pthread_mutex_t mutex;
+    struct addrinfo *address_information;
+} PersistentConnection;
+
+void init_persistent_connection(PersistentConnection *connection, const char *host, const char *port)
 {
-    if (ctx == NULL) {
-        ctx = SSL_CTX_new(TLS_client_method());
-        if (!ctx) {
-            printf("send_https_request: SSL_CTX_new failed\n");
+    memset(connection, 0, sizeof(PersistentConnection));
+    connection->sockfd = -1; 
+    connection->connected = false;
+    strncpy(connection->host, host, sizeof(connection->host) - 1);
+    strncpy(connection->port, port, sizeof(connection->port) - 1);
+    pthread_mutex_init(&connection->mutex, NULL);
+}
+
+bool file_descriptor_is_valid(const int fd)
+{
+    return fd >= 0;
+}
+
+void disconnect(PersistentConnection *connection)
+{
+    if (!connection) return;
+
+    if (connection->ssl) {
+        SSL_shutdown(connection->ssl);
+        SSL_free(connection->ssl);
+        connection->ssl = NULL;
+    }
+
+    if (file_descriptor_is_valid(connection->sockfd)) {
+        close(connection->sockfd);
+        connection->sockfd = -1;
+    }
+
+    if (connection->address_information) {
+        freeaddrinfo(connection->address_information);
+        connection->address_information = NULL;
+    }
+
+    connection->connected = false;
+}
+
+bool establish_connection(PersistentConnection *connection)
+{
+    if (!connection) {
+        printf("establish_connection: 'connection' argument is NULL\n");
+        return false;
+    }
+
+    else if (!connection->host[0]) {
+        printf("establish_connection: 'host' argument is empty\n");
+        return false;
+    }
+
+    else if (!connection->port[0]) {
+        printf("establish_connection: 'port' argument is empty\n");
+        return false;
+    }
+
+    disconnect(connection);
+
+    // DNS resolution
+    struct addrinfo desired_address_information = {0};
+    desired_address_information.ai_family = AF_UNSPEC;
+    desired_address_information.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(connection->host, connection->port, &desired_address_information, &connection->address_information) != 0) {
+        printf("establish_persistent_connection: getaddrinfo failed for %s%s\n", connection->host, connection->port);
+        disconnect(connection);
+        return false;
+    }
+
+    // socket init
+    connection->sockfd = socket(connection->address_information->ai_family, connection->address_information->ai_socktype, connection->address_information->ai_protocol);
+    if (connection->sockfd < 0) {
+        printf("establish_persistent_connection: socket creation failed\n");
+        disconnect(connection);
+        return false;
+    }
+
+    // host connection
+    if (connect(connection->sockfd, connection->address_information->ai_addr, connection->address_information->ai_addrlen) != 0) {
+        printf("establish_persistent_connection: connect failed for the host: \"%s\"\n", connection->host);
+        disconnect(connection);
+        return false;
+    }
+
+    // SSL init
+    connection->ssl = SSL_new(ctx);
+    if (!connection->ssl) {
+        printf("establish_persistent_connection: SSL_new failed\n");
+        disconnect(connection);
+        return false;
+    }
+
+    // set up ssl over the socket
+    SSL_set_fd(connection->ssl, connection->sockfd);
+    if (SSL_connect(connection->ssl) != 1) {
+        printf("establish_persistent_connection: SSL_connect failed for host %s\n", connection->host);
+        disconnect(connection);
+        return false;
+    }
+
+    return true;
+}
+
+void free_persistent_connection(PersistentConnection *connection)
+{
+    disconnect(connection);
+    pthread_mutex_destroy(&connection->mutex);
+}
+
+Buffer send_https_request(const PreparedRequest request, PersistentConnection *connection)
+{
+    pthread_mutex_lock(&connection->mutex);
+    if (connection->connected == false) {
+        printf("attempting to establish connection of %s:%s (host:port)\n", connection->host, connection->port);
+        connection->connected = establish_connection(connection);
+        if (connection->connected == false) {
+            printf("send_https_request: failed reconnection attempt\n");
             return (Buffer){0};
         }
     }
 
-    // DNS resolution, looking up the ip address for a website name 
-    // res is full of info needed to create a socket
-    if (addrinfo == NULL) {
-        struct addrinfo desired_addr_info = {0};
-        desired_addr_info.ai_family = AF_UNSPEC;
-        desired_addr_info.ai_socktype = SOCK_STREAM;
-        if (getaddrinfo(req.host, req.port, &desired_addr_info, &addrinfo) != 0) {
-            printf("send_https_request: getaddrinfo failed\n");
-            addrinfo = NULL;
-            return (Buffer){0};
-        }
-    }
-
-    // initializing socket
-    int sockfd = socket(addrinfo->ai_family, addrinfo->ai_socktype, addrinfo->ai_protocol);
-    if (sockfd < 0) {
-        printf("send_https_request: socket failed\n");
-        freeaddrinfo(addrinfo);
-        addrinfo = NULL;
-        return (Buffer){0};
-    }
-
-    // connection between socket and ip address
-    if (connect(sockfd, addrinfo->ai_addr, addrinfo->ai_addrlen) != 0) {
-        printf("send_https_request: connect failed\n");
-        freeaddrinfo(addrinfo);
-        addrinfo = NULL;
-        close(sockfd);
-        return (Buffer){0};
-    }
-
-    SSL *ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sockfd);
-    if (SSL_connect(ssl) != 1) {
-        freeaddrinfo(addrinfo);
-        addrinfo = NULL;
-        close(sockfd);
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        return (Buffer){0};
-    }
-
-    // sending header
-    int header_write_status;
-    if ((header_write_status = SSL_write(ssl, req.header, strlen(req.header))) <= 0) {
-        printf("send_https_request: SSL_write (header) failed\n");
-        freeaddrinfo(addrinfo);
-        addrinfo = NULL;
-        close(sockfd);
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
+    int header_write_status = SSL_write(connection->ssl, request.header, strlen(request.header));
+    if (header_write_status <= 0) {
+        printf("send_https_request: SSL_write (header) failed, returned %d\n", header_write_status);
+        connection->connected = false;
         return (Buffer){0};
     } 
 
-    // send body
-    if (req.body[0] != '\0') {
-        int body_write_status = SSL_write(ssl, req.body, strlen(req.body));
+    if (request.body[0] != '\0') {
+        int body_write_status = SSL_write(connection->ssl, request.body, strlen(request.body));
         if (body_write_status <= 0) {
-            printf("send_https_request: SSL_write (body) failed\n");
-            freeaddrinfo(addrinfo);
-            addrinfo = NULL;
-            close(sockfd);
-            SSL_shutdown(ssl);
-            SSL_free(ssl);
-            SSL_CTX_free(ctx);
+            printf("send_https_request: SSL_write (body) failed, returned %d\n", body_write_status);
+            connection->connected = false;
             return (Buffer){0};
         }
     }
 
-    // extract header from ssl stream
     char header[4096] = {0};
-    size_t header_len = read_header(ssl, header, sizeof(header));
+    size_t header_len = read_header(connection->ssl, header, sizeof(header));
     header[header_len] = '\0';
     if (header_len == 0) {
-        printf("send_https_request: read_header returned 0\n");
-        freeaddrinfo(addrinfo);
-        addrinfo = NULL;
-        close(sockfd);
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
+        printf("send_https_request: failed to read header from ssl stream\n");
+        connection->connected = false;
         return (Buffer){0};
     }
 
     Buffer response = init_buffer();
 
-    // read n bytes into buffer if content length tag is present
     if (header_contains_tag(header, "Content-Length:")) {
-        size_t content_length = get_content_len(header);
+        size_t content_length = get_content_len_from_header(header);
         if (content_length > 0) {
-            ssl_read_n(ssl, &response, content_length);
+            ssl_read_n(connection->ssl, &response, content_length);
         }
     }
 
@@ -723,34 +773,26 @@ Buffer send_https_request(const HTTP_Request req)
         const char *crlf = "\r\n";
         const size_t crlf_len = strlen(crlf);
         
-        int chunk_size = -1; 
+        size_t chunk_size = -1; 
         while (chunk_size != 0) {
-            // read chunk size line
             char hex[16] = {0};
-            int len = ssl_read_line(ssl, hex, sizeof(hex));
-            if (len <= 0) {
+            int len = ssl_read_line(connection->ssl, hex, sizeof(hex));
+            if (len <= crlf_len) {
                 printf("send_https_request: failed to read chunk size\n");
-                break;
+                connection->connected = false;
+                return (Buffer){0};
             }
 
-            // parse hex
-            if (len >= crlf_len) hex[len - crlf_len] = '\0';
+            hex[len - crlf_len] = '\0';
+
             chunk_size = strtol(hex, NULL, 16);
-            
-            if (chunk_size > 0) {
-                // read chunk_size bytes into response
-                ssl_read_n(ssl, &response, chunk_size);
-                    
-                // absorb trailing CRLF from ssl stream
-                char trailing_crlf[16];
-                ssl_read_line(ssl, trailing_crlf, sizeof(trailing_crlf));
-            }
+            ssl_read_n(connection->ssl, &response, chunk_size);
+
+            char trailing_crlf[16];
+            ssl_read_line(connection->ssl, trailing_crlf, sizeof(trailing_crlf));
         }
     }
-
-    close(sockfd);
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
+    pthread_mutex_unlock(&connection->mutex);
 
     return response;
 }
@@ -792,13 +834,13 @@ char* url_encode_string(const char *str)
     return encoded_str;
 }
 
-int configure_get_header(const size_t n, char request[n], const char *host, const char *path)
+int configure_get_header(const size_t n, char get_header[n], const char *host, const char *path)
 {
-    int chars_written = snprintf(request, n,
+    int chars_written = snprintf(get_header, n,
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-        "Connection: close\r\n"
+        "Connection: keep-alive\r\n"
         "\r\n",
         path, host);
 
@@ -808,6 +850,19 @@ int configure_get_header(const size_t n, char request[n], const char *host, cons
     }
 
     else return chars_written;
+}
+
+int configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_len)
+{
+    return snprintf(post_header, n,
+            "POST %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: keep-alive\r\n"
+            "\r\n",
+            path, host, post_len);
 }
 
 int configure_post_body(const size_t n, char post_body[n], const char *continuation_token)
@@ -829,19 +884,6 @@ int configure_post_body(const size_t n, char post_body[n], const char *continuat
     }
 
     else return chars_written;
-}
-
-int configure_post_header(const size_t n, char request[n], const char *host, const char *path, const size_t post_len)
-{
-    return snprintf(request, n,
-            "POST %s HTTP/1.1\r\n"
-            "Host: %s\r\n"
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-            "Content-Type: application/json\r\n"
-            "Content-Length: %zu\r\n"
-            "Connection: close\r\n"
-            "\r\n",
-            path, host, post_len);
 }
 
 int bound_index_to_array (const int pos, const int array_size)
@@ -967,8 +1009,6 @@ void format_view_count(char* view_count)
 void create_search_node_from_json(SearchResult *search_result, cJSON *item, const bool allow_shorts)
 {
     search_result->media_type = UNDF;
-    search_result->thumbnail = (Texture2D){0};
-    search_result->thumbnail_loaded = false;
     memset(search_result->id, 0, sizeof(search_result->id));
     memset(search_result->title, 0, sizeof(search_result->title));
     memset(search_result->author, 0, sizeof(search_result->author));
@@ -1167,45 +1207,14 @@ void create_search_node_from_json(SearchResult *search_result, cJSON *item, cons
     }
 }
 
-#define MAX_THREADS 2
+#define MAX_THREADS 4
 
 typedef struct 
 {
     char search_result_id[64];
-    HTTP_Request http_request;
+    PreparedRequest request;
     ThumbnailQueue *thumbnail_queue;
 } LoadThumbnailThreadArgs;
-
-void* load_thumbnail(void *args)
-{
-    LoadThumbnailThreadArgs *targs = (LoadThumbnailThreadArgs*) args;
-    
-    Buffer thumbnail_buffer = send_https_request(targs->http_request);
-    if (!buffer_ready(&thumbnail_buffer)) {
-        printf("load_thumbnail: send_http_request returned invalid buffer\n");
-        free(targs);
-        return NULL;
-    }
-
-    // create thumbnail data node
-    ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
-    if (!thumbnail_data) {
-        printf("load_thumbnail: malloc returned NULL for thumbnail_data\n");
-        free(targs);
-        return NULL;
-    }
-
-    thumbnail_data->image_data = thumbnail_buffer;
-    strcpy(thumbnail_data->search_result_id, targs->search_result_id);
-
-    // add node to queue
-    pthread_mutex_lock(&targs->thumbnail_queue->mutex);
-    enqueue_thumbnail(targs->thumbnail_queue, thumbnail_data);
-    pthread_mutex_unlock(&targs->thumbnail_queue->mutex);
-
-    free(targs);
-    return NULL;
-}
 
 static char next_page_token[1024] = {0};
 void extract_continuation_token(const cJSON *continuationItemRenderer)
@@ -1345,9 +1354,10 @@ typedef struct
 {
     bool allow_youtube_shorts;
     SearchType search_type;
-    HTTP_Request http_request;
+    PreparedRequest request;
     Results *search_results;
     ThumbnailQueue *thumbnail_queue;
+    PersistentConnection *connection;
 } SearchThreadArgs;
 
 static int elements_added = 0; 
@@ -1360,7 +1370,7 @@ void* get_results_from_query(void* args)
     clock_t start_time = clock(); 
 
     // get the information of the http request
-    Buffer http = send_https_request(targs->http_request);
+    Buffer http = send_https_request(targs->request, targs->connection);
     bool application_is_offline = (buffer_ready(&http) == false);
     if (application_is_offline) {
         printf("get_results_from_query: send_https_request returned invalid buffer\n");
@@ -1370,6 +1380,8 @@ void* get_results_from_query(void* args)
         return NULL;
     }
     
+    create_file_from_memory("response.json", http);
+
     // only keep data that is found in the json object 'sectionListRenderer'
     if (targs->search_type == NEW) {
         if (parse_json_object(&http, "sectionListRenderer", '{', '}') < 0) {
@@ -1680,6 +1692,7 @@ void draw_thumbnail_subtext(const Rectangle container, Ui ui, const Color text_c
     DrawRectangleRec(length_area, Fade(BLACK, 0.7));
     DrawTextBoxed(text, padded_rectangle(ui.padding, length_area), ui, font_size, text_color);
 }
+
 bool draw_filter_toggle(const Rectangle container, const Rectangle button_bounds, const char *label_text, const char *value_text, const char *button_text, const Font font, const int padding)
 {
     DrawTextEx(font, label_text, (Vector2){container.x + padding, button_bounds.y + padding}, 11, 2, BLACK);
@@ -1731,28 +1744,6 @@ void draw_filter_window(Query *query, const Rectangle container, const Font font
     }
 }
 
-void process_async_loaded_thumbnails(ThumbnailQueue *thumbnail_queue, Results *results)
-{
-    pthread_mutex_lock(&thumbnail_queue->mutex);
-    while (thumbnail_queue->head) {
-        ThumbnailData *thumbnail_data = dequeue_thumbnail(thumbnail_queue);
-        
-        // find matching search node and load texture
-        for (SearchResult *search_node = results->head; search_node; search_node = search_node->next) {
-            if (strcmp(thumbnail_data->search_result_id, search_node->id) == 0) {
-                search_node->thumbnail = load_thumbnail_from_memory(thumbnail_data->image_data, 160, 80);
-                if (!IsTextureReady(search_node->thumbnail)) 
-                    printf("%s failed to load texture\n", search_node->id);
-                break;
-            }
-        }
-
-        // remove processed thumbnail data
-        free_thumbnail_data(thumbnail_data);
-    }
-    pthread_mutex_unlock(&thumbnail_queue->mutex);
-}
-
 int main()
 {
     Results results = init_results();
@@ -1761,6 +1752,20 @@ int main()
     pthread_t thread_pool[MAX_THREADS];
     init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
     
+    ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) {
+        printf("error initalizing SSL_CTX object\n");
+        return 1;
+    } 
+
+    PersistentConnection youtube_connection = {0};
+    init_persistent_connection(&youtube_connection, "www.youtube.com", "443");
+    youtube_connection.connected = establish_connection(&youtube_connection);
+    if (youtube_connection.connected == false) {
+        printf("init connection (%s:%s) failed\n", youtube_connection.host, youtube_connection.port);
+        SetWindowTitle("[offline] - metube");
+    }
+
     // when true, the application starts the search process
     bool search = false;
     char search_buffer[256] = {0};
@@ -1790,8 +1795,6 @@ int main()
 
     while (!WindowShouldClose())
     {
-        process_async_loaded_thumbnails(&thumbnail_queue, &results);
-
         if (delete_old_nodes) {
             scroll.y = 0;
             delete_old_nodes = false;
@@ -1817,26 +1820,23 @@ int main()
                 free_thumbnail_queue(&thumbnail_queue);
                 thumbnail_queue = init_thumbnail_queue();
 
-                HTTP_Request http_request = {0};
-                http_request.host = "www.youtube.com";
-                http_request.port = "443";
-
-                if (search_type == NEW) {
-                    configure_youtube_search_query_path(sizeof(http_request.path), http_request.path, query);
-                    configure_get_header(sizeof(http_request.header), http_request.header, http_request.host, http_request.path);
-                }
-
-                else if (search_type == APPENDING) {
-                    strcpy(http_request.path, "/youtubei/v1/search");
-                    configure_post_body(sizeof(http_request.body), http_request.body, next_page_token);
-                    configure_post_header(sizeof(http_request.header), http_request.header, http_request.host, http_request.path, strlen(http_request.body));
-                }
-
                 targs->search_type = search_type;
                 targs->allow_youtube_shorts = query.allow_youtube_shorts;
                 targs->search_results = &results;
                 targs->thumbnail_queue = &thumbnail_queue;
-                targs->http_request = http_request;
+                targs->connection = &youtube_connection;
+                
+                if (targs->search_type == NEW) {
+                    configure_youtube_search_query_path(sizeof(targs->request.path), targs->request.path, query);
+                    configure_get_header(sizeof(targs->request.header), targs->request.header, targs->connection->host, targs->request.path);
+                    targs->request.body[0] = '\0';
+                }
+
+                else if (targs->search_type == APPENDING) {
+                    strcpy(targs->request.path, "/youtubei/v1/search");
+                    configure_post_body(sizeof(targs->request.body), targs->request.body, next_page_token);
+                    configure_post_header(sizeof(targs->request.header), targs->request.header, targs->connection->host, targs->request.path, strlen(targs->request.body));
+                }
                 
                 // awaken a worker thread to handle 'get_results_from_query' function
                 ThreadTask *search_task = malloc(sizeof(ThreadTask));
@@ -1949,7 +1949,7 @@ int main()
             };
 
             const bool vertical_scrollbar_visible = (content_area.height > scroll_window_bounds.height);
-            const int SCROLLBAR_WIDTH = vertical_scrollbar_visible ? 13 : 0;
+            const int SCROLLBAR_WIDTH = vertical_scrollbar_visible ? 12 : 0;
 
             GuiScrollPanel(scroll_window_bounds, NULL, content_area, &scroll, &scrollView);
 
@@ -1967,91 +1967,62 @@ int main()
                 // for every search result, draw a container and display its data
                 int i = 0;
                 for (SearchResult *search_result = results.head; search_result; search_result = search_result->next, i++, content_rect.y += content_height) {
-                    if (search_result->thumbnail_loaded == false) {
-                        search_result->thumbnail_loaded = true;
-                        LoadThumbnailThreadArgs *thumbnailargs = malloc(sizeof(LoadThumbnailThreadArgs));
-                        if (thumbnailargs) {
-                            HTTP_Request http_req = {0};
-                            http_req.port = "443";
-                            http_req.host = media_type_to_host(search_result->media_type);
-                            strcpy(http_req.path, search_result->thumbnail_path);
-                            configure_get_header(sizeof(http_req.header), http_req.header, http_req.host, http_req.path);
-
-                            // configure the thread arguements to load thumbnail
-                            thumbnailargs->http_request = http_req;
-                            strcpy(thumbnailargs->search_result_id, search_result->id);
-                            thumbnailargs->thumbnail_queue = &thumbnail_queue;
-
-                            ThreadTask *async_thumbnail_load = malloc(sizeof(ThreadTask));
-                            (*async_thumbnail_load) = (ThreadTask) {
-                                .next = NULL,
-                                .args = thumbnailargs,
-                                .funct = load_thumbnail,
-                            };
-
-                            pthread_mutex_lock(&task_queue.mutex);
-                                enqueue_task(async_thumbnail_load, &task_queue);
-                                pthread_cond_signal(&task_queue.cond);
-                            pthread_mutex_unlock(&task_queue.mutex);
-                        }
+                    if (CheckCollisionRecs(content_rect, scissor_rect) == false) {
+                        continue;;
                     }
 
-                    // only process items that are onscreen
-                    if (CheckCollisionRecs(content_rect, scissor_rect)) {
-                        const Color background_color = (i % 2) ? WHITE : RAYWHITE;
-                        DrawRectangleRec(content_rect, background_color);
-                        
-                        const Rectangle thumbnail_bounds = { 
-                            .x = content_rect.x, 
-                            .y = content_rect.y, 
-                            .width = content_rect.width * 0.45f, 
-                            .height = content_rect.height 
-                        };
-                        
-                        if (IsTextureReady(search_result->thumbnail)) 
-                            DrawTexturePro(search_result->thumbnail, (Rectangle){0,0,160,80}, thumbnail_bounds, (Vector2){0,0}, 0, WHITE);
+                    const Color background_color = (i % 2) ? WHITE : RAYWHITE;
+                    DrawRectangleRec(content_rect, background_color);
+                    
+                    const Rectangle thumbnail_bounds = { 
+                        .x = content_rect.x, 
+                        .y = content_rect.y, 
+                        .width = content_rect.width * 0.45f, 
+                        .height = content_rect.height 
+                    };
+                    
+                    const Rectangle title_bounds = {
+                        thumbnail_bounds.x + thumbnail_bounds.width,
+                        content_rect.y,
+                        content_rect.width - thumbnail_bounds.width,
+                        content_rect.height * 0.70f
+                    };
 
-                        const Rectangle title_bounds = {
-                            thumbnail_bounds.x + thumbnail_bounds.width,
-                            content_rect.y,
-                            content_rect.width - thumbnail_bounds.width,
-                            content_rect.height * 0.70f
-                        };
-
+                    if (search_result->title[0] != '\0') {
                         DrawTextBoxed(search_result->title, padded_rectangle(ui.padding, title_bounds), ui, 12, BLACK);                            
+                    }
 
-                        const Rectangle subtext_bounds = {
-                            .x = thumbnail_bounds.x + thumbnail_bounds.width,
-                            .y = title_bounds.y + title_bounds.height,
-                            .width = title_bounds.width,
-                            .height = content_rect.height - title_bounds.height,
-                        };
+                    const Rectangle subtext_bounds = {
+                        .x = thumbnail_bounds.x + thumbnail_bounds.width,
+                        .y = title_bounds.y + title_bounds.height,
+                        .width = title_bounds.width,
+                        .height = content_rect.height - title_bounds.height,
+                    };
 
-                        switch (search_result->media_type) {
-                            case VIDEO:
-                                DrawTextBoxed(TextFormat("%s - %s views", search_result->date_published, search_result->view_count), padded_rectangle(ui.padding, subtext_bounds), ui, 11.5, BLACK);
-                                draw_thumbnail_subtext(thumbnail_bounds, ui, RAYWHITE, 11, search_result->duration);
-                                break;
-                            case LIVE:
-                                DrawTextBoxed(TextFormat("%s watching", search_result->view_count), padded_rectangle(ui.padding, subtext_bounds), ui, 11.5, BLACK);
-                                draw_thumbnail_subtext(thumbnail_bounds, ui, RAYWHITE, 11, "LIVE");
-                                break;
-                            case CHANNEL:
-                                DrawTextBoxed(search_result->subscriber_count, padded_rectangle(ui.padding, subtext_bounds), ui, 11.5, BLACK);
-                                break;
-                            case PLAYLIST:
-                                draw_thumbnail_subtext(thumbnail_bounds, ui, RAYWHITE, 11, search_result->video_count);
-                                break;
-                            default:    
-                                break;
-                        }
+                    switch (search_result->media_type) {
+                        case VIDEO:
+                            DrawTextBoxed(TextFormat("%s - %s views", search_result->date_published, search_result->view_count), padded_rectangle(ui.padding, subtext_bounds), ui, 11.5, BLACK);
+                            draw_thumbnail_subtext(thumbnail_bounds, ui, RAYWHITE, 11, search_result->duration);
+                            break;
+                        case LIVE:
+                            DrawTextBoxed(TextFormat("%s watching", search_result->view_count), padded_rectangle(ui.padding, subtext_bounds), ui, 11.5, BLACK);
+                            draw_thumbnail_subtext(thumbnail_bounds, ui, RAYWHITE, 11, "LIVE");
+                            break;
+                        case CHANNEL:
+                            DrawTextBoxed(search_result->subscriber_count, padded_rectangle(ui.padding, subtext_bounds), ui, 11.5, BLACK);
+                            break;
+                        case PLAYLIST:
+                            draw_thumbnail_subtext(thumbnail_bounds, ui, RAYWHITE, 11, search_result->video_count);
+                            break;
+                        default:    
+                            break;
                     }
                 }
 
                 // button to load more search results
                 if (results.count > 0 && (next_page_token[0] != '\0')) {
                     content_rect.height /= 2;
-                    if (GuiButton(padded_rectangle(ui.padding, content_rect), "LOAD MORE")) {
+                    if (GuiButton(content_rect, "LOAD MORE")) {
                         if (query.encoded_query && (query.encoded_query[0] != '\0') && search_finished) {
                             search_type = APPENDING;
                             search = true;
@@ -2063,8 +2034,6 @@ int main()
         EndDrawing();
     }
 
-    system("rm *.jpg");
-
     // deinit app
     UnloadFont(ui.font);
     free_results(&results);
@@ -2073,7 +2042,7 @@ int main()
     
     // ssl stuff
     if (ctx) SSL_CTX_free(ctx);
-    if (addrinfo) freeaddrinfo(addrinfo);
+    free_persistent_connection(&youtube_connection);
     
     // free worker thread stuff
     application_running = false;
