@@ -75,6 +75,8 @@ void write_data_to_buffer(Buffer *buffer, const char* data, const size_t n)
     buffer->data = new_data;
     memcpy(&buffer->data[buffer->size], data, n);
     buffer->size += n;
+    
+    buffer->data[buffer->size] = '\0';
 }
 
 bool buffer_ready(const Buffer *buffer)
@@ -264,6 +266,7 @@ typedef struct
     size_t count;           
     SearchResult* head;    
     SearchResult* tail;     
+    char continuation_token[1024];
 } Results;
 
 Results init_results() 
@@ -271,6 +274,7 @@ Results init_results()
     Results search_results;
     search_results.head = search_results.tail = NULL;
     search_results.count = 0;
+    memset(search_results.continuation_token, 0, sizeof(search_results.continuation_token));
     return search_results;
 }
 
@@ -479,7 +483,7 @@ void ssl_read_n(SSL *ssl, Buffer *buffer, const size_t n)
     char data[4096] = {0};
     size_t bytes_remaining = n;
     while (bytes_remaining > 0) {
-        size_t to_read = bytes_remaining < sizeof(data) ? bytes_remaining : sizeof(data);
+        size_t to_read = bytes_remaining < sizeof(data) - 1 ? bytes_remaining : sizeof(data) - 1;
         
         int read = SSL_read(ssl, data, to_read);
         if (read <= 0) {
@@ -918,8 +922,6 @@ void remove_trailing_whitespace(char *string)
     *(last_char + 1) = '\0';
 }
 
-
-
 void format_view_count(char* view_count)
 {
     if (!view_count) {
@@ -1137,12 +1139,11 @@ typedef struct
     PersistentConnection *youtube_connection;
 } SearchThreadArgs;
 
-static char continuation_token[1024] = {0};
-void get_continuation_token(cJSON *cjson, const SearchType search_type)
+void get_continuation_token(cJSON *cjson, const SearchType search_typ, const size_t n, char continuation_token[n])
 {
     if (cjson == NULL) {
         printf("get_continuation_token: CJSON* arg is NULL\n");
-        memset(continuation_token, 0, sizeof(continuation_token));
+        memset(continuation_token, 0, n);
     }
 
     cJSON *continuationItemRenderer = cjson ? cJSON_GetArrayItem(cjson, 1)->child : NULL;
@@ -1150,13 +1151,12 @@ void get_continuation_token(cJSON *cjson, const SearchType search_type)
     cJSON *continuationCommand = continuationEndpoint ? cJSON_GetObjectItem(continuationEndpoint, "continuationCommand") : NULL;
     cJSON *token = continuationCommand ? cJSON_GetObjectItem(continuationCommand, "token") : NULL;
     if (token && token->valuestring && token->valuestring[0] != '\0') {
-        strncpy(continuation_token, token->valuestring, sizeof(continuation_token) - 1);
-        printf("%s\n", continuation_token);
+        strncpy(continuation_token, token->valuestring, n - 1);
     }
 
     else {
         printf("get_continuation_token: token not found\n");
-        memset(continuation_token, 0, sizeof(continuation_token));
+        memset(continuation_token, 0, n);
     }
 }
 
@@ -1572,7 +1572,7 @@ void* get_results_from_query(void* args)
 
     cJSON *search_result_json = get_search_result_json(cjson, targs->search_type);
 
-    get_continuation_token(search_result_json, targs->search_type);
+    get_continuation_token(search_result_json, targs->search_type, sizeof(targs->search_results->continuation_token), targs->search_results->continuation_token);
 
     int old_size = targs->search_results->count;
 
@@ -2024,6 +2024,9 @@ int main()
                 if (strcmp(thumbnail_data->search_result_id, search_node->id) == 0) {
                     if (IsTextureReady(search_node->thumbnail)) UnloadTexture(search_node->thumbnail);
                     search_node->thumbnail = load_thumbnail_from_memory(thumbnail_data->image_data, 150, 80);
+                    if (IsTextureReady(search_node->thumbnail) == false) {
+                        printf("FAILED TO LOAD TEXURE\n");
+                    }
                     break;
                 }
             }
@@ -2106,7 +2109,7 @@ int main()
                 strcpy(last_search, query.string);
 
                 const char *params = TextFormat("%s%s", sort_type_to_url(query.sort), media_type_to_url(query.media));
-                const char *continuation = search_type == APPENDING ? continuation_token : NULL;
+                const char *continuation = search_type == APPENDING ? results.continuation_token : NULL;
                 configure_post_body(targs->request.body, sizeof(targs->request.body), query.string, params, continuation);
 
                 const char *search_path = TextFormat("/youtubei/v1/search?key=%s", internal_api_key);
@@ -2191,12 +2194,16 @@ int main()
                 .width = search_bar_bounds.width,
             };
 
-            if (results.count > 0 && continuation_token[0] != '\0') {
-                if (GuiButton(load_more_button_bounds, "LOAD MORE") && query.string[0] != '\0') {
-                    search_type = APPENDING;
-                    search = search_finished;
-                }
+            if (results.count == 0 || results.continuation_token[0] == '\0') {
+                GuiSetState(STATE_DISABLED);
             }
+
+            if (GuiButton(load_more_button_bounds, "LOAD MORE") && query.string[0] != '\0') {
+                search_type = APPENDING;
+                search = search_finished;
+            }
+
+            GuiSetState(STATE_NORMAL);
             
             const Rectangle scroll_window_bounds = { 
                 .x = search_bar_bounds.x, 
@@ -2240,7 +2247,7 @@ int main()
                 }
 
                 const Color container_color = (i % 2) ? WHITE : RAYWHITE;
-                
+
                 draw_search_result(search_result, container, container_color, ui);
             }
                 
@@ -2271,7 +2278,6 @@ int main()
 }
 
 // searching feature
-    // make search results one function rather than two 
     // handle different wifi connections/offline upon bootup
     // handle missing images
     // clean everything
