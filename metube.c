@@ -75,7 +75,6 @@ void write_data_to_buffer(Buffer *buffer, const char* data, const size_t n)
     buffer->data = new_data;
     memcpy(&buffer->data[buffer->size], data, n);
     buffer->size += n;
-    
     buffer->data[buffer->size] = '\0';
 }
 
@@ -1146,11 +1145,12 @@ void get_continuation_token(cJSON *cjson, const SearchType search_typ, const siz
         memset(continuation_token, 0, n);
     }
 
-    cJSON *continuationItemRenderer = cjson ? cJSON_GetArrayItem(cjson, 1)->child : NULL;
+    cJSON *arrayItem = cJSON_IsArray(cjson) ? cJSON_GetArrayItem(cjson, 1) : NULL;
+    cJSON *continuationItemRenderer = arrayItem ? cJSON_GetObjectItem(arrayItem, "continuationItemRenderer") : NULL;
     cJSON *continuationEndpoint = continuationItemRenderer ? cJSON_GetObjectItem(continuationItemRenderer, "continuationEndpoint") : NULL;
     cJSON *continuationCommand = continuationEndpoint ? cJSON_GetObjectItem(continuationEndpoint, "continuationCommand") : NULL;
     cJSON *token = continuationCommand ? cJSON_GetObjectItem(continuationCommand, "token") : NULL;
-    if (token && token->valuestring && token->valuestring[0] != '\0') {
+    if (token && cJSON_IsString(token)) {
         strncpy(continuation_token, token->valuestring, n - 1);
     }
 
@@ -1208,7 +1208,8 @@ bool video_is_youtube_short(const cJSON *videoRenderer)
 bool video_is_live(const cJSON* videoRenderer)
 {
     cJSON *badges = videoRenderer ? cJSON_GetObjectItem(videoRenderer, "badges") : NULL;
-    cJSON *metadataBadgeRenderer = badges && cJSON_IsArray(badges) ? cJSON_GetArrayItem(badges, 0)->child : NULL;
+    cJSON *arrayItem = (badges && cJSON_IsArray(badges)) ? cJSON_GetArrayItem(badges, 0) : NULL;
+    cJSON *metadataBadgeRenderer = arrayItem ? cJSON_GetObjectItem(arrayItem, "metadataBadgeRenderer") : NULL;
     cJSON *label = metadataBadgeRenderer ? cJSON_GetObjectItem(metadataBadgeRenderer, "label") : NULL;
     if (label && cJSON_IsString(label)) {
         return strcmp("LIVE", label->valuestring) == 0;
@@ -1252,7 +1253,8 @@ void parse_video_from_json(const cJSON* videoRenderer, const bool allow_youtube_
     // TITLE
     cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
     cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
-    cJSON *text = runs && cJSON_IsArray(runs) ? cJSON_GetArrayItem(runs, 0)->child : NULL;
+    cJSON *arrayItem = (runs && cJSON_IsArray(runs)) ? cJSON_GetArrayItem(runs, 0) : NULL;
+    cJSON *text = arrayItem ? cJSON_GetObjectItem(arrayItem, "text") : NULL;
     if (text && cJSON_IsString(text)) {
         strncpy(video->title, text->valuestring, sizeof(video->title) - 1);
     }
@@ -1268,7 +1270,8 @@ void parse_video_from_json(const cJSON* videoRenderer, const bool allow_youtube_
     // AUTHOR
     cJSON *ownerText = cJSON_GetObjectItem(videoRenderer, "ownerText");
     runs = ownerText ? cJSON_GetObjectItem(ownerText, "runs") : NULL;
-    text = runs && cJSON_IsArray(runs) ? cJSON_GetArrayItem(runs, 0)->child : NULL;
+    arrayItem = (runs && cJSON_IsArray(runs)) ? cJSON_GetArrayItem(runs, 0) : NULL;
+    text = arrayItem ? cJSON_GetObjectItem(arrayItem, "text") : NULL;
     if (text && cJSON_IsString(text)) {
         strncpy(video->author, text->valuestring, sizeof(video->author) - 1);
     }
@@ -1283,7 +1286,8 @@ void parse_video_from_json(const cJSON* videoRenderer, const bool allow_youtube_
     if (video_is_live(videoRenderer)) {
         video->media_type = LIVE;
         cJSON *runs = viewCountText ? cJSON_GetObjectItem(viewCountText, "runs") : NULL;
-        cJSON *text = (runs && cJSON_IsArray(runs)) ? cJSON_GetArrayItem(runs, 0)->child : NULL;
+        cJSON *arrayItem = (runs && cJSON_IsArray(runs)) ? cJSON_GetArrayItem(runs, 0) : NULL;
+        cJSON *text = arrayItem ? cJSON_GetObjectItem(arrayItem, "text") : NULL;
         if (text && cJSON_IsString(text)) {
             strncpy(video->view_count, text->valuestring, sizeof(video->view_count) - 1);
             format_view_count(video->view_count);
@@ -1464,14 +1468,16 @@ void parse_playlist_from_json(const cJSON *lockupViewModel, SearchResult *playli
     cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
 
     // THUMBNAIL PATH
-    cJSON *image = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "image") : NULL;
-    cJSON *sources = image ? cJSON_GetObjectItem(image, "sources") : NULL;
-    cJSON *url = sources && cJSON_IsArray(sources) ? cJSON_GetObjectItem(cJSON_GetArrayItem(sources, 0), "url") : NULL;
-    const char *thumbnail_path = (url && cJSON_IsString(url)) ? strstr(url->valuestring, "/vi") : NULL;
-    if (thumbnail_path) {
-        strncpy(playlist->thumbnail_path, thumbnail_path ? thumbnail_path : default_value, sizeof(playlist->thumbnail_path) - 1); 
+    cJSON *rendererContext = cJSON_GetObjectItem(lockupViewModel, "rendererContext");
+    cJSON *commandContext = rendererContext ? cJSON_GetObjectItem(rendererContext, "commandContext") : NULL;
+    cJSON *onTap = commandContext ? cJSON_GetObjectItem(commandContext, "onTap") : NULL;
+    cJSON *innertubeCommand = onTap ? cJSON_GetObjectItem(onTap, "innertubeCommand") : NULL;
+    cJSON *watchEndpoint = innertubeCommand ? cJSON_GetObjectItem(innertubeCommand, "watchEndpoint") : NULL;
+    cJSON *videoId = watchEndpoint ? cJSON_GetObjectItem(watchEndpoint, "videoId") : NULL;
+    if (videoId && cJSON_IsString(videoId)) {
+        snprintf(playlist->thumbnail_path, sizeof(playlist->thumbnail_path), "/vi/%s/mqdefault.jpg", videoId->valuestring);
     }
-    
+
     else {
         printf("parse_playlist_from_json: failed to parse thumbnail path \n");
         playlist->thumbnail_path[0] = '\0';
@@ -1501,7 +1507,8 @@ void create_results_from_json(cJSON* cjson, Results *results, const bool allow_y
         return;
     }
 
-    cJSON *itemSectionRenderer = cjson && cJSON_IsArray(cjson) ? cJSON_GetArrayItem(cjson, 0)->child : NULL;
+    cJSON *arrayItem = (cjson && cJSON_IsArray(cjson)) ? cJSON_GetArrayItem(cjson, 0) : NULL;
+    cJSON *itemSectionRenderer = arrayItem ? cJSON_GetObjectItem(arrayItem, "itemSectionRenderer") : NULL;
     cJSON *contents = itemSectionRenderer ? cJSON_GetObjectItem(itemSectionRenderer, "contents") : NULL;
     if ((contents == NULL) || (cJSON_IsArray(contents) == false)) {
         printf("create_results_from_json: 'contents' is an invalid cjson object\n");
@@ -2278,9 +2285,13 @@ int main()
 }
 
 // searching feature
+    // handle missing images    
+        // create list of thumbnails
+        // each search node will have to store the thumbnail index link
     // handle different wifi connections/offline upon bootup
-    // handle missing images
     // clean everything
+    // possible continuation token issue
+    // handle crash when searching for gibberish
 
 // video playing function
     // show video information when double clicking video
