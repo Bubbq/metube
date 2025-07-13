@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <cjson/cJSON.h>
 #include <openssl/ssl.h>
+#include "uthash.h"
 
 #include "raylib.h"
 #include "raylib/src/raylib.h"
@@ -219,7 +220,7 @@ typedef struct SearchResult
     char video_count[32];       // # of videos that a playlist contains        
     char thumbnail_path[256];   // path to thumbnail link, relative to its host (see media type to host)    
     bool thumbnail_loaded;
-    Texture2D thumbnail;
+
     struct SearchResult* next; 
 } SearchResult;
 
@@ -233,7 +234,6 @@ SearchResult* init_search_result()
 
     search_result->media_type = UNDF;
     search_result->thumbnail_loaded = false;
-    search_result->thumbnail = (Texture2D){0};
     memset(search_result->id, 0, sizeof(search_result->id));
     memset(search_result->title, 0, sizeof(search_result->title));
     memset(search_result->author, 0, sizeof(search_result->author));
@@ -334,18 +334,18 @@ typedef struct
 
 // holds raw thumbnail image data fetched from an HTTP request
 // intended for later conversion to a Texture (see LoadTextureFromMemory in raylib)
-typedef struct ThumbnailData
+typedef struct RawThumbnail
 {
-    Buffer image_data;              
+    Buffer data;              
     char search_result_id[256];     
-    struct ThumbnailData *next;
-} ThumbnailData;
+    struct RawThumbnail *next;
+} RawThumbnail;
 
-void free_thumbnail_data(ThumbnailData *thumbnail_data)
+void free_raw_thumbnail(RawThumbnail *raw_thumbnail)
 {
-    if (!thumbnail_data) return;
-    if (buffer_ready(&thumbnail_data->image_data)) free_buffer(&thumbnail_data->image_data);
-    free(thumbnail_data);
+    if (!raw_thumbnail) return;
+    if (buffer_ready(&raw_thumbnail->data)) free_buffer(&raw_thumbnail->data);
+    free(raw_thumbnail);
 }
 
 // thread-safe queue for storing in-memory thumbnail data. 
@@ -353,21 +353,21 @@ void free_thumbnail_data(ThumbnailData *thumbnail_data)
 typedef struct 
 {
     size_t count;
-    ThumbnailData *head;
-    ThumbnailData *tail;  
+    RawThumbnail *head;
+    RawThumbnail *tail;  
     pthread_mutex_t mutex;
-} ThumbnailQueue;
+} RawThumbnailQueue;
 
-ThumbnailQueue init_thumbnail_queue()
+RawThumbnailQueue init_thumbnail_queue()
 {
-    ThumbnailQueue thumbnail_queue;
+    RawThumbnailQueue thumbnail_queue;
     thumbnail_queue.count = 0;
     thumbnail_queue.head = thumbnail_queue.tail = NULL;
     pthread_mutex_init(&thumbnail_queue.mutex, NULL);
     return thumbnail_queue;
 }
 
-void enqueue_thumbnail(ThumbnailQueue *thumbnail_queue, ThumbnailData *thumbnail_data) 
+void enqueue_thumbnail(RawThumbnailQueue *thumbnail_queue, RawThumbnail *thumbnail_data) 
 {
     if (!thumbnail_queue) {
         printf("enqueue_thumbnail: 'thumbnail_queue' arg is NULL\n");
@@ -391,7 +391,7 @@ void enqueue_thumbnail(ThumbnailQueue *thumbnail_queue, ThumbnailData *thumbnail
     thumbnail_queue->count++;
 }
 
-ThumbnailData* dequeue_thumbnail(ThumbnailQueue *thumbnail_queue)
+RawThumbnail* dequeue_thumbnail(RawThumbnailQueue *thumbnail_queue)
 {
     if (!thumbnail_queue) {
         printf("dequeue_thumbnail: 'thumbnail_queue' arg is NULL\n");
@@ -403,7 +403,7 @@ ThumbnailData* dequeue_thumbnail(ThumbnailQueue *thumbnail_queue)
         return NULL;
     }
 
-    ThumbnailData *ret = thumbnail_queue->head;
+    RawThumbnail *ret = thumbnail_queue->head;
 
     thumbnail_queue->head = ret->next;
     if (!thumbnail_queue->head) {
@@ -415,10 +415,10 @@ ThumbnailData* dequeue_thumbnail(ThumbnailQueue *thumbnail_queue)
     return ret;
 }
 
-void free_thumbnail_queue(ThumbnailQueue *thumbnail_queue)
+void free_thumbnail_queue(RawThumbnailQueue *thumbnail_queue)
 {
     if (!thumbnail_queue) return;
-    while (thumbnail_queue->head) free_thumbnail_data(dequeue_thumbnail(thumbnail_queue));
+    while (thumbnail_queue->head) free_raw_thumbnail(dequeue_thumbnail(thumbnail_queue));
     pthread_mutex_destroy(&thumbnail_queue->mutex);
 }
 
@@ -979,7 +979,7 @@ typedef struct
     char search_result_id[64];
     PreparedRequest request;
     PersistentConnection *connection;
-    ThumbnailQueue *thumbnail_queue;
+    RawThumbnailQueue *thumbnail_queue;
 } ThumbnailLoaderParams;
 
 void* load_thumbnail(void *args)
@@ -993,14 +993,14 @@ void* load_thumbnail(void *args)
         return NULL;
     }
 
-    ThumbnailData *thumbnail_data = malloc(sizeof(ThumbnailData));
+    RawThumbnail *thumbnail_data = malloc(sizeof(RawThumbnail));
     if (thumbnail_data == NULL) {
         printf("load_thumbnail: malloc returned NULL for thumbnail_data\n");
         free(targs);
         return NULL;
     }
 
-    thumbnail_data->image_data = thumbnail_buffer;
+    thumbnail_data->data = thumbnail_buffer;
     strcpy(thumbnail_data->search_result_id, targs->search_result_id);
 
     pthread_mutex_lock(&targs->thumbnail_queue->mutex);
@@ -1134,7 +1134,7 @@ typedef struct
     SearchType search_type;
     PreparedRequest request;
     Results *search_results;
-    ThumbnailQueue *thumbnail_queue;
+    RawThumbnailQueue *thumbnail_queue;
     PersistentConnection *youtube_connection;
 } SearchThreadArgs;
 
@@ -1612,7 +1612,7 @@ void init_app()
     InitWindow(1000, 750, "metube");
 }
 
-Texture2D load_thumbnail_from_memory(const Buffer buffer, const float width, const float height)
+Texture2D load_texture_from_memory(const Buffer buffer, const float width, const float height)
 {
     if (!buffer_ready(&buffer)) {
         printf("load_thumbnail_from_mem: buffer obj passed is invalid\n");
@@ -1905,7 +1905,7 @@ void youtube_internal_api_key(PersistentConnection *youtube_connection, const si
     free_buffer(&youtube_page);
 }
 
-void draw_search_result(SearchResult *search_result, const Rectangle container, const Color color, const Ui ui)
+void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, const Rectangle container, const Color color, const Ui ui)
 {
     DrawRectangleRec(container, color);
 
@@ -1916,8 +1916,8 @@ void draw_search_result(SearchResult *search_result, const Rectangle container, 
         .height = container.height 
     };
 
-    if (IsTextureReady(search_result->thumbnail)) {
-        DrawTextureEx(search_result->thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
+    if (IsTextureReady(thumbnail)) {
+        DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
     }
 
     const Rectangle title_area = {
@@ -1958,13 +1958,144 @@ void draw_search_result(SearchResult *search_result, const Rectangle container, 
     }
 }
 
+#define MINUTE 60
+#define THUMBNAIL_LIFETIME 5
+
+typedef struct
+{
+    char id [64];
+    Timer timer;
+    Texture2D thumbnail;
+    UT_hash_handle hh;
+} TextureCacheEntry;
+
+TextureCacheEntry* init_cached_texture(const Texture2D texture, const char* id)
+{
+    if ((id == NULL) || (id[0] == '\0')) {
+        printf("init_cached_texture: invalid id passed\n");
+        return NULL;
+    }
+    
+    TextureCacheEntry *cached_thumbnail = (TextureCacheEntry*) malloc(sizeof(TextureCacheEntry));
+    if (cached_thumbnail == NULL) {
+        printf("init_cached_texture: malloc returned NULL\n");
+        return NULL;
+    }
+
+    cached_thumbnail->thumbnail = texture;
+    strcpy(cached_thumbnail->id, id);
+    start_timer(&cached_thumbnail->timer, THUMBNAIL_LIFETIME);
+
+    return cached_thumbnail;
+}
+
+void free_cached_thumbnail(TextureCacheEntry *cached_entry)
+{
+    if (cached_entry == NULL) return;
+    if (IsTextureReady(cached_entry->thumbnail)) UnloadTexture(cached_entry->thumbnail);
+    free(cached_entry);
+}
+
+void cache_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
+{
+    if (cached_entry == NULL) {
+        printf("cache_texture: thumbnail to cache is NULL\n");
+        return;
+    }
+
+    HASH_ADD_STR(*hashtable, id, cached_entry);
+}
+
+void delete_cached_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
+{
+    if (HASH_COUNT(*hashtable) == 0) {
+        printf("delete_cached_texture: hashtable is empty");
+        return;
+    }
+
+    if (cached_entry == NULL) {
+        printf("delete_cached_texturel: cached_entry is NULL\n");
+        return;
+    }
+
+    HASH_DEL(*hashtable, cached_entry);
+
+    free_cached_thumbnail(cached_entry);
+}
+
+void free_cached_textures(TextureCacheEntry **hashtable)
+{
+    if (hashtable == NULL) return;
+
+    TextureCacheEntry *current, *tmp;
+    HASH_ITER(hh, *hashtable, current, tmp) {
+        delete_cached_texture(hashtable, current);
+    }
+}
+
+TextureCacheEntry* find_cached_thumbnail(const char *id, TextureCacheEntry **hashtable)
+{
+    if (hashtable == NULL) return NULL;
+
+    TextureCacheEntry *found = NULL;
+    
+    HASH_FIND_STR(*hashtable, id, found);
+    
+    return found;
+}
+
+bool cached_texture_exists(const char *id, TextureCacheEntry **hashtable)
+{
+    return find_cached_thumbnail(id, hashtable) != NULL;
+}
+
+void remove_expired_thumbnails(TextureCacheEntry **hashtable)
+{
+    if (hashtable == NULL) return;
+
+    TextureCacheEntry *current, *tmp;
+
+    HASH_ITER(hh, *hashtable, current, tmp) {
+        if (current && timer_done(current->timer)) {
+            printf("deleted %s\n", current->id);
+            delete_cached_texture(hashtable, current);
+        }
+    }
+}
+
+void process_thumbnail_queue(RawThumbnailQueue *queue, TextureCacheEntry **hashtable)
+{
+    if ((queue == NULL) || (hashtable == NULL)) return;
+
+    pthread_mutex_lock(&queue->mutex);
+
+    while (queue->head != NULL) {
+        RawThumbnail *raw_thumbnail = dequeue_thumbnail(queue);
+
+        const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, 150, 80);
+        if (IsTextureReady(thumbnail)) {
+            TextureCacheEntry *cached_entry = init_cached_texture(thumbnail, raw_thumbnail->search_result_id);
+            if (cached_entry) {
+                cache_texture(hashtable, cached_entry);
+            }
+        }
+
+        free_raw_thumbnail(raw_thumbnail);
+    }
+
+    pthread_mutex_unlock(&queue->mutex);
+}
+
 int main()
 {
     SSL_library_init();
     OpenSSL_add_all_algorithms();
     
+    TextureCacheEntry *cached_thumbnails = NULL;
+    RawThumbnailQueue thumbnail_queue = init_thumbnail_queue();
+
     Results results = init_results();
-    ThumbnailQueue thumbnail_queue = init_thumbnail_queue();
+
     TaskQueue task_queue = init_task_queue();
     pthread_t thread_pool[MAX_THREADS];
     init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
@@ -1989,6 +2120,7 @@ int main()
 
     char internal_api_key[64];
     youtube_internal_api_key(&yt_connections[current_yt_conn], sizeof(internal_api_key), internal_api_key);
+   
     printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
 
     // when true, the application starts the search process
@@ -2023,58 +2155,12 @@ int main()
 
     while (!WindowShouldClose())
     {
-        pthread_mutex_lock(&thumbnail_queue.mutex);
-        while (thumbnail_queue.head) {
-            ThumbnailData *thumbnail_data = dequeue_thumbnail(&thumbnail_queue);
-            
-            for (SearchResult *search_node = results.head; search_node; search_node = search_node->next) {
-                if (strcmp(thumbnail_data->search_result_id, search_node->id) == 0) {
-                    if (IsTextureReady(search_node->thumbnail)) UnloadTexture(search_node->thumbnail);
-                    search_node->thumbnail = load_thumbnail_from_memory(thumbnail_data->image_data, 150, 80);
-                    if (IsTextureReady(search_node->thumbnail) == false) {
-                        printf("FAILED TO LOAD TEXURE\n");
-                    }
-                    break;
-                }
-            }
-            
-            free_thumbnail_data(thumbnail_data);
+        if (HASH_COUNT(cached_thumbnails) > 0) {
+            remove_expired_thumbnails(&cached_thumbnails);
         }
-        pthread_mutex_unlock(&thumbnail_queue.mutex);
 
-        for (SearchResult *search_result = results.head; search_result; search_result = search_result->next) {
-            if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
-                search_result->thumbnail_loaded = true;
-
-                ThumbnailLoaderParams *targs = (ThumbnailLoaderParams*) malloc(sizeof(ThumbnailLoaderParams));
-                targs->thumbnail_queue = &thumbnail_queue;
-                
-                if (search_result->media_type == CHANNEL) {
-                    targs->connection = &channel_connections[current_channel_conn];
-                    current_channel_conn = bound_index_to_array((current_channel_conn + 1), N_CONN);
-                }
-
-                else {
-                    targs->connection = &video_connections[current_video_conn];
-                    current_video_conn = bound_index_to_array((current_video_conn + 1), N_CONN);
-                }
-                
-                targs->request.body[0] = '\0';
-                strcpy(targs->request.path, search_result->thumbnail_path);
-                configure_get_header(sizeof(targs->request.header), targs->request.header, targs->connection->host, targs->request.path);
-                
-                strcpy(targs->search_result_id, search_result->id);
-
-                ThreadTask *thread_task = malloc(sizeof(ThreadTask));
-                thread_task->next = NULL;
-                thread_task->args = targs;
-                thread_task->funct = load_thumbnail;
-
-                pthread_mutex_lock(&task_queue.mutex);
-                enqueue_task(thread_task, &task_queue);
-                pthread_cond_signal(&task_queue.cond);
-                pthread_mutex_unlock(&task_queue.mutex);
-            }
+        if (thumbnail_queue.count > 0) {
+            process_thumbnail_queue(&thumbnail_queue, &cached_thumbnails);
         }
 
         if (delete_old_nodes) {
@@ -2143,8 +2229,9 @@ int main()
         }
 
         BeginDrawing();
-        ClearBackground(RAYWHITE);
-        //---------------------------------------------------------------searching UI--------------------------------------------------------------------------------------//
+
+            ClearBackground(RAYWHITE);
+
             const Rectangle search_bar_bounds = {
                 .x = ui.padding, 
                 .y = ui.padding, 
@@ -2178,9 +2265,7 @@ int main()
                     search_type = NEW;
                 }
             }
-        //---------------------------------------------------------------searching UI--------------------------------------------------------------------------------------//
 
-        //---------------------------------------------------------------filtering UI--------------------------------------------------------------------------------------//
             const Rectangle filter_window_bounds = {
                 .x = ui.padding, 
                 .y = search_button_bounds.y + search_button_bounds.height + ui.padding, 
@@ -2190,9 +2275,7 @@ int main()
 
             // toggle filter window on press
             draw_filter_window(&query, filter_window_bounds, ui.font, ui.padding);
-        //---------------------------------------------------------------filtering UI--------------------------------------------------------------------------------------//
 
-        //---------------------------------------------------------------displaying UI---------------------------------------------------------------------------------------//
             const float button_height = 30;
             const Rectangle load_more_button_bounds = {
                 .x = search_bar_bounds.x,
@@ -2249,17 +2332,59 @@ int main()
                     .height = content_height 
                 };
 
-                if (CheckCollisionRecs(container, scissor_rect) == false) {
-                    continue;
-                }
-
                 const Color container_color = (i % 2) ? WHITE : RAYWHITE;
 
-                draw_search_result(search_result, container, container_color, ui);
+                Texture2D thumbnail = (Texture2D){0};
+                TextureCacheEntry *cached = find_cached_thumbnail(search_result->id, &cached_thumbnails);
+                if (cached) {
+                    thumbnail = cached->thumbnail;
+
+                    // refresh timer to prevent expiration
+                    start_timer(&cached->timer, THUMBNAIL_LIFETIME);
+                }
+
+                // otherwise, load thumbnail asynchronously
+                else if ((search_result->thumbnail_loaded) == false && (search_result->thumbnail_path[0] != '\0')) {
+                    search_result->thumbnail_loaded = true;
+                    
+                    ThumbnailLoaderParams *targs = (ThumbnailLoaderParams*) malloc(sizeof(ThumbnailLoaderParams));
+                    
+                    targs->thumbnail_queue = &thumbnail_queue;
+                    
+                    if (search_result->media_type == CHANNEL) {
+                        targs->connection = &channel_connections[current_channel_conn];
+                        current_channel_conn = bound_index_to_array((current_channel_conn + 1), N_CONN);
+                    }
+
+                    else {
+                        targs->connection = &video_connections[current_video_conn];
+                        current_video_conn = bound_index_to_array((current_video_conn + 1), N_CONN);
+                    }
+                    
+                    targs->request.body[0] = '\0';
+                    strcpy(targs->request.path, search_result->thumbnail_path);
+                    configure_get_header(sizeof(targs->request.header), targs->request.header, targs->connection->host, targs->request.path);
+                    
+                    strcpy(targs->search_result_id, search_result->id);
+
+                    ThreadTask *thread_task = malloc(sizeof(ThreadTask));
+                    thread_task->next = NULL;
+                    thread_task->args = targs;
+                    thread_task->funct = load_thumbnail;
+
+                    pthread_mutex_lock(&task_queue.mutex);
+                    enqueue_task(thread_task, &task_queue);
+                    pthread_cond_signal(&task_queue.cond);
+                    pthread_mutex_unlock(&task_queue.mutex);
+                }
+
+                if (CheckCollisionRecs(container, scissor_rect) == true) {
+                    draw_search_result(search_result, thumbnail, container, container_color, ui);
+                }                
             }
                 
             EndScissorMode();
-        //---------------------------------------------------------------displaying UI--------------------------------------------------------------------------//
+
         EndDrawing();
     }
 
@@ -2267,6 +2392,7 @@ int main()
     UnloadFont(ui.font);
     free_results(&results);
     free_thumbnail_queue(&thumbnail_queue);
+    free_cached_textures(&cached_thumbnails);
     
     // ssl stuff
     if (ctx) SSL_CTX_free(ctx);
@@ -2285,13 +2411,9 @@ int main()
 }
 
 // searching feature
-    // handle missing images    
-        // create list of thumbnails
-        // each search node will have to store the thumbnail index link
     // handle different wifi connections/offline upon bootup
     // clean everything
     // possible continuation token issue
-    // handle crash when searching for gibberish
 
 // video playing function
     // show video information when double clicking video
@@ -2303,9 +2425,8 @@ int main()
     // able to add videos to playlist
 
 // after everythings done:
-    // fix bastard bug
     // fonts for L.O.T.E.
     // handle cleanup when prematurley deleting
         // thumbnail data list
         // search arguements
-
+        // cached thumbnails
