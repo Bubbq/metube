@@ -265,7 +265,7 @@ typedef struct
     size_t count;           
     SearchResult* head;    
     SearchResult* tail;     
-    char continuation_token[1024];
+    char continuation_token[2048];
 } Results;
 
 Results init_results() 
@@ -825,6 +825,7 @@ int configure_post_header(const size_t n, char post_header[n], const char *host,
             "Host: %s\r\n"
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
             "Content-Type: application/json\r\n"
+            "Accept: application/json\r\n"
             "Content-Length: %zu\r\n"
             "Connection: keep-alive\r\n"
             // "Connection: close\r\n"
@@ -1959,7 +1960,7 @@ void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, 
 }
 
 #define MINUTE 60
-#define THUMBNAIL_LIFETIME 5
+#define THUMBNAIL_LIFETIME (MINUTE * 1)
 
 typedef struct
 {
@@ -2057,7 +2058,6 @@ void remove_expired_thumbnails(TextureCacheEntry **hashtable)
 
     HASH_ITER(hh, *hashtable, current, tmp) {
         if (current && timer_done(current->timer)) {
-            printf("deleted %s\n", current->id);
             delete_cached_texture(hashtable, current);
         }
     }
@@ -2413,7 +2413,8 @@ int main()
 // searching feature
     // handle different wifi connections/offline upon bootup
     // clean everything
-    // possible continuation token issue
+    // trending page
+    // reccomendations
 
 // video playing function
     // show video information when double clicking video
