@@ -323,13 +323,21 @@ void print_results(const Results* results)
     } 
 }
 
+typedef enum
+{
+    NEW,
+    APPENDING,
+    TRENDING,
+} SearchType;
+
 // represents user-defined parameters for a YouTube search request
 typedef struct
 {
     bool allow_youtube_shorts;      
-    char string[512];        
+    char string[256];        
     MediaType media;          
-    SortType sort;           
+    SortType sort;
+    SearchType search_type;    
 } Query;
 
 // holds raw thumbnail image data fetched from an HTTP request
@@ -761,43 +769,6 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
     return response;
 }
 
-// returns an allocated string that is the url encoding of the string passed
-char* url_encode_string(const char *str)
-{
-    if (!str) {
-        printf("url_encode: arguement is NULL");
-        return NULL;
-    }
-
-    const size_t str_len = strlen(str);
-
-    // worst case senario is when all characters are url encoded
-    char *encoded_str = malloc((str_len * 3) + 1);
-    if (!encoded_str) {
-        printf("url_encode_string: malloc returned NULL\n");
-        return NULL;
-    }
-
-    char *ptr = encoded_str;
-    
-    for (size_t i = 0; i < str_len; i++) {
-        unsigned char c = (unsigned) str[i];
-        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            *ptr++ = c;
-        }
-        
-        // every non alpha character is replace with a % and 2 hex digits
-        else {
-            sprintf(ptr, "%%%02X", c);
-            ptr += 3;
-        }
-    }
-
-    (*ptr) = '\0';
-
-    return encoded_str;
-}
-
 int configure_get_header(const size_t n, char get_header[n], const char *host, const char *path)
 {
     int chars_written = snprintf(get_header, n,
@@ -833,38 +804,44 @@ int configure_post_header(const size_t n, char post_header[n], const char *host,
             path, host, post_body_length);
 }
 
-size_t configure_post_body(char *post_body, size_t n, const char *query, const char *params, const char *continuation)
+size_t configure_post_body(const size_t n, char post_body[n], const Query query, const char* continuation_token)
 {
-    if (continuation && continuation[0] != '\0') {
-        return snprintf(post_body, n,
-            "{\n"
-            "  \"context\": {\n"
-            "    \"client\": {\n"
-            "      \"clientName\": \"WEB\",\n"
-            "      \"clientVersion\": \"2.20210721.00.00\"\n"
-            "    }\n"
-            "  },\n"
-            "  \"continuation\": \"%s\"\n"
-            "}", continuation);
-    } 
+    size_t body_len = snprintf(post_body, n - 1,
+                        "{\n"
+                        "  \"context\": {\n"
+                        "    \"client\": {\n"
+                        "      \"clientName\": \"WEB\",\n"
+                        "      \"clientVersion\": \"2.20210721.00.00\"\n"
+                        "    }\n"
+                        "  },\n");  
 
-    else if ((query && query[0] != '\0') && (params && params[0] != '\0')) {
-            return snprintf(post_body, n,
-                "{\n"
-                "  \"context\": {\n"
-                "    \"client\": {\n"
-                "      \"clientName\": \"WEB\",\n"
-                "      \"clientVersion\": \"2.20210721.00.00\"\n"
-                "    }\n"
-                "  },\n"
-                "  \"query\": \"%s\",\n"
-                "  \"params\": \"%s\"\n"
-                "}", query, params);
+    switch (query.search_type) {
+        case NEW: {
+            char params[16];
+            const char* sort_url = sort_type_to_url(query.sort);
+            const char* media_url = media_type_to_url(query.media);
+            snprintf(params, sizeof(params), "%s%s", sort_url, media_url);
+
+            body_len += snprintf(post_body + body_len, n - body_len,
+                    "  \"params\": \"%s\",\n"
+                            "  \"query\": \"%s\"\n", params, query.string);
+            break;
+        }
+
+        case APPENDING: 
+            body_len += snprintf(post_body + body_len, n - body_len,
+                    "  \"continuation\": \"%s\"\n", continuation_token);
+            break;
+
+        case TRENDING: 
+            body_len += snprintf(post_body + body_len, n - body_len,
+                    "  \"browseId\": \"FEtrending\"\n");
+            break;
     }
 
-    else
-        return snprintf(post_body, n,
-            "{ \"error\": \"Missing query or continuation\" }");
+    strcat(post_body, "}");
+    
+    return body_len + 1;
 }
 
 int bound_index_to_array (const int pos, const int array_size)
@@ -1123,12 +1100,6 @@ void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
         pthread_join(thread_pool[t], NULL);
 }
 
-typedef enum
-{
-    NEW,
-    APPENDING,
-} SearchType;
-
 typedef struct
 {
     bool allow_youtube_shorts;
@@ -1139,54 +1110,59 @@ typedef struct
     PersistentConnection *youtube_connection;
 } SearchThreadArgs;
 
-void get_continuation_token(cJSON *cjson, const SearchType search_typ, const size_t n, char continuation_token[n])
+SearchThreadArgs* create_search_thread_args(const Query query, PreparedRequest request, Results* search_results, RawThumbnailQueue* thumbnail_queue, PersistentConnection* youtube_connection)
 {
-    if (cjson == NULL) {
-        printf("get_continuation_token: CJSON* arg is NULL\n");
-        memset(continuation_token, 0, n);
-    }
-
-    cJSON *arrayItem = cJSON_IsArray(cjson) ? cJSON_GetArrayItem(cjson, 1) : NULL;
-    cJSON *continuationItemRenderer = arrayItem ? cJSON_GetObjectItem(arrayItem, "continuationItemRenderer") : NULL;
-    cJSON *continuationEndpoint = continuationItemRenderer ? cJSON_GetObjectItem(continuationItemRenderer, "continuationEndpoint") : NULL;
-    cJSON *continuationCommand = continuationEndpoint ? cJSON_GetObjectItem(continuationEndpoint, "continuationCommand") : NULL;
-    cJSON *token = continuationCommand ? cJSON_GetObjectItem(continuationCommand, "token") : NULL;
-    if (token && cJSON_IsString(token)) {
-        strncpy(continuation_token, token->valuestring, n - 1);
-    }
-
-    else {
-        printf("get_continuation_token: token not found\n");
-        memset(continuation_token, 0, n);
-    }
-}
-
-cJSON* get_search_result_json(cJSON* cjson, const SearchType search_type)
-{
-    if (cjson == NULL) {
-        printf("get_search_result_json: CJSON* arg is NULL\n");
+    SearchThreadArgs* search_thread_args = (SearchThreadArgs*) malloc(sizeof(SearchThreadArgs));
+    if (search_thread_args == NULL) {
+        printf("create_search_thread_args: malloc returned NULL for 'search_thread_args'\n");
         return NULL;
     }
 
-    if (search_type == NEW) {
-        cJSON *contents = cJSON_GetObjectItem(cjson, "contents");
-        cJSON *twoColumnSearchResultsRenderer = contents ? cJSON_GetObjectItem(contents, "twoColumnSearchResultsRenderer") : NULL;
-        cJSON *primaryContents = twoColumnSearchResultsRenderer ? cJSON_GetObjectItem(twoColumnSearchResultsRenderer, "primaryContents") : NULL;
-        cJSON *sectionListRenderer = primaryContents ? cJSON_GetObjectItem(primaryContents, "sectionListRenderer") : NULL;
-        contents = sectionListRenderer ? cJSON_GetObjectItem(sectionListRenderer, "contents") : NULL;
-        return contents;
+    search_thread_args->allow_youtube_shorts = query.allow_youtube_shorts;
+    search_thread_args->search_type = query.search_type;
+    search_thread_args->request = request;
+    search_thread_args->search_results = search_results;
+    search_thread_args->thumbnail_queue = thumbnail_queue;
+    search_thread_args->youtube_connection = youtube_connection;
+
+    return search_thread_args;
+}
+
+cJSON* find_object(cJSON* root, const char *key)
+{
+    if ((root == NULL) || (key == NULL)) {
+        return NULL;
     }
 
-    else if (search_type == APPENDING) {
-        cJSON *onResponseReceivedCommands = cJSON_GetObjectItem(cjson, "onResponseReceivedCommands");
-        cJSON *firstElement = onResponseReceivedCommands && cJSON_IsArray(onResponseReceivedCommands) ? cJSON_GetArrayItem(onResponseReceivedCommands, 0) : NULL;
-        cJSON *appendContinuationItemsAction = firstElement ? cJSON_GetObjectItem(firstElement, "appendContinuationItemsAction") : NULL;
-        cJSON *continuationItems = appendContinuationItemsAction ? cJSON_GetObjectItem(appendContinuationItemsAction, "continuationItems") : NULL;
-        return continuationItems;
+    else if (root->string && (strcmp(root->string, key) == 0)) {
+        return root;
     }
 
-    printf("get_search_result_json: SearchType arg is invalid\n");
+    if ((root->type == cJSON_Object) || (root->type == cJSON_Array)) {
+        for (cJSON* child = root->child; child; child = child->next) {
+            cJSON* found = find_object(child, key);
+            if (found) {
+                return found;
+            }
+        }
+    }
+
     return NULL;
+}
+
+void get_continuation_token(cJSON *json, const SearchType search_typ, const size_t n, char continuation_token[n])
+{
+    cJSON* continuationEndpoint = find_object(json, "continuationEndpoint");
+    cJSON* continuationCommand = continuationEndpoint ? cJSON_GetObjectItem(continuationEndpoint, "continuationCommand") : NULL;
+    cJSON* token = continuationCommand ? cJSON_GetObjectItem(continuationCommand, "token") : NULL;
+    
+    if ((token == NULL) || (cJSON_IsString(token) == false)) {
+        printf("get_continuation_token: failed to extract token\n");
+        memset(continuation_token, 0, n);
+        return;
+    }
+
+    strncpy(continuation_token, token->valuestring, n - 1);
 }
 
 static int elements_added = 0; 
@@ -1501,27 +1477,21 @@ void parse_playlist_from_json(const cJSON *lockupViewModel, SearchResult *playli
     }
 }
 
-void create_results_from_json(cJSON* cjson, Results *results, const bool allow_youtube_shorts)
+int create_results_from_json(cJSON* cjson, Results *results, const bool allow_youtube_shorts)
 {
     if (results == NULL) {
         printf("create_results_from_json: 'results' is NULL\n");
-        return;
+        return 0;
     }
 
-    cJSON *arrayItem = (cjson && cJSON_IsArray(cjson)) ? cJSON_GetArrayItem(cjson, 0) : NULL;
-    cJSON *itemSectionRenderer = arrayItem ? cJSON_GetObjectItem(arrayItem, "itemSectionRenderer") : NULL;
-    cJSON *contents = itemSectionRenderer ? cJSON_GetObjectItem(itemSectionRenderer, "contents") : NULL;
-    if ((contents == NULL) || (cJSON_IsArray(contents) == false)) {
-        printf("create_results_from_json: 'contents' is an invalid cjson object\n");
-        return;
-    }
+    int elements_added = 0;
 
     cJSON *item;
-    cJSON_ArrayForEach (item, contents) {
+    cJSON_ArrayForEach (item, cjson) {
         SearchResult *search_result = init_search_result();
         if (search_result == NULL) {
             printf("create_results_from_json: init_search_result returned NULL\n");
-            return;
+            return 0;
         }
         
         cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");     // video
@@ -1541,10 +1511,33 @@ void create_results_from_json(cJSON* cjson, Results *results, const bool allow_y
         }
 
         if (search_result->media_type != UNDF) {
+            elements_added++;
             add_search_result(results, search_result);
         }
 
         else free_search_result(search_result);
+    }
+
+    return elements_added;
+}
+
+cJSON* find_search_result_container(cJSON* json, const SearchType search_type)
+{
+    switch (search_type) {
+        case NEW:
+        case APPENDING: {
+            cJSON* itemSectionRenderer = find_object(json, "itemSectionRenderer");
+            cJSON* contents = itemSectionRenderer ? cJSON_GetObjectItem(itemSectionRenderer, "contents") : NULL;
+            return contents;
+        }
+        case TRENDING: {
+            cJSON* sectionListRenderer = find_object(json, "sectionListRenderer");
+            cJSON* contents = sectionListRenderer ? cJSON_GetObjectItem(sectionListRenderer, "contents") : NULL;
+            cJSON* arrayItem = contents && cJSON_IsArray(contents) ? cJSON_GetArrayItem(contents, 2) : NULL;
+            cJSON* items = find_object(arrayItem, "items");
+            return items;
+        }
+        default: return NULL;
     }
 }
 
@@ -1562,14 +1555,14 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    char debug_filename[32];
-    time_t t;
-    time(&t);
-    sprintf(debug_filename, "%s.json", ctime(&t));
-    create_file_from_memory(debug_filename, http);
+    // char debug_filename[32];
+    // time_t t;
+    // time(&t);
+    // sprintf(debug_filename, "%s.json", ctime(&t));
+    // create_file_from_memory(debug_filename, http);
 
-    cJSON* cjson = cJSON_Parse(http.data);
-    if (cjson == NULL) {
+    cJSON* json = cJSON_Parse(http.data);
+    if (json == NULL) {
         printf("get_results_from_query: cJSON_Parse returned NULL\n");
         SetWindowTitle("[offline] - metube");
         free_buffer(&http);
@@ -1577,28 +1570,25 @@ void* get_results_from_query(void* args)
         search_finished = true;
         return NULL;
     }
-
-    cJSON *search_result_json = get_search_result_json(cjson, targs->search_type);
-
-    get_continuation_token(search_result_json, targs->search_type, sizeof(targs->search_results->continuation_token), targs->search_results->continuation_token);
-
-    int old_size = targs->search_results->count;
-
-    create_results_from_json(search_result_json, targs->search_results, targs->allow_youtube_shorts);
     
-    int new_size = targs->search_results->count;
+    cJSON* result_root = find_search_result_container(json, targs->search_type);
+    
+    get_continuation_token(json, targs->search_type, sizeof(targs->search_results->continuation_token), targs->search_results->continuation_token);
 
-    elements_added = new_size - old_size;
-    delete_old_nodes = targs->search_type == NEW;
+    elements_added = create_results_from_json(result_root, targs->search_results, targs->allow_youtube_shorts);
     search_finished = true;
-
-    const int display_count = targs->search_type == NEW ? elements_added : targs->search_results->count;
-    SetWindowTitle(TextFormat("[search results(%d)] - metube", display_count));
+    if (targs->search_type != APPENDING) {
+        delete_old_nodes = true;
+    }
 
     end_time = GetTime();
-    printf("new search took %f seconds, found %d items\n", end_time - start_time, elements_added);
+    printf("search took %f seconds, %d items found\n", end_time - start_time, elements_added);
     
-    cJSON_Delete(cjson);
+    char app_title[512];
+    snprintf(app_title, sizeof(app_title), "[search result(%d)] - metube", elements_added);
+    SetWindowTitle(app_title);
+
+    cJSON_Delete(json);
     free_buffer(&http);
     free(targs);
     return NULL;
@@ -2065,7 +2055,7 @@ void remove_expired_thumbnails(TextureCacheEntry **hashtable)
 
 void process_thumbnail_queue(RawThumbnailQueue *queue, TextureCacheEntry **hashtable)
 {
-    if ((queue == NULL) || (hashtable == NULL)) return;
+    if (queue == NULL) return;
 
     pthread_mutex_lock(&queue->mutex);
 
@@ -2084,6 +2074,26 @@ void process_thumbnail_queue(RawThumbnailQueue *queue, TextureCacheEntry **hasht
     }
 
     pthread_mutex_unlock(&queue->mutex);
+}
+
+bool launch_task(TaskQueue* task_queue, void* targs, void* (*funct)(void*))
+{
+    ThreadTask* task = (ThreadTask*) malloc(sizeof(ThreadTask));
+    if (task == NULL) {
+        printf("launch_task: malloc returned NULL for 'task'\n");
+        return false;
+    }
+
+    task->next = NULL;
+    task->args = targs;
+    task->funct = funct;
+
+    pthread_mutex_lock(&task_queue->mutex);
+    enqueue_task(task, task_queue);
+    pthread_cond_signal(&task_queue->cond);
+    pthread_mutex_unlock(&task_queue->mutex);
+
+    return true;
 }
 
 int main()
@@ -2105,18 +2115,21 @@ int main()
         printf("error initalizing SSL_CTX object\n");
         return 1;
     } 
-    
+
     int current_yt_conn = 0;
+    char* youtube_host = media_type_to_host(ANY);
     PersistentConnection yt_connections[N_CONN] = {0};
-    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&yt_connections[c], media_type_to_host(ANY), HTTPS);
+    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&yt_connections[c], youtube_host, HTTPS);
 
     int current_video_conn = 0;
+    char* video_host = media_type_to_host(VIDEO);
     PersistentConnection video_connections[N_CONN] = {0};
-    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&video_connections[c], media_type_to_host(VIDEO), HTTPS);
+    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&video_connections[c], video_host, HTTPS);
 
     int current_channel_conn = 0;
+    char* channel_host = media_type_to_host(CHANNEL);
     PersistentConnection channel_connections[N_CONN] = {0};
-    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&channel_connections[c], media_type_to_host(CHANNEL), HTTPS);
+    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&channel_connections[c], channel_host, HTTPS);
 
     char internal_api_key[64];
     youtube_internal_api_key(&yt_connections[current_yt_conn], sizeof(internal_api_key), internal_api_key);
@@ -2133,9 +2146,8 @@ int main()
         .string = "",
         .media = ANY,
         .sort = BY_RELEVANCE,
+        .search_type = NEW,
     };
-
-    SearchType search_type;
 
     // used in 'GuiTextBox' function
     // only true when the text window is focused
@@ -2164,8 +2176,8 @@ int main()
         }
 
         if (delete_old_nodes) {
-            scroll.y = 0;
             delete_old_nodes = false;
+
             int nodes_to_delete = results.count - elements_added;
             for (int i = 0; (i < nodes_to_delete) && results.head; i++) {
                 SearchResult *r = results.head;
@@ -2176,56 +2188,37 @@ int main()
         }
 
         if (search) {
-            search = false;
-            search_finished = false;
-            SearchThreadArgs *targs = malloc(sizeof(SearchThreadArgs));
-            if (!targs) 
-                printf("main: malloc returned NULL for targs\n");
-            else {
-                const char *display_string = search_type == NEW ? "loading" : "appending";
-                SetWindowTitle(TextFormat("[%s(%s)] - metube",query.string, display_string));
-                   
-                free_thumbnail_queue(&thumbnail_queue);
-                thumbnail_queue = init_thumbnail_queue();
+            search = search_finished = false;
 
-                targs->allow_youtube_shorts = query.allow_youtube_shorts;
-                targs->search_results = &results;
-                targs->thumbnail_queue = &thumbnail_queue;
-                targs->youtube_connection = &yt_connections[current_yt_conn];
-                targs->search_type = search_type;
+            free_thumbnail_queue(&thumbnail_queue);
+            thumbnail_queue = init_thumbnail_queue();
 
-                // only cycle through connections on repeated searches to avoid bot detection
-                if (strcmp(last_search, query.string) == 0 && search_type == NEW) {
-                    current_yt_conn = bound_index_to_array((current_yt_conn + 1), N_CONN);
-                }
-                
-                strcpy(last_search, query.string);
+            char app_title[512];
+            snprintf(app_title, sizeof(app_title), "[%s(loading)] - metube", query.string);
+            SetWindowTitle(app_title);
 
-                const char *params = TextFormat("%s%s", sort_type_to_url(query.sort), media_type_to_url(query.media));
-                const char *continuation = search_type == APPENDING ? results.continuation_token : NULL;
-                configure_post_body(targs->request.body, sizeof(targs->request.body), query.string, params, continuation);
+            // cycle through yt connections for repeated searches to evade bot detection
+            if (strcmp(last_search, query.string) == 0) {
+                current_yt_conn = bound_index_to_array((current_yt_conn + 1), N_CONN);
+            }
 
-                const char *search_path = TextFormat("/youtubei/v1/search?key=%s", internal_api_key);
-                configure_post_header(sizeof(targs->request.header), targs->request.header, targs->youtube_connection->host, search_path, strlen(targs->request.body));
-                
-                // awaken a worker thread to handle thread function
-                ThreadTask *search_task = malloc(sizeof(ThreadTask));
-                if (!search_task) {
-                    printf("main: malloc returned NULL for ThreadTask object\n");
-                    free(targs);
-                } 
-                
-                else {
-                    search_task->next = NULL;
-                    search_task->args = targs;
-                    search_task->funct = get_results_from_query;
-
-                    pthread_mutex_lock(&task_queue.mutex);
-                    enqueue_task(search_task, &task_queue);
-                    pthread_cond_signal(&task_queue.cond);
-                    pthread_mutex_unlock(&task_queue.mutex);
-                }
-            }   
+            strncpy(last_search, query.string, sizeof(last_search) - 1);
+            
+            PreparedRequest post = {0};
+            
+            size_t body_len = configure_post_body(sizeof(post.body), post.body, query, results.continuation_token);
+            post.body[body_len] = '\0';
+            
+            char path[128];
+            const char *youtube_api_endpoint = (query.search_type == TRENDING) ? "browse" : "search";
+            snprintf(path, sizeof(path), "/youtubei/v1/%s?key=%s", youtube_api_endpoint, internal_api_key);
+            
+            configure_post_header(sizeof(post.header), post.header, yt_connections[current_yt_conn].host, path, body_len);
+            
+            SearchThreadArgs* targs = create_search_thread_args(query, post, &results, &thumbnail_queue, &yt_connections[current_channel_conn]);
+            if (targs && (launch_task(&task_queue, targs, get_results_from_query) == false)) {
+                free(targs);
+            }
         }
 
         BeginDrawing();
@@ -2246,6 +2239,18 @@ int main()
                 .height = 25
             };
             
+            const Rectangle trending_button_bounds = {
+                .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
+                .y = ui.padding,
+                .width = 50,
+                .height = 25,
+            };
+
+            if (GuiButton(trending_button_bounds, "Trending")) {
+                search = search_finished;
+                query.search_type = TRENDING;
+            }
+
             // edit_mode toggles when search box is focused (T) or not (F)
             int text_box_status;
             if ((text_box_status = GuiTextBox(search_bar_bounds, query.string, sizeof(query.string), edit_mode))) {
@@ -2262,7 +2267,7 @@ int main()
                 // load url encoded string into query 
                 if (query.string[0] != '\0') {
                     search = search_finished;
-                    search_type = NEW;
+                    query.search_type = NEW;
                 }
             }
 
@@ -2288,9 +2293,9 @@ int main()
                 GuiSetState(STATE_DISABLED);
             }
 
-            if (GuiButton(load_more_button_bounds, "LOAD MORE") && query.string[0] != '\0') {
-                search_type = APPENDING;
+            if (GuiButton(load_more_button_bounds, "LOAD MORE")) {
                 search = search_finished;
+                query.search_type = APPENDING;
             }
 
             GuiSetState(STATE_NORMAL);
@@ -2367,15 +2372,9 @@ int main()
                     
                     strcpy(targs->search_result_id, search_result->id);
 
-                    ThreadTask *thread_task = malloc(sizeof(ThreadTask));
-                    thread_task->next = NULL;
-                    thread_task->args = targs;
-                    thread_task->funct = load_thumbnail;
-
-                    pthread_mutex_lock(&task_queue.mutex);
-                    enqueue_task(thread_task, &task_queue);
-                    pthread_cond_signal(&task_queue.cond);
-                    pthread_mutex_unlock(&task_queue.mutex);
+                    if (launch_task(&task_queue, targs, load_thumbnail) == false) {
+                        free(targs);
+                    }
                 }
 
                 if (CheckCollisionRecs(container, scissor_rect) == true) {
@@ -2388,6 +2387,12 @@ int main()
         EndDrawing();
     }
 
+    // free worker thread stuff
+    application_running = false;
+    pthread_cond_broadcast(&task_queue.cond);
+    free_thread_pool(MAX_THREADS, thread_pool);
+    free_task_queue(&task_queue);         
+    
     // deinit app
     UnloadFont(ui.font);
     free_results(&results);
@@ -2400,20 +2405,14 @@ int main()
     for (int c = 0; c < N_CONN; c++) free_persistent_connection(&video_connections[c]);
     for (int c = 0; c < N_CONN; c++) free_persistent_connection(&channel_connections[c]);
     
-    // free worker thread stuff
-    application_running = false;
-    pthread_cond_broadcast(&task_queue.cond);
-    free_thread_pool(MAX_THREADS, thread_pool);
-    free_task_queue(&task_queue);         
-    
     CloseWindow();
+    
     return 0;
 }
 
 // searching feature
-    // handle different wifi connections/offline upon bootup
+    // clean PersistentConnection functions in main
     // clean everything
-    // trending page
     // reccomendations
 
 // video playing function
