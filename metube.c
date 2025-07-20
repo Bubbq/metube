@@ -20,6 +20,11 @@
 
 #define MAX_THREADS 4
 
+int bound_index_to_array (const int pos, const int array_size)
+{
+    return (pos + array_size) % array_size;
+}
+
 typedef struct
 {
 	double start_time;
@@ -653,6 +658,30 @@ void free_persistent_connection(PersistentConnection *connection)
     pthread_mutex_destroy(&connection->mutex);
 }
 
+typedef struct
+{
+    PersistentConnection connections[N_CONN];
+    size_t current_conn;
+} ConnectionPool;
+
+ConnectionPool init_connection_pool(const char* host)
+{
+    ConnectionPool pool = {0};
+    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&pool.connections[c], host, HTTPS);
+    return pool;
+}
+
+void free_connection_pool(ConnectionPool* connection_pool)
+{
+    if (connection_pool == NULL) return;
+    for(int c = 0; c < N_CONN; c++) free_persistent_connection(&connection_pool->connections[c]);
+}
+
+void cycle_connection(ConnectionPool* connection_pool)
+{
+    connection_pool->current_conn = bound_index_to_array((connection_pool->current_conn + 1), N_CONN);
+}
+
 bool connected_to_wifi()
 {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -667,6 +696,40 @@ bool connected_to_wifi()
     bool connected = (connect(sock, (struct sockaddr*)&server, sizeof(server)) == 0);
     close(sock);
     return connected;
+}
+
+void get_https_request_code(char* response_header, const size_t n, char https_request_code[n])
+{
+    if (response_header == NULL) return;
+
+    char* start = response_header + strlen("HTTP/1.1"); 
+    bool in_request_code = false;
+    int i = 0;
+
+    for (char* current = start; current && (i < n); current++) {
+        const char c = (*current);
+
+        if (in_request_code == false) {
+            if (isdigit(c)) {
+                in_request_code = true;
+            }
+        }
+
+        if (in_request_code) {
+            if (isdigit(c) == false) {
+                break;
+            }
+
+            https_request_code[i++] = c;
+        }
+    }
+
+    https_request_code[i] = '\0';
+}
+
+bool https_request_code_is_valid(const char* request_code)
+{
+    return (strcmp(request_code, "200") == 0); 
 }
 
 Buffer send_https_request(const PreparedRequest request, PersistentConnection *connection)
@@ -724,6 +787,15 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
         return (Buffer){0};
     }
 
+    char https_request_code[4];
+    get_https_request_code(header, sizeof(https_request_code), https_request_code);
+    if (https_request_code_is_valid(https_request_code) == false) {
+        printf("send_https_request: invalid https request code (%s)\n", https_request_code);
+        connection->connected = false;
+        pthread_mutex_unlock(&connection->mutex);
+        return (Buffer){0};
+    }
+
     Buffer response = init_buffer();
 
     if (header_contains_tag(header, "Content-Length:")) {
@@ -744,7 +816,7 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
         const char *crlf = "\r\n";
         const size_t crlf_len = strlen(crlf);
         
-        size_t chunk_size = -1; 
+        int chunk_size = -1; 
         while (chunk_size != 0) {
             char hex[16] = {0};
             int len = ssl_read_line(connection->ssl, hex, sizeof(hex));
@@ -764,6 +836,7 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
             ssl_read_line(connection->ssl, trailing_crlf, sizeof(trailing_crlf));
         }
     }
+
     pthread_mutex_unlock(&connection->mutex);
 
     return response;
@@ -842,11 +915,6 @@ size_t configure_post_body(const size_t n, char post_body[n], const Query query,
     strcat(post_body, "}");
     
     return body_len + 1;
-}
-
-int bound_index_to_array (const int pos, const int array_size)
-{
-    return (pos + array_size) % array_size;
 }
 
 void remove_leading_whitespace(char *string)
@@ -958,11 +1026,27 @@ typedef struct
     PreparedRequest request;
     PersistentConnection *connection;
     RawThumbnailQueue *thumbnail_queue;
-} ThumbnailLoaderParams;
+} LoadThumbnailArgs;
+
+LoadThumbnailArgs* create_load_thumbnail_args(const char* id, PreparedRequest request, PersistentConnection* connection, RawThumbnailQueue* thumbnail_queue)
+{
+    LoadThumbnailArgs* targs = (LoadThumbnailArgs*) malloc(sizeof(LoadThumbnailArgs));
+    if (targs == NULL) {
+        printf("create_load_thumbnail_args: malloc returned NULL for 'targs'\n");
+        return NULL;
+    }
+
+    strncpy(targs->search_result_id, id, sizeof(targs->search_result_id) - 1);
+    targs->request = request;
+    targs->connection = connection;
+    targs->thumbnail_queue = thumbnail_queue;
+
+    return targs;
+}
 
 void* load_thumbnail(void *args)
 {
-    ThumbnailLoaderParams *targs = (ThumbnailLoaderParams*) args;
+    LoadThumbnailArgs *targs = (LoadThumbnailArgs*) args;
     
     Buffer thumbnail_buffer = send_https_request(targs->request, targs->connection);
     if (buffer_ready(&thumbnail_buffer) == false) {
@@ -1606,18 +1690,18 @@ void init_app()
 Texture2D load_texture_from_memory(const Buffer buffer, const float width, const float height)
 {
     if (!buffer_ready(&buffer)) {
-        printf("load_thumbnail_from_mem: buffer obj passed is invalid\n");
+        printf("load_texture_from_memory: buffer obj passed is invalid\n");
         return (Texture2D){0};
     }
 
     else if (width < 0 || height < 0) {
-        printf("load_thumbnail_from_mem: thumbnail dimensions are invalid\n");
+        printf("load_texture_from_memory: thumbnail dimensions are invalid\n");
         return (Texture2D){0};
     }
 
     Image image = LoadImageFromMemory(".jpg", (unsigned char *)buffer.data, buffer.size);
     if (!IsImageReady(image)) {
-        printf("load_thumbnail_from_mem: LoadImageFromMemory returned invalid image obj\n");
+        printf("load_texture_from_memory: LoadImageFromMemory returned invalid image obj\n");
         return (Texture2D){0};
     }
 
@@ -1625,7 +1709,7 @@ Texture2D load_texture_from_memory(const Buffer buffer, const float width, const
     
     Texture2D ret = LoadTextureFromImage(image);
     if (!IsTextureReady(ret)) {
-        printf("load_thumbnail_from_mem: LoadTextureFromImage returned invalid Texture obj\n");
+        printf("load_texture_from_memory: LoadTextureFromImage returned invalid Texture obj\n");
         return (Texture2D){0};
     }
 
@@ -2116,23 +2200,18 @@ int main()
         return 1;
     } 
 
-    int current_yt_conn = 0;
-    char* youtube_host = media_type_to_host(ANY);
-    PersistentConnection yt_connections[N_CONN] = {0};
-    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&yt_connections[c], youtube_host, HTTPS);
+    const char* youtube_host = media_type_to_host(ANY);
+    ConnectionPool youtube_pool = init_connection_pool(youtube_host);
 
-    int current_video_conn = 0;
-    char* video_host = media_type_to_host(VIDEO);
-    PersistentConnection video_connections[N_CONN] = {0};
-    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&video_connections[c], video_host, HTTPS);
+    // playlists and live videos also share the same host
+    const char* video_host = media_type_to_host(VIDEO);
+    ConnectionPool video_thumbnail_pool = init_connection_pool(video_host);
 
-    int current_channel_conn = 0;
-    char* channel_host = media_type_to_host(CHANNEL);
-    PersistentConnection channel_connections[N_CONN] = {0};
-    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&channel_connections[c], channel_host, HTTPS);
+    const char* channel_host = media_type_to_host(CHANNEL);
+    ConnectionPool channel_thumbnail_pool = init_connection_pool(channel_host);
 
     char internal_api_key[64];
-    youtube_internal_api_key(&yt_connections[current_yt_conn], sizeof(internal_api_key), internal_api_key);
+    youtube_internal_api_key(&youtube_pool.connections[youtube_pool.current_conn], sizeof(internal_api_key), internal_api_key);
    
     printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
 
@@ -2197,25 +2276,23 @@ int main()
             snprintf(app_title, sizeof(app_title), "[%s(loading)] - metube", query.string);
             SetWindowTitle(app_title);
 
-            // cycle through yt connections for repeated searches to evade bot detection
+            // evade bot detection
             if (strcmp(last_search, query.string) == 0) {
-                current_yt_conn = bound_index_to_array((current_yt_conn + 1), N_CONN);
+                cycle_connection(&youtube_pool);
             }
 
             strncpy(last_search, query.string, sizeof(last_search) - 1);
             
-            PreparedRequest post = {0};
-            
-            size_t body_len = configure_post_body(sizeof(post.body), post.body, query, results.continuation_token);
-            post.body[body_len] = '\0';
-            
-            char path[128];
+            char path[128] = {0};
             const char *youtube_api_endpoint = (query.search_type == TRENDING) ? "browse" : "search";
             snprintf(path, sizeof(path), "/youtubei/v1/%s?key=%s", youtube_api_endpoint, internal_api_key);
             
-            configure_post_header(sizeof(post.header), post.header, yt_connections[current_yt_conn].host, path, body_len);
-            
-            SearchThreadArgs* targs = create_search_thread_args(query, post, &results, &thumbnail_queue, &yt_connections[current_channel_conn]);
+            PreparedRequest post = {0};
+
+            size_t body_len = configure_post_body(sizeof(post.body), post.body, query, results.continuation_token);
+                              configure_post_header(sizeof(post.header), post.header, youtube_pool.connections[youtube_pool.current_conn].host, path, body_len);
+
+            SearchThreadArgs* targs = create_search_thread_args(query, post, &results, &thumbnail_queue, &youtube_pool.connections[youtube_pool.current_conn]);
             if (targs && (launch_task(&task_queue, targs, get_results_from_query) == false)) {
                 free(targs);
             }
@@ -2343,38 +2420,24 @@ int main()
                 TextureCacheEntry *cached = find_cached_thumbnail(search_result->id, &cached_thumbnails);
                 if (cached) {
                     thumbnail = cached->thumbnail;
-
-                    // refresh timer to prevent expiration
-                    start_timer(&cached->timer, THUMBNAIL_LIFETIME);
+                    start_timer(&cached->timer, THUMBNAIL_LIFETIME); // refresh lifetime
                 }
 
-                // otherwise, load thumbnail asynchronously
-                else if ((search_result->thumbnail_loaded) == false && (search_result->thumbnail_path[0] != '\0')) {
+                else if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
                     search_result->thumbnail_loaded = true;
                     
-                    ThumbnailLoaderParams *targs = (ThumbnailLoaderParams*) malloc(sizeof(ThumbnailLoaderParams));
-                    
-                    targs->thumbnail_queue = &thumbnail_queue;
-                    
-                    if (search_result->media_type == CHANNEL) {
-                        targs->connection = &channel_connections[current_channel_conn];
-                        current_channel_conn = bound_index_to_array((current_channel_conn + 1), N_CONN);
-                    }
+                    ConnectionPool* pool = (search_result->media_type == CHANNEL) ? &channel_thumbnail_pool : &video_thumbnail_pool;
+                    PersistentConnection* conn = &pool->connections[pool->current_conn];
 
-                    else {
-                        targs->connection = &video_connections[current_video_conn];
-                        current_video_conn = bound_index_to_array((current_video_conn + 1), N_CONN);
-                    }
-                    
-                    targs->request.body[0] = '\0';
-                    strcpy(targs->request.path, search_result->thumbnail_path);
-                    configure_get_header(sizeof(targs->request.header), targs->request.header, targs->connection->host, targs->request.path);
-                    
-                    strcpy(targs->search_result_id, search_result->id);
+                    PreparedRequest get = {0};
+                    configure_get_header(sizeof(get.header), get.header, conn->host, search_result->thumbnail_path);    
 
-                    if (launch_task(&task_queue, targs, load_thumbnail) == false) {
+                    LoadThumbnailArgs* targs = create_load_thumbnail_args(search_result->id, get, conn, &thumbnail_queue);
+                    if (targs && (launch_task(&task_queue, targs, load_thumbnail) == false)) {
                         free(targs);
                     }
+
+                    cycle_connection(pool);
                 }
 
                 if (CheckCollisionRecs(container, scissor_rect) == true) {
@@ -2401,9 +2464,9 @@ int main()
     
     // ssl stuff
     if (ctx) SSL_CTX_free(ctx);
-    for (int c = 0; c < N_CONN; c++) free_persistent_connection(&yt_connections[c]);
-    for (int c = 0; c < N_CONN; c++) free_persistent_connection(&video_connections[c]);
-    for (int c = 0; c < N_CONN; c++) free_persistent_connection(&channel_connections[c]);
+    free_connection_pool(&youtube_pool);
+    free_connection_pool(&video_thumbnail_pool);
+    free_connection_pool(&channel_thumbnail_pool);
     
     CloseWindow();
     
@@ -2411,9 +2474,10 @@ int main()
 }
 
 // searching feature
-    // clean PersistentConnection functions in main
-    // clean everything
+    // clean loading thumbnail functionality in main
+    // replace cjson walk-down with recursive search in parse function 
     // reccomendations
+    // clean everything
 
 // video playing function
     // show video information when double clicking video
@@ -2426,6 +2490,7 @@ int main()
 
 // after everythings done:
     // fonts for L.O.T.E.
+    // handle connecticity issues (no wifi on startup, changing connections, etc.)
     // handle cleanup when prematurley deleting
         // thumbnail data list
         // search arguements
