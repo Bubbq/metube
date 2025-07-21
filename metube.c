@@ -333,7 +333,8 @@ typedef enum
     NEW,
     APPENDING,
     TRENDING,
-} SearchType;
+    BROWSE,
+} QueryType;
 
 // represents user-defined parameters for a YouTube search request
 typedef struct
@@ -342,7 +343,7 @@ typedef struct
     char string[256];        
     MediaType media;          
     SortType sort;
-    SearchType search_type;    
+    QueryType type;    
 } Query;
 
 // holds raw thumbnail image data fetched from an HTTP request
@@ -876,7 +877,7 @@ int configure_get_header(const size_t n, char get_header[n], const char *host, c
     else return chars_written;
 }
 
-int configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_body_length)
+int configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const char* cookie, const size_t post_body_length)
 {
     return snprintf(post_header, n,
             "POST %s HTTP/1.1\r\n"
@@ -886,9 +887,10 @@ int configure_post_header(const size_t n, char post_header[n], const char *host,
             "Accept: application/json\r\n"
             "Content-Length: %zu\r\n"
             "Connection: keep-alive\r\n"
-            // "Connection: close\r\n"
+            "Cookie: %s\r\n"
             "\r\n",
-            path, host, post_body_length);
+            // "Connection: close\r\n"
+            path, host, post_body_length, cookie);
 }
 
 size_t configure_post_body(const size_t n, char post_body[n], const Query query, const char* continuation_token)
@@ -902,7 +904,7 @@ size_t configure_post_body(const size_t n, char post_body[n], const Query query,
                         "    }\n"
                         "  },\n");  
 
-    switch (query.search_type) {
+    switch (query.type) {
         case NEW: {
             char params[16];
             const char* sort_url = sort_type_to_url(query.sort);
@@ -910,8 +912,8 @@ size_t configure_post_body(const size_t n, char post_body[n], const Query query,
             snprintf(params, sizeof(params), "%s%s", sort_url, media_url);
 
             body_len += snprintf(post_body + body_len, n - body_len,
-                    "  \"params\": \"%s\",\n"
-                            "  \"query\": \"%s\"\n", params, query.string);
+                     "  \"params\": \"%s\",\n"
+                            "  \"query\": \"%s\",\n", params, query.string);
             break;
         }
 
@@ -923,6 +925,11 @@ size_t configure_post_body(const size_t n, char post_body[n], const Query query,
         case TRENDING: 
             body_len += snprintf(post_body + body_len, n - body_len,
                     "  \"browseId\": \"FEtrending\"\n");
+            break;
+
+        case BROWSE: 
+            body_len += snprintf(post_body + body_len, n - body_len,
+                    "  \"browseId\": \"FEwhat_to_watch\"\n");
             break;
     }
 
@@ -1202,7 +1209,7 @@ void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
 typedef struct
 {
     bool allow_youtube_shorts;
-    SearchType search_type;
+    QueryType query_type;
     PreparedRequest request;
     Results *search_results;
     RawThumbnailQueue *thumbnail_queue;
@@ -1218,7 +1225,7 @@ SearchThreadArgs* create_search_thread_args(const Query query, PreparedRequest r
     }
 
     search_thread_args->allow_youtube_shorts = query.allow_youtube_shorts;
-    search_thread_args->search_type = query.search_type;
+    search_thread_args->query_type = query.type;
     search_thread_args->request = request;
     search_thread_args->search_results = search_results;
     search_thread_args->thumbnail_queue = thumbnail_queue;
@@ -1249,7 +1256,7 @@ cJSON* find_object(cJSON* root, const char *key)
     return NULL;
 }
 
-void get_continuation_token(cJSON *json, const SearchType search_typ, const size_t n, char continuation_token[n])
+void get_continuation_token(cJSON *json, const size_t n, char continuation_token[n])
 {
     cJSON* continuationEndpoint = find_object(json, "continuationEndpoint");
     cJSON* continuationCommand = continuationEndpoint ? cJSON_GetObjectItem(continuationEndpoint, "continuationCommand") : NULL;
@@ -1620,9 +1627,9 @@ int create_results_from_json(cJSON* cjson, Results *results, const bool allow_yo
     return elements_added;
 }
 
-cJSON* find_search_result_container(cJSON* json, const SearchType search_type)
+cJSON* find_search_result_container(cJSON* json, const QueryType query_type)
 {
-    switch (search_type) {
+    switch (query_type) {
         case NEW:
         case APPENDING: {
             cJSON* itemSectionRenderer = find_object(json, "itemSectionRenderer");
@@ -1653,11 +1660,8 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    // char debug_filename[32];
-    // time_t t;
-    // time(&t);
-    // sprintf(debug_filename, "%s.json", ctime(&t));
-    // create_file_from_memory(debug_filename, http);
+    create_file_from_memory("header.json", response.header);
+    create_file_from_memory("body.json", response.body);
 
     cJSON* json = cJSON_Parse(response.body.data);
     if (json == NULL) {
@@ -1669,13 +1673,13 @@ void* get_results_from_query(void* args)
         return NULL;
     }
     
-    cJSON* result_root = find_search_result_container(json, targs->search_type);
+    cJSON* result_root = find_search_result_container(json, targs->query_type);
     
-    get_continuation_token(json, targs->search_type, sizeof(targs->search_results->continuation_token), targs->search_results->continuation_token);
+    get_continuation_token(json, sizeof(targs->search_results->continuation_token), targs->search_results->continuation_token);
 
     elements_added = create_results_from_json(result_root, targs->search_results, targs->allow_youtube_shorts);
     search_finished = true;
-    if (targs->search_type != APPENDING) {
+    if (targs->query_type != APPENDING) {
         delete_old_nodes = true;
     }
 
@@ -2242,8 +2246,7 @@ bool launch_task(TaskQueue* task_queue, void* targs, void* (*funct)(void*))
 }
 
 // reccomendations
-    // create new search type
-    // apply cookies in post header
+    // need to simulate logging videos (when pressed once?)
     // have to perisit (save in json)
     // handle renew if needed
     // handle logged in cookies
@@ -2295,7 +2298,7 @@ int main()
         .string = "",
         .media = ANY,
         .sort = BY_RELEVANCE,
-        .search_type = NEW,
+        .type = NEW,
     };
 
     // used in 'GuiTextBox' function
@@ -2352,15 +2355,26 @@ int main()
             }
 
             strncpy(last_search, query.string, sizeof(last_search) - 1);
-            
+
+            char* youtube_api_endpoint = NULL;
+            switch (query.type) {
+                case NEW: 
+                case APPENDING: 
+                    youtube_api_endpoint = "search";
+                    break;
+                case TRENDING:
+                case BROWSE:
+                    youtube_api_endpoint = "browse";
+                    break;
+            }
+
             char path[128] = {0};
-            const char *youtube_api_endpoint = (query.search_type == TRENDING) ? "browse" : "search";
             snprintf(path, sizeof(path), "/youtubei/v1/%s?key=%s", youtube_api_endpoint, internal_api_key);
             
             PreparedRequest post = {0};
 
             size_t body_len = configure_post_body(sizeof(post.body), post.body, query, results.continuation_token);
-                              configure_post_header(sizeof(post.header), post.header, youtube_pool.connections[youtube_pool.current_conn].host, path, body_len);
+                              configure_post_header(sizeof(post.header), post.header, youtube_pool.connections[youtube_pool.current_conn].host, path, cookies, body_len);
 
             SearchThreadArgs* targs = create_search_thread_args(query, post, &results, &thumbnail_queue, &youtube_pool.connections[youtube_pool.current_conn]);
             if (targs && (launch_task(&task_queue, targs, get_results_from_query) == false)) {
@@ -2385,18 +2399,6 @@ int main()
                 .width = 50, 
                 .height = 25
             };
-            
-            const Rectangle trending_button_bounds = {
-                .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
-                .y = ui.padding,
-                .width = 50,
-                .height = 25,
-            };
-
-            if (GuiButton(trending_button_bounds, "Trending")) {
-                search = search_finished;
-                query.search_type = TRENDING;
-            }
 
             // edit_mode toggles when search box is focused (T) or not (F)
             int text_box_status;
@@ -2414,8 +2416,32 @@ int main()
                 // load url encoded string into query 
                 if (query.string[0] != '\0') {
                     search = search_finished;
-                    query.search_type = NEW;
+                    query.type = NEW;
                 }
+            }
+
+            const Rectangle trending_button_bounds = {
+                .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
+                .y = ui.padding,
+                .width = 50,
+                .height = 25,
+            };
+
+            if (GuiButton(trending_button_bounds, "Trending")) {
+                search = search_finished;
+                query.type = TRENDING;
+            }
+
+            const Rectangle browse_button_bounds = {
+                .x = trending_button_bounds.x + trending_button_bounds.width + ui.padding,
+                .y = ui.padding,
+                .width = 50,
+                .height = 25,
+            };
+
+            if (GuiButton(browse_button_bounds, "Browse")) {
+                search = search_finished;
+                query.type = BROWSE;
             }
 
             const Rectangle filter_window_bounds = {
@@ -2442,7 +2468,7 @@ int main()
 
             if (GuiButton(load_more_button_bounds, "LOAD MORE")) {
                 search = search_finished;
-                query.search_type = APPENDING;
+                query.type = APPENDING;
             }
 
             GuiSetState(STATE_NORMAL);
@@ -2512,7 +2538,13 @@ int main()
 
                 if (CheckCollisionRecs(container, scissor_rect) == true) {
                     draw_search_result(search_result, thumbnail, container, container_color, ui);
-                }                
+                } 
+
+                if (CheckCollisionPointRec(GetMousePosition(), container) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    printf("pressed \"%s\"\n", search_result->title);
+
+
+                }               
             }
                 
             EndScissorMode();
@@ -2544,7 +2576,6 @@ int main()
 }
 
 // searching feature
-    // clean loading thumbnail functionality in main
     // replace cjson walk-down with recursive search in parse function 
     // reccomendations
     // clean everything
