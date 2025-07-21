@@ -1950,48 +1950,95 @@ void draw_filter_window(Query *query, const Rectangle container, const Font font
     }
 }
 
-void youtube_internal_api_key(PersistentConnection *youtube_connection, const size_t n, char key[n])
+void get_user_cookies(const char* header, const size_t n, char cookies[n])
 {
-    PreparedRequest request;
-    request.body[0] = '\0';
-    strcpy(request.path, "/");
-    configure_get_header(sizeof(request.header), request.header, youtube_connection->host, request.path);
+    if (header == NULL) return;
 
-    HTTPS_Response youtube_page = send_https_request(request, youtube_connection);
-    if (https_response_ready(&youtube_page) == false) {
-        printf("youtube_internal_api_key: page response is invalid\n");
-        return;
-    }
+    const char* cookie_tag = "Set-Cookie: ";
+    const size_t cookie_tag_len = strlen(cookie_tag);
 
-    const char *tag = "\"INNERTUBE_API_KEY\"";
-    char *tag_location = strstr(youtube_page.body.data, tag);
-    if (tag_location == NULL) {
-        printf("youtube_internal_api_key: \"%s\" not found\n", tag);
-        return;
-    }
-
-    bool in_key = false;
     int i = 0;
-    
-    for (char* current = tag_location + strlen(tag); current && (i < n); current++) {
+    char* current;
+    size_t offset = 0;
+
+    while ((current = strstr((header + offset), cookie_tag)) != NULL) {
+        current += cookie_tag_len;
+        offset = current - header + 1; 
+
+        if (i > 0) {
+            cookies[i++] = ' ';
+        }
+
+        for (; current && (i < n); current++) {
+            const char c = (*current);
+            cookies[i++] = c;
+
+            if (c == ';') {
+                break;
+            }
+        }
+
+        cookies[i] = '\0';
+    }
+}
+
+void get_internal_api_key(const char* body, const size_t n, char internal_api_key[n])
+{
+    if (body == NULL) return;
+
+    const char* tag = "\"INNERTUBE_API_KEY\"";
+    const size_t tag_len = strlen(tag);
+
+    char* location = strstr(body, tag);
+    if (location == NULL) {
+        printf("get_internal_api_key: \"%s\" not found\n", tag);
+        return;
+    }
+
+    int i = 0;
+    bool in_quotes = false;
+
+    for (char* current = location + tag_len; (current && (i < n)); current++) {
         const char c = *current;
 
-        if (!in_key) {
-            if (c == '"') 
-                in_key = true;
+        if (!in_quotes) {
+            if (c == '\"') 
+                in_quotes = true;
         }
         
-        else if (in_key) {
-            if (c == '"') 
+        else if (in_quotes) {
+            if (c == '\"') {
                 break;
-            else 
-                key[i++] = c;
+            }
+
+            internal_api_key[i++] = c;
         }
     }
 
-    key[i] = '\0';
+    internal_api_key[i] = '\0';
+}
 
-    free_https_response(&youtube_page);
+void parse_youtube_page(PersistentConnection *youtube_connection, const size_t n, char internal_api_key[n], const size_t m, char cookies[m])
+{
+    PreparedRequest request = {
+        .body = "",
+        .path = "/",
+    };
+
+    configure_get_header(sizeof(request.header), request.header, youtube_connection->host, request.path);
+
+    HTTPS_Response youtube_page_response = send_https_request(request, youtube_connection);
+    if (https_response_ready(&youtube_page_response) == false) {
+        memset(cookies, 0, m);
+        memset(internal_api_key, 0, n);
+        printf("parse_youtube_page: page response is invalid\n");
+        return;
+    }
+
+    get_user_cookies(youtube_page_response.header.data, m, cookies);
+    get_internal_api_key(youtube_page_response.body.data, n, internal_api_key);
+
+    free_https_response(&youtube_page_response);
 }
 
 void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, const Rectangle container, const Color color, const Ui ui)
@@ -2194,6 +2241,13 @@ bool launch_task(TaskQueue* task_queue, void* targs, void* (*funct)(void*))
     return true;
 }
 
+// reccomendations
+    // create new search type
+    // apply cookies in post header
+    // have to perisit (save in json)
+    // handle renew if needed
+    // handle logged in cookies
+
 int main()
 {
     SSL_library_init();
@@ -2224,10 +2278,12 @@ int main()
     const char* channel_host = media_type_to_host(CHANNEL);
     ConnectionPool channel_thumbnail_pool = init_connection_pool(channel_host);
 
+    char cookies[512];
     char internal_api_key[64];
-    youtube_internal_api_key(&youtube_pool.connections[youtube_pool.current_conn], sizeof(internal_api_key), internal_api_key);
+    parse_youtube_page(&youtube_pool.connections[youtube_pool.current_conn], sizeof(internal_api_key), internal_api_key, sizeof(cookies), cookies);
    
     printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
+    printf("COOKIES: \"%s\"\n", cookies);
 
     // when true, the application starts the search process
     bool search = false;
