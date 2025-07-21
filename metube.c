@@ -442,51 +442,41 @@ size_t ssl_read_line(SSL *ssl, char *buffer, const size_t n)
         printf("ssl_read_line: buffer is NULL\n");
         return 0;
     }
-    
-    const char *CRLF = "\r\n";
-    const size_t CRLF_len = strlen(CRLF);
 
     size_t pos = 0;
     char c;
 
     while (pos < n - 1) {
-        // read one char
         int byte = SSL_read(ssl, &c, 1);
         if (byte <= 0) {
             printf("ssl_read_line: SSL_read returned %d\n", byte);
             return 0;
         }
 
-        // add character to buffer
         buffer[pos++] = c;
 
-        // checking if we've reached end of line
-        if ((pos >= CRLF_len) && strstr(buffer, CRLF)) {
+        if (c == '\n') {
             break;
         }
     }
 
     buffer[pos] = '\0';
-    
+
     return pos;
 }
 
-size_t read_header(SSL *ssl, char *header, size_t n)
+Buffer ssl_read_header(SSL* ssl)
 {
-    size_t total_len = 0;
-    const char *header_end = "\r\n\r\n";
+    Buffer header = init_buffer();
 
-    while ((strstr(header, header_end) == NULL) && (total_len < n - 1)) {
-        const size_t len = ssl_read_line(ssl, (header + total_len), (n - total_len));
-        if (len == 0) {
-            printf("read_header: read_line returned 0 bytes read\n");
-            break;  
-        }
+    char line[1024] = {0};
+    
+    while(strcmp(line, "\r\n") != 0) {
+        const size_t len = ssl_read_line(ssl, line, sizeof(line));
+        write_data_to_buffer(&header, line, len);
+    }
 
-        total_len += len;
-    }   
-
-    return total_len;
+    return header;
 }
 
 // read n bytes from ssl stream into buffer
@@ -732,7 +722,33 @@ bool https_request_code_is_valid(const char* request_code)
     return (strcmp(request_code, "200") == 0); 
 }
 
-Buffer send_https_request(const PreparedRequest request, PersistentConnection *connection)
+typedef struct
+{
+    Buffer header;
+    Buffer body;
+} HTTPS_Response;
+
+HTTPS_Response create_https_response()
+{
+    HTTPS_Response response;
+    response.header = response.body = init_buffer();
+    return response;
+}
+
+void free_https_response(HTTPS_Response* response)
+{
+    if (response == NULL) return;
+    free_buffer(&response->header);
+    free_buffer(&response->body);
+}
+
+bool https_response_ready(HTTPS_Response* response)
+{
+    if (response == NULL) return false;
+    return buffer_ready(&response->header) && buffer_ready(&response->body);
+}
+
+HTTPS_Response send_https_request(const PreparedRequest request, PersistentConnection *connection)
 {
     pthread_mutex_lock(&connection->mutex);
 
@@ -740,7 +756,7 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
         printf("send_https_request: not connected to the wifi\n");
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (Buffer){0};
+        return (HTTPS_Response){0};
     }
 
     if (connection->connected == false) {
@@ -748,7 +764,7 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
         if (connection->connected == false) {
             printf("send_https_request: failed to establish connection\n");
             pthread_mutex_unlock(&connection->mutex);
-            return (Buffer){0};
+            return (HTTPS_Response){0};
         }
     }
 
@@ -764,7 +780,7 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
         printf("send_https_request: SSL_write (header) failed, returned %d\n", header_write_status);
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (Buffer){0};
+        return (HTTPS_Response){0};
     } 
 
     if (request.body[0] != '\0') {
@@ -773,46 +789,44 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
             printf("send_https_request: SSL_write (body) failed, returned %d\n", body_write_status);
             connection->connected = false;
             pthread_mutex_unlock(&connection->mutex);
-            return (Buffer){0};
+            return (HTTPS_Response){0};
         }
     }
 
-    char header[4096] = {0};
-    size_t header_len = read_header(connection->ssl, header, sizeof(header));
-    header[header_len] = '\0';
-    if (header_len == 0) {
+    HTTPS_Response response = create_https_response();
+
+    response.header = ssl_read_header(connection->ssl);
+    if (buffer_ready(&response.header) == false) {
         printf("send_https_request: failed to read header from ssl stream\n");
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (Buffer){0};
+        return (HTTPS_Response){0};
     }
 
     char https_request_code[4];
-    get_https_request_code(header, sizeof(https_request_code), https_request_code);
+    get_https_request_code(response.header.data, sizeof(https_request_code), https_request_code);
     if (https_request_code_is_valid(https_request_code) == false) {
         printf("send_https_request: invalid https request code (%s)\n", https_request_code);
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (Buffer){0};
+        return (HTTPS_Response){0};
     }
 
-    Buffer response = init_buffer();
-
-    if (header_contains_tag(header, "Content-Length:")) {
-        size_t content_length = get_content_len_from_header(header);
+    if (header_contains_tag(response.header.data, "Content-Length:")) {
+        size_t content_length = get_content_len_from_header(response.header.data);
         if (content_length > 0) {
-            ssl_read_n(connection->ssl, &response, content_length);
+            ssl_read_n(connection->ssl, &response.body, content_length);
         }
 
         else {
             printf("send_https_request: invalid content length read from header\n");
             connection->connected = false;
             pthread_mutex_unlock(&connection->mutex);
-            return (Buffer){0};
+            return (HTTPS_Response){0};
         }
     }
 
-    else if (header_contains_tag(header, "Transfer-Encoding: chunked")) {
+    else if (header_contains_tag(response.header.data, "Transfer-Encoding: chunked")) {
         const char *crlf = "\r\n";
         const size_t crlf_len = strlen(crlf);
         
@@ -824,13 +838,13 @@ Buffer send_https_request(const PreparedRequest request, PersistentConnection *c
                 printf("send_https_request: failed to read chunk size\n");
                 connection->connected = false;
                 pthread_mutex_unlock(&connection->mutex);
-                return (Buffer){0};
+                return (HTTPS_Response){0};
             }
 
             hex[len - crlf_len] = '\0';
 
             chunk_size = strtol(hex, NULL, 16);
-            ssl_read_n(connection->ssl, &response, chunk_size);
+            ssl_read_n(connection->ssl, &response.body, chunk_size);
 
             char trailing_crlf[16];
             ssl_read_line(connection->ssl, trailing_crlf, sizeof(trailing_crlf));
@@ -1048,8 +1062,8 @@ void* load_thumbnail(void *args)
 {
     LoadThumbnailArgs *targs = (LoadThumbnailArgs*) args;
     
-    Buffer thumbnail_buffer = send_https_request(targs->request, targs->connection);
-    if (buffer_ready(&thumbnail_buffer) == false) {
+    HTTPS_Response thumbnail_response = send_https_request(targs->request, targs->connection);
+    if (https_response_ready(&thumbnail_response) == false) {
         printf("load_thumbnail: send_http_request returned invalid buffer\n");
         free(targs);
         return NULL;
@@ -1062,13 +1076,14 @@ void* load_thumbnail(void *args)
         return NULL;
     }
 
-    thumbnail_data->data = thumbnail_buffer;
+    thumbnail_data->data = thumbnail_response.body;
     strcpy(thumbnail_data->search_result_id, targs->search_result_id);
 
     pthread_mutex_lock(&targs->thumbnail_queue->mutex);
     enqueue_thumbnail(targs->thumbnail_queue, thumbnail_data);
     pthread_mutex_unlock(&targs->thumbnail_queue->mutex);
 
+    free_buffer(&thumbnail_response.header);
     free(targs);
     return NULL;
 }
@@ -1630,9 +1645,8 @@ void* get_results_from_query(void* args)
     SearchThreadArgs* targs = (SearchThreadArgs*)args;
     float start_time = GetTime(), end_time; // preformance check
 
-    Buffer http = send_https_request(targs->request, targs->youtube_connection);
-    bool application_is_offline = (buffer_ready(&http) == false);
-    if (application_is_offline) {
+    HTTPS_Response response = send_https_request(targs->request, targs->youtube_connection);
+    if (https_response_ready(&response) == false) {
         SetWindowTitle("[offline] - metube");
         free(targs);
         search_finished = true;
@@ -1645,11 +1659,11 @@ void* get_results_from_query(void* args)
     // sprintf(debug_filename, "%s.json", ctime(&t));
     // create_file_from_memory(debug_filename, http);
 
-    cJSON* json = cJSON_Parse(http.data);
+    cJSON* json = cJSON_Parse(response.body.data);
     if (json == NULL) {
         printf("get_results_from_query: cJSON_Parse returned NULL\n");
         SetWindowTitle("[offline] - metube");
-        free_buffer(&http);
+        free_https_response(&response);
         free(targs);
         search_finished = true;
         return NULL;
@@ -1673,7 +1687,7 @@ void* get_results_from_query(void* args)
     SetWindowTitle(app_title);
 
     cJSON_Delete(json);
-    free_buffer(&http);
+    free_https_response(&response);
     free(targs);
     return NULL;
 }
@@ -1943,14 +1957,14 @@ void youtube_internal_api_key(PersistentConnection *youtube_connection, const si
     strcpy(request.path, "/");
     configure_get_header(sizeof(request.header), request.header, youtube_connection->host, request.path);
 
-    Buffer youtube_page = send_https_request(request, youtube_connection);
-    if (buffer_ready(&youtube_page) == false) {
+    HTTPS_Response youtube_page = send_https_request(request, youtube_connection);
+    if (https_response_ready(&youtube_page) == false) {
         printf("youtube_internal_api_key: page response is invalid\n");
         return;
     }
 
     const char *tag = "\"INNERTUBE_API_KEY\"";
-    char *tag_location = strstr(youtube_page.data, tag);
+    char *tag_location = strstr(youtube_page.body.data, tag);
     if (tag_location == NULL) {
         printf("youtube_internal_api_key: \"%s\" not found\n", tag);
         return;
@@ -1977,7 +1991,7 @@ void youtube_internal_api_key(PersistentConnection *youtube_connection, const si
 
     key[i] = '\0';
 
-    free_buffer(&youtube_page);
+    free_https_response(&youtube_page);
 }
 
 void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, const Rectangle container, const Color color, const Ui ui)
