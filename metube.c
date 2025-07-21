@@ -336,6 +336,31 @@ typedef enum
     BROWSE,
 } QueryType;
 
+const char* query_type_to_endpoint(const QueryType query_type)
+{
+    switch (query_type) {
+        case NEW: 
+        case APPENDING: return "search";
+        case TRENDING:
+        case BROWSE: return "browse";
+        default: 
+            printf("query_type_to_endpoint: invalid query type\n");
+            return NULL;
+    }
+}
+
+bool configure_youtube_internal_api_path(const size_t n, char path[n], const QueryType query_type, const char* api_key)
+{
+    const char* endpoint = query_type_to_endpoint(query_type);
+    if (endpoint && api_key) {
+        return snprintf(path, n, "/youtubei/v1/%s?key=%s", endpoint, api_key);
+    }
+
+    printf("configure_youtube_internal_api_path: path could not be created\n");
+
+    return false;
+}
+
 // represents user-defined parameters for a YouTube search request
 typedef struct
 {
@@ -769,13 +794,6 @@ HTTPS_Response send_https_request(const PreparedRequest request, PersistentConne
         }
     }
 
-    // connection->connected = establish_connection(connection);
-    // if (connection->connected == false) {
-    //     printf("send_https_request: failed connection attempt\n");
-    //     pthread_mutex_unlock(&connection->mutex);
-    //     return (Buffer){0};
-    // }
-
     int header_write_status = SSL_write(connection->ssl, request.header, strlen(request.header));
     if (header_write_status <= 0) {
         printf("send_https_request: SSL_write (header) failed, returned %d\n", header_write_status);
@@ -889,7 +907,6 @@ int configure_post_header(const size_t n, char post_header[n], const char *host,
             "Connection: keep-alive\r\n"
             "Cookie: %s\r\n"
             "\r\n",
-            // "Connection: close\r\n"
             path, host, post_body_length, cookie);
 }
 
@@ -1660,9 +1677,6 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    create_file_from_memory("header.json", response.header);
-    create_file_from_memory("body.json", response.body);
-
     cJSON* json = cJSON_Parse(response.body.data);
     if (json == NULL) {
         printf("get_results_from_query: cJSON_Parse returned NULL\n");
@@ -2246,7 +2260,7 @@ bool launch_task(TaskQueue* task_queue, void* targs, void* (*funct)(void*))
 }
 
 // reccomendations
-    // need to simulate logging videos (when pressed once?)
+    // need to simulate logging videos (when pressed once and log event)
     // have to perisit (save in json)
     // handle renew if needed
     // handle logged in cookies
@@ -2356,26 +2370,16 @@ int main()
 
             strncpy(last_search, query.string, sizeof(last_search) - 1);
 
-            char* youtube_api_endpoint = NULL;
-            switch (query.type) {
-                case NEW: 
-                case APPENDING: 
-                    youtube_api_endpoint = "search";
-                    break;
-                case TRENDING:
-                case BROWSE:
-                    youtube_api_endpoint = "browse";
-                    break;
+            char path[128] = {0};
+            if (configure_youtube_internal_api_path(sizeof(path), path, query.type, internal_api_key) == false) {
+                return 1;
             }
 
-            char path[128] = {0};
-            snprintf(path, sizeof(path), "/youtubei/v1/%s?key=%s", youtube_api_endpoint, internal_api_key);
-            
             PreparedRequest post = {0};
 
             size_t body_len = configure_post_body(sizeof(post.body), post.body, query, results.continuation_token);
                               configure_post_header(sizeof(post.header), post.header, youtube_pool.connections[youtube_pool.current_conn].host, path, cookies, body_len);
-
+            
             SearchThreadArgs* targs = create_search_thread_args(query, post, &results, &thumbnail_queue, &youtube_pool.connections[youtube_pool.current_conn]);
             if (targs && (launch_task(&task_queue, targs, get_results_from_query) == false)) {
                 free(targs);
@@ -2538,13 +2542,7 @@ int main()
 
                 if (CheckCollisionRecs(container, scissor_rect) == true) {
                     draw_search_result(search_result, thumbnail, container, container_color, ui);
-                } 
-
-                if (CheckCollisionPointRec(GetMousePosition(), container) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    printf("pressed \"%s\"\n", search_result->title);
-
-
-                }               
+                }              
             }
                 
             EndScissorMode();
