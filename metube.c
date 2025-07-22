@@ -880,10 +880,8 @@ int configure_get_header(const size_t n, char get_header[n], const char *host, c
     int chars_written = snprintf(get_header, n,
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
-        // "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-        "User-Agent: CustomClient/1.0\r\n"
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
         "Connection: keep-alive\r\n"
-        // "Connection: close\r\n"
         "\r\n",
         path, host);
 
@@ -895,7 +893,7 @@ int configure_get_header(const size_t n, char get_header[n], const char *host, c
     else return chars_written;
 }
 
-int configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const char* cookie, const size_t post_body_length)
+int configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_body_length)
 {
     return snprintf(post_header, n,
             "POST %s HTTP/1.1\r\n"
@@ -905,9 +903,8 @@ int configure_post_header(const size_t n, char post_header[n], const char *host,
             "Accept: application/json\r\n"
             "Content-Length: %zu\r\n"
             "Connection: keep-alive\r\n"
-            "Cookie: %s\r\n"
             "\r\n",
-            path, host, post_body_length, cookie);
+            path, host, post_body_length);
 }
 
 size_t configure_post_body(const size_t n, char post_body[n], const Query query, const char* continuation_token)
@@ -1677,6 +1674,9 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
+    create_file_from_memory("header.txt", response.header);
+    create_file_from_memory("body.json", response.body);
+
     cJSON* json = cJSON_Parse(response.body.data);
     if (json == NULL) {
         printf("get_results_from_query: cJSON_Parse returned NULL\n");
@@ -1968,38 +1968,6 @@ void draw_filter_window(Query *query, const Rectangle container, const Font font
     }
 }
 
-void get_user_cookies(const char* header, const size_t n, char cookies[n])
-{
-    if (header == NULL) return;
-
-    const char* cookie_tag = "Set-Cookie: ";
-    const size_t cookie_tag_len = strlen(cookie_tag);
-
-    int i = 0;
-    char* current;
-    size_t offset = 0;
-
-    while ((current = strstr((header + offset), cookie_tag)) != NULL) {
-        current += cookie_tag_len;
-        offset = current - header + 1; 
-
-        if (i > 0) {
-            cookies[i++] = ' ';
-        }
-
-        for (; current && (i < n); current++) {
-            const char c = (*current);
-            cookies[i++] = c;
-
-            if (c == ';') {
-                break;
-            }
-        }
-
-        cookies[i] = '\0';
-    }
-}
-
 void get_internal_api_key(const char* body, const size_t n, char internal_api_key[n])
 {
     if (body == NULL) return;
@@ -2036,24 +2004,23 @@ void get_internal_api_key(const char* body, const size_t n, char internal_api_ke
     internal_api_key[i] = '\0';
 }
 
-void parse_youtube_page(PersistentConnection *youtube_connection, const size_t n, char internal_api_key[n], const size_t m, char cookies[m])
+void parse_youtube_page(PersistentConnection *youtube_connection, const size_t n, char internal_api_key[n])
 {
     PreparedRequest request = {
         .body = "",
         .path = "/",
+        .header = "",
     };
 
     configure_get_header(sizeof(request.header), request.header, youtube_connection->host, request.path);
 
     HTTPS_Response youtube_page_response = send_https_request(request, youtube_connection);
     if (https_response_ready(&youtube_page_response) == false) {
-        memset(cookies, 0, m);
         memset(internal_api_key, 0, n);
         printf("parse_youtube_page: page response is invalid\n");
         return;
     }
 
-    get_user_cookies(youtube_page_response.header.data, m, cookies);
     get_internal_api_key(youtube_page_response.body.data, n, internal_api_key);
 
     free_https_response(&youtube_page_response);
@@ -2295,12 +2262,10 @@ int main()
     const char* channel_host = media_type_to_host(CHANNEL);
     ConnectionPool channel_thumbnail_pool = init_connection_pool(channel_host);
 
-    char cookies[512];
     char internal_api_key[64];
-    parse_youtube_page(&youtube_pool.connections[youtube_pool.current_conn], sizeof(internal_api_key), internal_api_key, sizeof(cookies), cookies);
+    parse_youtube_page(&youtube_pool.connections[youtube_pool.current_conn], sizeof(internal_api_key), internal_api_key);
    
     printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
-    printf("COOKIES: \"%s\"\n", cookies);
 
     // when true, the application starts the search process
     bool search = false;
@@ -2378,7 +2343,7 @@ int main()
             PreparedRequest post = {0};
 
             size_t body_len = configure_post_body(sizeof(post.body), post.body, query, results.continuation_token);
-                              configure_post_header(sizeof(post.header), post.header, youtube_pool.connections[youtube_pool.current_conn].host, path, cookies, body_len);
+                              configure_post_header(sizeof(post.header), post.header, youtube_pool.connections[youtube_pool.current_conn].host, path, body_len);
             
             SearchThreadArgs* targs = create_search_thread_args(query, post, &results, &thumbnail_queue, &youtube_pool.connections[youtube_pool.current_conn]);
             if (targs && (launch_task(&task_queue, targs, get_results_from_query) == false)) {

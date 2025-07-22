@@ -1,5 +1,4 @@
 all:
-	gcc metube.c -lssl -lcrypto -lcjson -I raylib/src/ raylib/src/libraylib.a -lm -Wall -o metube
+	gcc cookie_test.c -lssl -lcrypto -lcjson -I raylib/src/ raylib/src/libraylib.a -lm -Wall -o metube
 clean:
-	rm *.json
 	rm metube
