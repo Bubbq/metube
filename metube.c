@@ -1,3 +1,4 @@
+#include <math.h>
 #include <time.h>
 #include <ctype.h>
 #include <netdb.h>
@@ -1874,7 +1875,7 @@ void DrawTextBoxed(const char *text, Rectangle rec, Ui ui, float fontSize, Color
 
 Rectangle padded_rectangle(const float padding, const Rectangle rect)
 {
-    return (Rectangle) { rect.x + padding, rect.y + padding, rect.width - padding, rect.height - (padding * 2) };
+    return (Rectangle) { rect.x + padding, rect.y + padding, rect.width - (padding * 2), rect.height - (padding * 2) };
 }
 
 void draw_thumbnail_subtext(const Rectangle container, Ui ui, const Color text_color, const int font_size, const char* text)
@@ -2211,38 +2212,85 @@ bool launch_task(TaskQueue* task_queue, void* targs, void* (*funct)(void*))
     return true;
 }
 
-void draw_video_desc(const Rectangle container, const Ui ui, Vector2* scrollbar_position, char* video_desc)
+int anticipate_lines_wordwrap(Font font, const char* text, float fontSize, float spacing, float maxWidth)
+{
+    if (!text) return 0;
+
+    int lines = 1;
+    float line_width = 0.0f;
+
+    const char* word_start = text;
+    while (*word_start) {
+        if (*word_start == '\n') {
+            lines++;
+            line_width = 0;
+            word_start++;
+            continue;
+        }
+
+        const char* word_end = word_start;
+        while (*word_end && *word_end != ' ' && *word_end != '\n') word_end++;
+
+        int word_len = word_end - word_start;
+        char word_buf[256];
+        strncpy(word_buf, word_start, word_len);
+        word_buf[word_len] = '\0';
+
+        Vector2 size = MeasureTextEx(font, word_buf, fontSize, spacing);
+
+        if (line_width + size.x > maxWidth) {
+            lines++;
+            line_width = 0;
+        }
+
+        line_width += size.x;
+
+        if (*word_end == ' ') {
+            Vector2 space_size = MeasureTextEx(font, " ", fontSize, spacing);
+            line_width += space_size.x;
+            word_end++;
+        }
+
+        word_start = word_end;
+    }
+
+    return lines;
+}
+
+void draw_video_desc(const Rectangle container, Ui ui, Vector2* scrollbar_position, char* video_desc)
 {
     const Color text_color = BLACK;
     const int SCROLLBAR_WIDTH = 13;
     const int font_size = 12;
     const int spacing = 2;
 
-    // HACK: single lines dont print, so I just added an extra line
-    const float text_height = font_size + MeasureTextEx(ui.font, video_desc, font_size, spacing).y;
-
-    const Rectangle scroll_content_area = {
-        .x = container.x,
-        .y = container.y + (container.height * 0.25),
-        .width = container.width,
-        .height = text_height,
-    };
-
     const Rectangle scroll_window_area = {
         .x = container.x,
-        .y = container.y + (container.height * 0.25),
-        .width = container.width + SCROLLBAR_WIDTH, 
-        .height = (container.height * 0.75),
+        .y = container.y + (container.height * 0.25f),
+        .width = container.width + SCROLLBAR_WIDTH,
+        .height = container.height * 0.75f,
     };
 
-    const bool vertical_scrollbar_present = scroll_content_area.height > scroll_window_area.height;
+    const float padded_width = container.width - ui.padding - ui.padding;
+    
+    const float line_height = font_size + spacing;
+    const int nlines = anticipate_lines_wordwrap(ui.font, video_desc, font_size, spacing, padded_width);
+    
+    const float text_height = line_height * nlines;
+    
+    const Rectangle scroll_content_area = {
+        .x = scroll_window_area.x,
+        .y = scroll_window_area.y,
+        .width = scroll_window_area.width,
+        .height = fmaxf(text_height, scroll_window_area.height - 1),
+    };
 
     GuiScrollPanel(scroll_window_area, NULL, scroll_content_area, scrollbar_position, NULL);
 
     const Rectangle video_desc_bounds = {
         .x = scroll_content_area.x,
         .y = scroll_content_area.y + scrollbar_position->y,
-        .width = scroll_content_area.width - (vertical_scrollbar_present ? SCROLLBAR_WIDTH : 0),
+        .width = scroll_content_area.width,
         .height = scroll_content_area.height,
     };
 
@@ -2465,6 +2513,12 @@ void draw_results_window(const Rectangle window, const Ui ui, Vector2* scrollbar
 
     EndScissorMode();
 }
+
+// get thumbnail frames from video click
+// related videos button availible after focusing vide
+
+// handle channel click
+// handle playlist click
 
 int main()
 {
