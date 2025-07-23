@@ -968,54 +968,26 @@ size_t configure_post_body(const size_t n, char post_body[n], const Query query,
     return body_len + 1;
 }
 
-void remove_leading_whitespace(char *string)
+size_t trim_whitespace(char* string)
 {
-    if (!string) {
-        printf("remove_trailing_whitespace: string is NULL\n");
-        return;
+    if ((string == NULL) || (string[0] == '\0')) return 0;
+    
+    char* start = string;
+    while (isspace((unsigned char) *start)) {
+        start++;
     }
 
-    size_t n = strlen(string);
-    if (n == 0) {
-        printf("remove_trailing_whitespace: string is empty\n");
-        return;
+    char* end = string + strlen(string) - 1;
+    while (isspace((unsigned char) *end)) {
+        end--;
     }
 
-    // move ptr to the first nonwhitespace character
-    char *ptr = string;
-    while (ptr && isspace((unsigned char)*ptr)) {
-        ptr++;
-    }
+    size_t len = end < start ? 0 : end - start + 1;
+    memmove(string, start, len);
+    
+    string[len] = '\0';
 
-    // write elements over leading whitespace
-    if (*ptr != '\0') {
-        memmove(string, ptr, n + 1);
-    }
-
-    else *string = '\0';
-}
-
-void remove_trailing_whitespace(char *string)
-{
-    if (!string) {
-        printf("remove_trailing_whitespace: string is NULL\n");
-        return;
-    }
-
-    size_t n = strlen(string);
-    if (n == 0) {
-        printf("remove_trailing_whitespace: string is empty\n");
-        return;
-    }
-
-    // move ptr to last nonwhitespace char
-    char *last_char = string + n - 1;
-    while (last_char && isspace((unsigned char)*last_char)) {
-        last_char--;
-    }
-
-    // end the string at the next whitespace
-    *(last_char + 1) = '\0';
+    return len;
 }
 
 void format_view_count(char* view_count)
@@ -2629,12 +2601,7 @@ int main()
             bool enter_key_pressed = text_box_status == 2;
 
             if (GuiButton(search_button_bounds, "Search") || enter_key_pressed) {
-                // sanitize query
-                remove_leading_whitespace(query.string);
-                remove_trailing_whitespace(query.string);
-
-                // load url encoded string into query 
-                if (query.string[0] != '\0') {
+                if (trim_whitespace(query.string) > 0) {
                     search = search_finished;
                     query.type = NEW;
                 }
