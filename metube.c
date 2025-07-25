@@ -222,7 +222,7 @@ typedef struct SearchResult
     char id[64];                // used to identify the availible media types                 
     char title[256];            // name of the content           
     char author[128];           // creator of video, livestream or playlist         
-    char subscriber_count[16];  // X.XX k/M/B formatted   
+    char subscriber_count[32];  // X.XX k/M/B formatted   
     char view_count[16];        // ^         
     char date_published[32];    // 'X years/months/weeks/seconds ago'    
     char duration[16];          // HH:MM:SS formatted           
@@ -504,7 +504,17 @@ Buffer ssl_read_header(SSL* ssl)
     char line[1024] = {0};
     
     while(strcmp(line, "\r\n") != 0) {
-        const size_t len = ssl_read_line(ssl, line, sizeof(line));
+        size_t len;
+        if ((len = ssl_read_line(ssl, line, sizeof(line))) < 0) {
+            printf("ssl_read_header: failed\n");
+            
+            if (buffer_ready(&header)) {
+                free_buffer(&header);
+            }
+
+            return init_buffer();
+        }
+
         write_data_to_buffer(&header, line, len);
     }
 
@@ -1222,85 +1232,128 @@ SearchThreadArgs* create_search_thread_args(const Query query, PreparedRequest r
     return search_thread_args;
 }
 
-cJSON* find_object(cJSON* root, const char *key)
+bool valid_cjson_string(const cJSON* json_str)
 {
-    if ((root == NULL) || (key == NULL)) {
-        return NULL;
+    return (json_str) && (cJSON_IsString(json_str)) && (json_str->valuestring[0] != '\0');
+}
+
+bool string_is_integer(const char *s)
+{
+    if (s == NULL || *s == '\0') return false;
+
+    if (*s == '-' || *s == '+') s++;
+
+    if (*s == '\0') return false;
+
+    while (*s) {
+        if (!isdigit((unsigned char)*s)) return false;
+        s++;
     }
 
-    else if (root->string && (strcmp(root->string, key) == 0)) {
-        return root;
-    }
+    return true;
+}
 
-    if ((root->type == cJSON_Object) || (root->type == cJSON_Array)) {
-        for (cJSON* child = root->child; child; child = child->next) {
-            cJSON* found = find_object(child, key);
-            if (found) {
-                return found;
-            }
+cJSON* cjson_pointer_get(cJSON* root, const char* path)
+{
+    if (root == NULL || path == NULL) return NULL;
+
+    int n = 0;
+    const char** elements = TextSplit(path, '/', &n); 
+
+    cJSON* ret = root;
+
+    for(int i = 0; (ret && i < n); i++) {
+        if (elements[i][0] == '\0') {
+            continue;
         }
+
+        if (string_is_integer(elements[i])) {
+            if (cJSON_IsArray(ret)) {
+                const int index = atoi(elements[i]);
+                if ((index >= 0) && (index < cJSON_GetArraySize(ret))) {
+                    ret = cJSON_GetArrayItem(ret, index);
+                }
+
+                else return NULL;
+            }
+
+            else return NULL;
+        }
+
+        else ret = cJSON_GetObjectItem(ret, elements[i]);
     }
 
-    return NULL;
+    return ret;
 }
 
-void get_continuation_token(cJSON *json, const size_t n, char continuation_token[n])
+int get_continuation_token_from_query_type(const QueryType type, cJSON* root, const size_t n, char token[n])
 {
-    cJSON* continuationEndpoint = find_object(json, "continuationEndpoint");
-    cJSON* continuationCommand = continuationEndpoint ? cJSON_GetObjectItem(continuationEndpoint, "continuationCommand") : NULL;
-    cJSON* token = continuationCommand ? cJSON_GetObjectItem(continuationCommand, "token") : NULL;
-    
-    if ((token == NULL) || (cJSON_IsString(token) == false)) {
-        printf("get_continuation_token: failed to extract token\n");
-        memset(continuation_token, 0, n);
-        return;
+    char* token_path = NULL;
+
+    if (type == NEW) {
+        token_path = "/contents"
+                     "/twoColumnSearchResultsRenderer"
+                     "/primaryContents"
+                     "/sectionListRenderer"
+                     "/contents"
+                     "/1"
+                     "/continuationItemRenderer"
+                     "/continuationEndpoint"
+                     "/continuationCommand"
+                     "/token";
     }
 
-    strncpy(continuation_token, token->valuestring, n - 1);
-}
+    else if (type == APPENDING) 
+    {
+        token_path = "/onResponseReceivedCommands"
+                     "/0"
+                     "/appendContinuationItemsAction"
+                     "/continuationItems"
+                     "/1"
+                     "/continuationItemRenderer"
+                     "/continuationEndpoint"
+                     "/continuationCommand"
+                     "/token";
+    }
+
+    const cJSON* token_tag = cjson_pointer_get(root, token_path);
+    if (valid_cjson_string(token_tag) == false) {
+        printf("get_continuation_token_from_query_type: failed\n");
+        return 0;
+    }
+
+    return snprintf(token, n, "%s", token_tag->valuestring);
+} 
 
 static int elements_added = 0; 
 static bool delete_old_nodes = false;
 static bool search_finished = true;
 
-bool video_is_youtube_short(const cJSON *videoRenderer) 
+bool video_is_youtube_short(cJSON *videoRenderer) 
 {
-    cJSON *navigationEndpoint = cJSON_GetObjectItem(videoRenderer, "navigationEndpoint");
-    cJSON *commandMetadata = navigationEndpoint ? cJSON_GetObjectItem(navigationEndpoint, "commandMetadata") : NULL;
-    cJSON *webCommandMetadata = commandMetadata ? cJSON_GetObjectItem(commandMetadata, "webCommandMetadata") : NULL;
-    cJSON *url = webCommandMetadata ? cJSON_GetObjectItem(webCommandMetadata, "url") : NULL;
-    if (url && cJSON_IsString(url)) {
+    const char* path = "/navigationEndpoint/commandMetadata/webCommandMetadata/url";
+    const cJSON* url = cjson_pointer_get(videoRenderer, path); 
+    if (valid_cjson_string(url)) {
         return strstr(url->valuestring, "/shorts");
     }
 
     return false;
 }
 
-bool video_is_live(const cJSON* videoRenderer)
+bool video_is_live(cJSON* videoRenderer)
 {
-    cJSON *badges = videoRenderer ? cJSON_GetObjectItem(videoRenderer, "badges") : NULL;
-    cJSON *arrayItem = (badges && cJSON_IsArray(badges)) ? cJSON_GetArrayItem(badges, 0) : NULL;
-    cJSON *metadataBadgeRenderer = arrayItem ? cJSON_GetObjectItem(arrayItem, "metadataBadgeRenderer") : NULL;
-    cJSON *label = metadataBadgeRenderer ? cJSON_GetObjectItem(metadataBadgeRenderer, "label") : NULL;
-    if (label && cJSON_IsString(label)) {
-        return strcmp("LIVE", label->valuestring) == 0;
+    const char* path = "/badges/0/metadataBadgeRenderer/label";
+    const cJSON* label = cjson_pointer_get(videoRenderer, path);
+    if (valid_cjson_string(label)) {
+        return (strcmp("LIVE", label->valuestring) == 0);
     }
 
     return false;
 }
 
-void parse_video_from_json(const cJSON* videoRenderer, const bool allow_youtube_shorts, SearchResult* video)
+void parse_video_from_json(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchResult* video)
 {
-    if (video == NULL) {
-        printf("parse_video_from_json: 'video' is NULL\n");
-        return;
-    }
-
-    else if (videoRenderer == NULL) {
-        printf("parse_video_from_json: 'videoRenderer' is NULL\n");
-        video->media_type = UNDF;
-        return;
-    }
+    if ((videoRenderer == NULL) || (video == NULL)) return;
 
     video->media_type = VIDEO;
 
@@ -1313,266 +1366,126 @@ void parse_video_from_json(const cJSON* videoRenderer, const bool allow_youtube_
         video->media_type = SHORT;
     }
 
-    // ID
-    cJSON *videoId = cJSON_GetObjectItem(videoRenderer, "videoId");
-    if (videoId && videoId->valuestring && videoId->valuestring[0] != '\0') {
-        strncpy(video->id, videoId->valuestring, sizeof(video->id) - 1);
-    }
+    const cJSON* videoId = cjson_pointer_get(videoRenderer, "/videoId");
+    if (valid_cjson_string(videoId)) {
+        snprintf(video->id, sizeof(video->id), "%s", videoId->valuestring);
+        snprintf(video->thumbnail_path, sizeof(video->thumbnail_path), "/vi/%s/mqdefault.jpg", videoId->valuestring);
+    } 
 
     else {
-        printf("parse_video_from_json: failed to parse video id\n");
+        printf("parse_video_from_json: no video id\n");
         video->media_type = UNDF;
         return;
     }
 
-    const char *default_value = "(null)";
-
-    // TITLE
-    cJSON *title = cJSON_GetObjectItem(videoRenderer, "title");
-    cJSON* runs = title ? cJSON_GetObjectItem(title, "runs") : NULL;
-    cJSON *arrayItem = (runs && cJSON_IsArray(runs)) ? cJSON_GetArrayItem(runs, 0) : NULL;
-    cJSON *text = arrayItem ? cJSON_GetObjectItem(arrayItem, "text") : NULL;
-    if (text && cJSON_IsString(text)) {
-        strncpy(video->title, text->valuestring, sizeof(video->title) - 1);
+    const cJSON* titleText = cjson_pointer_get(videoRenderer, "/title/runs/0/text");
+    if (valid_cjson_string(titleText)) {
+        snprintf(video->title, sizeof(video->title), "%s", titleText->valuestring);
     }
 
-    else {
-        printf("parse_video_from_json: failed to parse title\n");
-        strncpy(video->title, default_value, sizeof(video->title) - 1);
+    const cJSON* authorText = cjson_pointer_get(videoRenderer, "/ownerText/runs/0/text");
+    if (valid_cjson_string(authorText)) {
+        snprintf(video->author, sizeof(video->author), "%s", authorText->valuestring);
     }
-
-    // THUMBNAIL PATH
-    snprintf(video->thumbnail_path, sizeof(video->thumbnail_path), "/vi/%s/mqdefault.jpg", video->id);
-
-    // AUTHOR
-    cJSON *ownerText = cJSON_GetObjectItem(videoRenderer, "ownerText");
-    runs = ownerText ? cJSON_GetObjectItem(ownerText, "runs") : NULL;
-    arrayItem = (runs && cJSON_IsArray(runs)) ? cJSON_GetArrayItem(runs, 0) : NULL;
-    text = arrayItem ? cJSON_GetObjectItem(arrayItem, "text") : NULL;
-    if (text && cJSON_IsString(text)) {
-        strncpy(video->author, text->valuestring, sizeof(video->author) - 1);
-    }
-
-    else {
-        printf("parse_video_from_json: failed to parse author\n");
-        strncpy(video->author, default_value, sizeof(video->author) - 1);
-    }
-
-    cJSON *viewCountText = cJSON_GetObjectItem(videoRenderer, "viewCountText");
-
+    
     if (video_is_live(videoRenderer)) {
         video->media_type = LIVE;
-        cJSON *runs = viewCountText ? cJSON_GetObjectItem(viewCountText, "runs") : NULL;
-        cJSON *arrayItem = (runs && cJSON_IsArray(runs)) ? cJSON_GetArrayItem(runs, 0) : NULL;
-        cJSON *text = arrayItem ? cJSON_GetObjectItem(arrayItem, "text") : NULL;
-        if (text && cJSON_IsString(text)) {
-            strncpy(video->view_count, text->valuestring, sizeof(video->view_count) - 1);
-            format_view_count(video->view_count);
+        
+        const cJSON* liveViewCountText = cjson_pointer_get(videoRenderer, "/viewCountText/runs/0/text");
+        if (valid_cjson_string(liveViewCountText)) {
+            snprintf(video->view_count, sizeof(video->view_count), "%s", liveViewCountText->valuestring);
         }
 
-        else {
-            printf("parse_video_from_json: failed to parse view count (LIVE)\n");
-            strncpy(video->view_count, default_value, sizeof(video->view_count) - 1);
-        }
+        else video->view_count[0] = '0';
 
         return;
     }
 
-    cJSON *simpleText = viewCountText ? cJSON_GetObjectItem(viewCountText, "simpleText") : NULL;
-    if (simpleText && cJSON_IsString(simpleText)) {
-        strncpy(video->view_count, simpleText->valuestring, sizeof(video->view_count));
+    const cJSON* viewCountText = cjson_pointer_get(videoRenderer, "/viewCountText/simpleText");
+    if (valid_cjson_string(viewCountText)) {
+        snprintf(video->view_count, sizeof(video->view_count), "%s", viewCountText->valuestring);
         format_view_count(video->view_count);
     }
 
-    else {
-        printf("parse_video_from_json: failed to parse view count\n");
-        strncpy(video->view_count, default_value, sizeof(video->view_count) - 1);
-    }
+    else snprintf(video->view_count, sizeof(video->view_count), "no views");
 
-    // DATE PUBLISHED
-    cJSON *publishedTimeText = cJSON_GetObjectItem(videoRenderer, "publishedTimeText");
-    simpleText = publishedTimeText ? cJSON_GetObjectItem(publishedTimeText, "simpleText") : NULL;
-    if (simpleText && cJSON_IsString(simpleText)) {
-        strncpy(video->date_published, simpleText->valuestring, sizeof(video->date_published) - 1);
+    const cJSON* videoAge = cjson_pointer_get(videoRenderer, "/publishedTimeText/simpleText");
+    if (valid_cjson_string(videoAge)) {
+        snprintf(video->date_published, sizeof(video->date_published), "%s", videoAge->valuestring);
     }
     
-    else {
-        printf("parse_video_from_json: failed to parse date published\n");
-        strncpy(video->date_published, default_value, sizeof(video->date_published) - 1);
-    }
-    
-    // VIDEO LENGTH
-    cJSON *lengthText = cJSON_GetObjectItem(videoRenderer, "lengthText");
-    simpleText = lengthText ? cJSON_GetObjectItem(lengthText, "simpleText") : NULL;
-    if (simpleText && cJSON_IsString(simpleText)) {
-        strncpy(video->duration, simpleText->valuestring, sizeof(video->duration) - 1);
-    }
-
-    else {
-        printf("parse_video_from_json: failed to parse duration\n");
-        strncpy(video->duration, default_value, sizeof(video->duration) - 1);
+    const cJSON* videoLengthText = cjson_pointer_get(videoRenderer, "/lengthText/simpleText");
+    if (valid_cjson_string(videoLengthText)) {
+        snprintf(video->duration, sizeof(video->duration), "%s", videoLengthText->valuestring);
     }
 }
 
-void parse_channel_from_json(const cJSON* channelRenderer, SearchResult* channel)
+void parse_channel_from_json(cJSON* channelRenderer, SearchResult* channel)
 {
-    if (channel == NULL) {
-        printf("parse_video_from_json: 'video' is NULL\n");
-        return;
-    }
-
-    else if (channelRenderer == NULL) {
-        printf("parse_video_from_json: 'channelRenderer' is NULL\n");
-        channel->media_type = UNDF;
-        return;
-    }
+    if ((channelRenderer == NULL) || (channel == NULL)) return;
 
     channel->media_type = CHANNEL;
 
-    // ID
-    cJSON* channelId = cJSON_GetObjectItem(channelRenderer, "channelId");
-    if (channelId && cJSON_IsString(channelId)) {
-        strncpy(channel->id, channelId->valuestring, sizeof(channel->id) - 1);
+    const cJSON* channelId = cjson_pointer_get(channelRenderer, "/channelId");
+    if (valid_cjson_string(channelId)) {
+        snprintf(channel->id, sizeof(channel->id), "%s", channelId->valuestring);
     }
     
     else {
-        printf("parse_channel_from_json: failed to parse channel id\n");
+        printf("parse_channel_from_json: no channel id\n");
         channel->media_type = UNDF;
         return;
     }
 
-    const char *default_value = "(null)";
-
-    // TITLE
-    cJSON *title = cJSON_GetObjectItem(channelRenderer, "title");
-    cJSON *simpleText = title ? cJSON_GetObjectItem(title, "simpleText") : NULL;
-    if (simpleText && cJSON_IsString(simpleText)) {
-        strncpy(channel->title, simpleText->valuestring, sizeof(channel->title) - 1);
+    const cJSON* channelName = cjson_pointer_get(channelRenderer, "/title/simpleText");
+    if (valid_cjson_string(channelName)) {
+        snprintf(channel->title, sizeof(channel->title), "%s", channelName->valuestring);
     }
 
-    else {
-        printf("parse_channel_from_json: failed to parse title\n");
-        strncpy(channel->title, default_value, sizeof(channel->title) - 1);
+    const cJSON* subCount = cjson_pointer_get(channelRenderer, "/videoCountText/simpleText");
+    if (valid_cjson_string(subCount)) {
+        snprintf(channel->subscriber_count, sizeof(channel->subscriber_count), "%s", subCount->valuestring);
     }
 
-    // SUB COUNT
-    cJSON *videoCountText = cJSON_GetObjectItem(channelRenderer, "videoCountText");
-    simpleText = videoCountText ? cJSON_GetObjectItem(videoCountText, "simpleText") : NULL;
-    if(simpleText && cJSON_IsString(simpleText)) {
-        strncpy(channel->subscriber_count, simpleText->valuestring, sizeof(channel->subscriber_count) - 1);
-    }
-
-    else {
-        // somethimes, the sub count is found here 
-        cJSON *subscriberCountText = cJSON_GetObjectItem(channelRenderer, "subscriberCountText");
-        simpleText = subscriberCountText ? cJSON_GetObjectItem(subscriberCountText, "simpleText") : NULL;
-        if(simpleText && cJSON_IsString(simpleText)) {
-            strncpy(channel->subscriber_count, simpleText->valuestring, sizeof(channel->subscriber_count) - 1);
-        }   
-        
-        else {
-            printf("parse_channel_from_json: failed to parse sub count\n");
-            channel->subscriber_count[0] = '\0';
-        }
-    }
-
-    // THUMBNAIL PATH
-    cJSON *thumbnails = cJSON_GetObjectItem(cJSON_GetObjectItem(channelRenderer, "thumbnail"), "thumbnails");
-    cJSON *url = thumbnails && cJSON_IsArray(thumbnails) ? cJSON_GetObjectItem(cJSON_GetArrayItem(thumbnails, 0), "url") : NULL;
-    if(url && cJSON_IsString(url)) {
+    const cJSON* channelThumbnailLink = cjson_pointer_get(channelRenderer, "/thumbnail/thumbnails/0/url");
+    if (valid_cjson_string(channelThumbnailLink)) {
         // the path either starts with '/ytc', or just '/'
-        char *path1 = strstr(url->valuestring, "/ytc");
-        char *path2 = strrchr(url->valuestring, '/');
-        strncpy(channel->thumbnail_path, path1 ? path1 : path2, sizeof(channel->thumbnail_path) - 1);
-    }
-
-    else {
-        printf("parse_channel_from_json: failed to parse thumbnail path\n");
-        channel->thumbnail_path[0] = '\0';
+        const char* path1 = strstr(channelThumbnailLink->valuestring, "/ytc");
+        const char* path2 = strrchr(channelThumbnailLink->valuestring, '/');
+        snprintf(channel->thumbnail_path, sizeof(channel->thumbnail_path), "%s", (path1 ? path1 : path2));
     }
 }
 
-void parse_playlist_from_json(const cJSON *lockupViewModel, SearchResult *playlist)
+void parse_playlist_from_json(cJSON *lockupViewModel, SearchResult *playlist)
 {
-    if (playlist == NULL) {
-        printf("parse_video_from_json: 'video' is NULL\n");
-        return;
-    }
-
-    else if (lockupViewModel == NULL) {
-        printf("parse_video_from_json: 'lockupViewModel' is NULL\n");
-        playlist->media_type = UNDF;
-        return;
-    }
+    if ((lockupViewModel == NULL) || (playlist == NULL)) return;
 
     playlist->media_type = PLAYLIST;
 
-
-    // ID
-    cJSON *contentId = cJSON_GetObjectItem(lockupViewModel, "contentId");
-    if (contentId && cJSON_IsString(contentId)) {
-        strncpy(playlist->id, contentId->valuestring, sizeof(playlist->id) - 1);
+    const cJSON* contentId = cjson_pointer_get(lockupViewModel, "/contentId");
+    if (valid_cjson_string(contentId)) {
+        snprintf(playlist->id, sizeof(playlist->id), "%s", contentId->valuestring);
     }
     
     else {
-        printf("parse_playlist_from_json: failed to parse playlist id\n");
+        printf("parse_playlist_from_json: no playlist id\n");
         playlist->media_type = UNDF;
         return;
     }
 
-    const char *default_value = "(null)";
-
-    // TITLE
-    cJSON *metadata = cJSON_GetObjectItem(lockupViewModel, "metadata");
-    cJSON *lockupMetadataViewModel = metadata ? cJSON_GetObjectItem(metadata, "lockupMetadataViewModel") : NULL;
-    cJSON *title = lockupMetadataViewModel ? cJSON_GetObjectItem(lockupMetadataViewModel, "title") : NULL;
-    cJSON *content = title ? cJSON_GetObjectItem(title, "content") : NULL;
-
-    const bool title_valid = content && cJSON_IsString(content);
-    if (title_valid) {
-        strncpy(playlist->title, content->valuestring, sizeof(playlist->title) - 1);
+    const cJSON* playlistTitle = cjson_pointer_get(lockupViewModel, "/metadata/lockupMetadataViewModel/title/content");
+    if (valid_cjson_string(playlistTitle)) {
+        snprintf(playlist->title, sizeof(playlist->title), "%s", playlistTitle->valuestring);
     }
 
-    else {
-        printf("parse_playlist_from_json: failed to parse title\n");
-        strncpy(playlist->title, default_value, sizeof(playlist->title) - 1);
-    }
-    
-    cJSON *contentImage = cJSON_GetObjectItem(lockupViewModel, "contentImage");
-    cJSON *collectionThumbnailViewModel = contentImage ? cJSON_GetObjectItem(contentImage, "collectionThumbnailViewModel") : NULL;
-    cJSON *primaryThumbnail = collectionThumbnailViewModel ? cJSON_GetObjectItem(collectionThumbnailViewModel, "primaryThumbnail") : NULL;
-    cJSON *thumbnailViewModel = primaryThumbnail ? cJSON_GetObjectItem(primaryThumbnail, "thumbnailViewModel") : NULL;
-
-    // THUMBNAIL PATH
-    cJSON *rendererContext = cJSON_GetObjectItem(lockupViewModel, "rendererContext");
-    cJSON *commandContext = rendererContext ? cJSON_GetObjectItem(rendererContext, "commandContext") : NULL;
-    cJSON *onTap = commandContext ? cJSON_GetObjectItem(commandContext, "onTap") : NULL;
-    cJSON *innertubeCommand = onTap ? cJSON_GetObjectItem(onTap, "innertubeCommand") : NULL;
-    cJSON *watchEndpoint = innertubeCommand ? cJSON_GetObjectItem(innertubeCommand, "watchEndpoint") : NULL;
-    cJSON *videoId = watchEndpoint ? cJSON_GetObjectItem(watchEndpoint, "videoId") : NULL;
-    if (videoId && cJSON_IsString(videoId)) {
-        snprintf(playlist->thumbnail_path, sizeof(playlist->thumbnail_path), "/vi/%s/mqdefault.jpg", videoId->valuestring);
+    const cJSON* firstVideoId = cjson_pointer_get(lockupViewModel, "/rendererContext/commandContext/onTap/innertubeCommand/watchEndpoint/videoId");
+    if (valid_cjson_string(firstVideoId)) {
+        snprintf(playlist->thumbnail_path, sizeof(playlist->thumbnail_path), "/vi/%s/mqdefault.jpg", firstVideoId->valuestring);
     }
 
-    else {
-        printf("parse_playlist_from_json: failed to parse thumbnail path \n");
-        playlist->thumbnail_path[0] = '\0';
-    }
-
-    // VIDEO COUNT
-    cJSON *overlays = thumbnailViewModel ? cJSON_GetObjectItem(thumbnailViewModel, "overlays") : NULL;
-    cJSON *thumbnailOverlayBadgeViewModel = overlays && cJSON_IsArray(overlays) ? cJSON_GetObjectItem(cJSON_GetArrayItem(overlays, 0), "thumbnailOverlayBadgeViewModel") : NULL;
-    cJSON *thumbnailBadges = thumbnailOverlayBadgeViewModel ? cJSON_GetObjectItem(thumbnailOverlayBadgeViewModel, "thumbnailBadges") : NULL;
-    cJSON *thumbnailBadgeViewModel = thumbnailBadges && cJSON_IsArray(thumbnailBadges) ? cJSON_GetObjectItem(cJSON_GetArrayItem(thumbnailBadges, 0), "thumbnailBadgeViewModel") : NULL;
-    cJSON *text = thumbnailBadgeViewModel ? cJSON_GetObjectItem(thumbnailBadgeViewModel, "text") : NULL;
-    const bool valid_video_count = text && cJSON_IsString(text);
-    if (valid_video_count) {
-        strncpy(playlist->video_count, text->valuestring, sizeof(playlist->video_count) - 1);
-    }
-
-    else {
-        printf("parse_playlist_from_json: failed to parse video count\n");
-        strncpy(playlist->video_count, default_value, sizeof(playlist->video_count) - 1);
+    const cJSON* videoCount = cjson_pointer_get(lockupViewModel, "/contentImage/collectionThumbnailViewModel/primaryThumbnail/thumbnailViewModel/overlays/0/thumbnailOverlayBadgeViewModel/thumbnailBadges/0/thumbnailBadgeViewModel/text");
+    if (valid_cjson_string(videoCount)) {
+        snprintf(playlist->video_count, sizeof(playlist->video_count), "%s", videoCount->valuestring);
     }
 }
 
@@ -1620,73 +1533,102 @@ int create_results_from_json(cJSON* cjson, Results *results, const bool allow_yo
     return elements_added;
 }
 
-cJSON* find_search_result_container(cJSON* json, const QueryType query_type)
+const char* get_json_path_for_query_type(const QueryType query_type)
 {
     switch (query_type) {
-        case NEW:
-        case APPENDING: {
-            cJSON* itemSectionRenderer = find_object(json, "itemSectionRenderer");
-            cJSON* contents = itemSectionRenderer ? cJSON_GetObjectItem(itemSectionRenderer, "contents") : NULL;
-            return contents;
-        }
-        case TRENDING: {
-            cJSON* sectionListRenderer = find_object(json, "sectionListRenderer");
-            cJSON* contents = sectionListRenderer ? cJSON_GetObjectItem(sectionListRenderer, "contents") : NULL;
-            cJSON* arrayItem = contents && cJSON_IsArray(contents) ? cJSON_GetArrayItem(contents, 2) : NULL;
-            cJSON* items = find_object(arrayItem, "items");
-            return items;
-        }
-        default: return NULL;
+        case NEW: return "/contents"
+                         "/twoColumnSearchResultsRenderer"
+                         "/primaryContents"
+                         "/sectionListRenderer"
+                         "/contents"
+                         "/0"
+                         "/itemSectionRenderer"
+                         "/contents";
+        
+        case APPENDING: return "/onResponseReceivedCommands"
+                               "/0"
+                               "/appendContinuationItemsAction"
+                               "/continuationItems"
+                               "/0"
+                               "/itemSectionRenderer"
+                               "/contents";
+
+        case TRENDING: return "/contents"
+                              "/twoColumnBrowseResultsRenderer"
+                              "/tabs"
+                              "/0"
+                              "/tabRenderer"
+                              "/content"
+                              "/sectionListRenderer"
+                              "/contents"
+                              "/2"
+                              "/itemSectionRenderer"
+                              "/contents"
+                              "/0"
+                              "/shelfRenderer"
+                              "/content"
+                              "/expandedShelfContentsRenderer"
+                              "/items";
+
+        case QUERY_VIDEO_PRESSED:
+            break;
     }
+
+    return NULL;
 }
 
 void* get_results_from_query(void* args)
 {
-    SearchThreadArgs* targs = (SearchThreadArgs*)args;
     float start_time = GetTime(), end_time; // preformance check
-
-    HTTPS_Response response = send_https_request(targs->request, targs->youtube_connection);
-    if (https_response_ready(&response) == false) {
-        SetWindowTitle("[offline] - metube");
-        free(targs);
-        search_finished = true;
-        return NULL;
+    
+    cJSON* json = NULL;
+    HTTPS_Response response = create_https_response();
+    SearchThreadArgs* targs = (SearchThreadArgs*) args;
+    if (targs == NULL) {
+        printf("get_results_from_query: 'targs' is NULL\n");
+        SetWindowTitle("[failed] - metube");
+        goto cleanup;
     }
 
+    response = send_https_request(targs->request, targs->youtube_connection);
+    if (https_response_ready(&response) == false) {
+        printf("get_results_from_query: invalid https response\n");
+        SetWindowTitle("[failed] - metube");
+        goto cleanup;
+    }
+
+    // debug
     create_file_from_memory("header.txt", response.header);
     create_file_from_memory("body.json", response.body);
 
-    cJSON* json = cJSON_Parse(response.body.data);
+    json = cJSON_Parse(response.body.data);
     if (json == NULL) {
         printf("get_results_from_query: cJSON_Parse returned NULL\n");
-        SetWindowTitle("[offline] - metube");
-        free_https_response(&response);
-        free(targs);
-        search_finished = true;
-        return NULL;
+        SetWindowTitle("[failed] - metube");
+        goto cleanup;
     }
-    
-    cJSON* result_root = find_search_result_container(json, targs->query_type);
-    
-    get_continuation_token(json, sizeof(targs->search_results->continuation_token), targs->search_results->continuation_token);
 
+    const char* json_path = get_json_path_for_query_type(targs->query_type);
+    cJSON* result_root = cjson_pointer_get(json, json_path); 
     elements_added = create_results_from_json(result_root, targs->search_results, targs->allow_youtube_shorts);
-    search_finished = true;
-    if (targs->query_type != APPENDING) {
-        delete_old_nodes = true;
-    }
+    
+    get_continuation_token_from_query_type(targs->query_type, json, sizeof(targs->search_results->continuation_token), targs->search_results->continuation_token);
 
     end_time = GetTime();
     printf("search took %f seconds, %d items found\n", end_time - start_time, elements_added);
     
-    char app_title[512];
-    snprintf(app_title, sizeof(app_title), "[search result(%d)] - metube", elements_added);
-    SetWindowTitle(app_title);
+    const int display_count = targs->query_type != APPENDING ? elements_added : targs->search_results->count;
+    SetWindowTitle(TextFormat("[results(%d)] - metube", display_count));
 
-    cJSON_Delete(json);
-    free_https_response(&response);
-    free(targs);
-    return NULL;
+    cleanup:
+        search_finished = true;
+        delete_old_nodes = (targs->query_type != APPENDING);
+        
+        if (https_response_ready(&response)) free_https_response(&response);
+        if (json) cJSON_Delete(json);
+        if (targs) free(targs);
+        
+        return NULL;
 }
 
 void init_app()
@@ -2273,7 +2215,8 @@ void draw_video_desc(const Rectangle container, Ui ui, Vector2* scrollbar_positi
 
     const float padded_width = container.width - ui.padding - ui.padding;
     
-    const float line_height = font_size + spacing;
+    // HACK: adding random shit makes the content grow faster... who would've thought?
+    const float line_height = font_size + spacing + (ui.padding * 1.5);
     const int nlines = anticipate_lines_wordwrap(ui.font, video_desc, font_size, spacing, padded_width);
     
     const float text_height = line_height * nlines;
@@ -2285,7 +2228,7 @@ void draw_video_desc(const Rectangle container, Ui ui, Vector2* scrollbar_positi
         .height = fmaxf(text_height, scroll_window_area.height - 1),
     };
 
-    GuiScrollPanel(scroll_window_area, NULL, scroll_content_area, scrollbar_position, NULL);
+    GuiScrollPanel(scroll_window_area, NULL, scroll_content_area, scrollbar_position, NULL, false);
 
     const Rectangle video_desc_bounds = {
         .x = scroll_content_area.x,
@@ -2309,49 +2252,48 @@ typedef struct
     PersistentConnection* conn;
     char* desc_ptr;
     size_t desc_size;
-} ThreadArgs;
+} FocusedInfoArgs;
 
-bool json_string_is_valid(const cJSON* json_str)
+void* get_focused_video_information(void* args)
 {
-    return json_str && cJSON_IsString(json_str) && json_str->valuestring[0] != '\0';
-}
+    cJSON* json = NULL;
+    HTTPS_Response response = create_https_response();
+    FocusedInfoArgs* targs = (FocusedInfoArgs*) args;
+    if (targs == NULL) {
+        printf("thread_funct: 'targs' is NULL\n");
+        SetWindowTitle("[failed] - metube");
+        goto cleanup;
+    }
 
-void* thread_funct(void* args)
-{
-    ThreadArgs* targs = (ThreadArgs*) args;
-
-    HTTPS_Response response = send_https_request(targs->req, targs->conn); 
+    response = send_https_request(targs->req, targs->conn); 
     if (https_response_ready(&response) == false) {
-        printf("thread_funct: https response is not ready\n");
-        SetWindowTitle("[offline] - metube");
-        free(targs);
-        return NULL;
+        printf("thread_funct: invaild https response\n");
+        SetWindowTitle("[failed] - metube");
+        goto cleanup;
     }
 
     create_file_from_memory("focused_header.txt", response.header);
     create_file_from_memory("focused_body.json", response.body);
 
-    cJSON* json = cJSON_Parse(response.body.data);
+    json = cJSON_Parse(response.body.data);
     if (json == NULL) {
         printf("thread_funct: cJSON_Parse returned NULL\n");
-        SetWindowTitle("[offline] - metube");
-        free_https_response(&response);
-        free(targs);
+        SetWindowTitle("[failed] - metube");
+        goto cleanup;
+    }
+
+    const cJSON* shortDescription = cjson_pointer_get(json, "/videoDetails/shortDescription");
+    if (valid_cjson_string(shortDescription)) {
+        snprintf(targs->desc_ptr, targs->desc_size, "%s", shortDescription->valuestring);
+    }
+
+    cleanup:
+        if (https_response_ready(&response)) free_https_response(&response);
+        if (json) cJSON_Delete(json);
+        if (targs) free(targs);
         return NULL;
-    }
 
-    const cJSON* videoDetails = cJSON_GetObjectItem(json, "videoDetails");
-    const cJSON* shortDescription = videoDetails ? cJSON_GetObjectItem(videoDetails, "shortDescription") : NULL;
-    if (json_string_is_valid(shortDescription)) {
-        if (snprintf(targs->desc_ptr, targs->desc_size, "%s", shortDescription->valuestring) >= targs->desc_size) {
-            printf("thread_funct: video desc truncated\n");
-        }
-    }
-
-    free_https_response(&response);
-    cJSON_Delete(json);
-    free(targs);
-    return NULL;
+    // TODO: get thumbnail frames (3) for each third of the video
 }
 
 void handle_clicked_search_result(SearchResult* clicked_result, Query* query, const size_t n, char video_description[n])
@@ -2380,7 +2322,7 @@ void handle_clicked_search_result(SearchResult* clicked_result, Query* query, co
     
     PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
     
-    ThreadArgs* targs = malloc(sizeof(ThreadArgs));
+    FocusedInfoArgs* targs = malloc(sizeof(FocusedInfoArgs));
     if (targs == NULL) {
         printf("handle_clicked_search_result: malloc returned NULL for 'targs'\n");
         return;
@@ -2391,7 +2333,7 @@ void handle_clicked_search_result(SearchResult* clicked_result, Query* query, co
     targs->desc_size = n;
     targs->req = req;
 
-    if (launch_task(&task_queue, targs, thread_funct) == false) {
+    if (launch_task(&task_queue, targs, get_focused_video_information) == false) {
         printf("handle_clicked_search_result: failed to launch task\n");
         free(targs);
         return;
@@ -2460,7 +2402,7 @@ void draw_results_window(const Rectangle window, const Ui ui, Vector2* scrollbar
 
     const bool vertical_scrollbar_visible = content_area.height > window.height;
 
-    GuiScrollPanel(window, NULL, content_area, scrollbar_position, NULL);
+    GuiScrollPanel(window, NULL, content_area, scrollbar_position, NULL, true);
 
     const Rectangle scissor_rect = padded_rectangle(1, window);
 
@@ -2502,10 +2444,6 @@ void draw_results_window(const Rectangle window, const Ui ui, Vector2* scrollbar
             if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
                 (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) &&
                 (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
-                char app_title[512];
-                snprintf(app_title, sizeof(app_title), "[%s] - metube", search_result->title);
-                SetWindowTitle(app_title);
-
                 handle_clicked_search_result(search_result, query, n, video_description);
             }
         }   
@@ -2515,7 +2453,7 @@ void draw_results_window(const Rectangle window, const Ui ui, Vector2* scrollbar
 }
 
 // get thumbnail frames from video click
-// related videos button availible after focusing vide
+// related videos button availible after focusing video
 
 // handle channel click
 // handle playlist click
@@ -2680,7 +2618,6 @@ int main()
                 .height = 75
             };
 
-            // toggle filter window on press
             draw_filter_window(&query, filter_window_bounds, ui.font, ui.padding);
 
             const float button_height = 30;

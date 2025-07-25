@@ -707,7 +707,7 @@ RAYGUIAPI int GuiGroupBox(Rectangle bounds, const char *text);                  
 RAYGUIAPI int GuiLine(Rectangle bounds, const char *text);                                             // Line separator control, could contain text
 RAYGUIAPI int GuiPanel(Rectangle bounds, const char *text);                                            // Panel control, useful to group controls
 RAYGUIAPI int GuiTabBar(Rectangle bounds, const char **text, int count, int *active);                  // Tab Bar control, returns TAB to be closed or -1
-RAYGUIAPI int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view); // Scroll Panel control
+RAYGUIAPI int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view, bool scrollBarVisible); // Scroll Panel control
 
 // Basic controls set
 RAYGUIAPI int GuiLabel(Rectangle bounds, const char *text);                                            // Label control
@@ -1770,9 +1770,9 @@ int GuiTabBar(Rectangle bounds, const char **text, int count, int *active)
 }
 
 // Scroll Panel control
-int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view)
+int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view, bool scrollbarVisible)
 {
-    #define RAYGUI_MIN_SCROLLBAR_HEIGHT    40
+    #define RAYGUI_MIN_SCROLLBAR_HEIGHT 40
 
     int result = 0;
     GuiState state = guiState;
@@ -1793,7 +1793,8 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
         bounds.height -= (float)RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT + 1;
     }
 
-    bool hasVerticalScrollBar = (content.height > bounds.height - 2 * GuiGetStyle(DEFAULT, BORDER_WIDTH));
+    bool needsVerticalScroll = (content.height > bounds.height - 2 * GuiGetStyle(DEFAULT, BORDER_WIDTH));
+    bool hasVerticalScrollBar = scrollbarVisible && needsVerticalScroll;
 
     int verticalScrollBarWidth = hasVerticalScrollBar ? GuiGetStyle(LISTVIEW, SCROLLBAR_WIDTH) : 0;
     Rectangle verticalScrollBar = {
@@ -1818,8 +1819,8 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
     if (view->width > content.width) view->width = content.width;
     if (view->height > content.height) view->height = content.height;
 
-    float verticalMin = hasVerticalScrollBar ? 0.0f : -1.0f;
-    float verticalMax = hasVerticalScrollBar
+    float verticalMin = needsVerticalScroll ? 0.0f : -1.0f;
+    float verticalMax = needsVerticalScroll
         ? content.height - bounds.height + (float)GuiGetStyle(DEFAULT, BORDER_WIDTH)
         : (float)-GuiGetStyle(DEFAULT, BORDER_WIDTH);
 
@@ -1833,7 +1834,7 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
             else state = STATE_FOCUSED;
 
 #if defined(SUPPORT_SCROLLBAR_KEY_INPUT)
-            if (hasVerticalScrollBar)
+            if (needsVerticalScroll)
             {
                 if (IsKeyDown(KEY_DOWN)) scrollPos.y -= GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
                 if (IsKeyDown(KEY_UP)) scrollPos.y += GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
@@ -1848,31 +1849,30 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
     else if (scrollPos.y <= -verticalMax)
     {
         scrollPos.y = -verticalMax;
-        result = 1; 
+        result = 1;
     }
 
     if (text != NULL) GuiStatusBar(statusBar, text);
     GuiDrawRectangle(bounds, 0, BLANK, GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
-    const int slider = GuiGetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE);
+    const int originalSliderSize = GuiGetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE);
 
     if (hasVerticalScrollBar)
     {
         GuiSetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE,
             (int)(((bounds.height - 2 * GuiGetStyle(DEFAULT, BORDER_WIDTH)) / (int)content.height) *
             ((int)bounds.height - 2 * GuiGetStyle(DEFAULT, BORDER_WIDTH))));
+
         scrollPos.y = (float)-GuiScrollBar(verticalScrollBar, (int)-scrollPos.y, (int)verticalMin, (int)verticalMax);
     }
-    else scrollPos.y = 0.0f;
 
     GuiDrawRectangle(bounds, GuiGetStyle(LISTVIEW, BORDER_WIDTH), GetColor(GuiGetStyle(LISTVIEW, BORDER + (state * 3))), BLANK);
-    GuiSetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE, slider);
+    GuiSetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE, originalSliderSize);
 
     if (scroll != NULL) *scroll = scrollPos;
 
     return result;
 }
-
 
 // Label control
 int GuiLabel(Rectangle bounds, const char *text)
