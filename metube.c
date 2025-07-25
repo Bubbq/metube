@@ -356,13 +356,10 @@ const char* query_type_to_endpoint(const QueryType query_type)
 bool configure_youtube_internal_api_path(const size_t n, char path[n], const QueryType query_type, const char* api_key)
 {
     const char* endpoint = query_type_to_endpoint(query_type);
-    if (endpoint && api_key) {
-        return snprintf(path, n, "/youtubei/v1/%s?key=%s", endpoint, api_key);
-    }
+    
+    if ((endpoint == NULL) || (api_key == NULL)) return false;
 
-    printf("configure_youtube_internal_api_path: path could not be created\n");
-
-    return false;
+    return snprintf(path, n, "/youtubei/v1/%s?key=%s", endpoint, api_key) < n;
 }
 
 // represents user-defined parameters for a YouTube search request
@@ -909,32 +906,34 @@ HTTPS_Response send_https_request(const PreparedRequest request, PersistentConne
     return response;
 }
 
-int configure_get_header(const size_t n, char get_header[n], const char *host, const char *path)
+bool configure_get_header(const size_t n, char get_header[n], const char *host, const char *path)
 {
-    return snprintf(get_header, n,
-    "GET %s HTTP/1.1\r\n"
-            "Host: %s\r\n"
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-            "Connection: keep-alive\r\n"
-            "\r\n",
-            path, host);
+    const size_t len =  snprintf(get_header, n,
+                "GET %s HTTP/1.1\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
+                        "Connection: keep-alive\r\n"
+                        "\r\n",
+                        path, host);
+    return len < n;
 }
 
-int configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_body_length)
+bool configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_body_length)
 {
-    return snprintf(post_header, n,
-            "POST %s HTTP/1.1\r\n"
-            "Host: %s\r\n"
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-            "Content-Type: application/json\r\n"
-            "Accept: application/json\r\n"
-            "Content-Length: %zu\r\n"
-            "Connection: keep-alive\r\n"
-            "\r\n",
-            path, host, post_body_length);
+    const size_t len = snprintf(post_header, n,
+                        "POST %s HTTP/1.1\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Accept: application/json\r\n"
+                        "Content-Length: %zu\r\n"
+                        "Connection: keep-alive\r\n"
+                        "\r\n",
+                        path, host, post_body_length);
+    return len < n;
 }
 
-size_t configure_post_body(const size_t n, char post_body[n], const Query query, const char* continuation_token, const char* video_id)
+bool configure_post_body(const size_t n, char post_body[n], const Query query, const char* continuation_token, const char* video_id)
 {
     size_t body_len = snprintf(post_body, n,
                         "{\n"
@@ -954,29 +953,31 @@ size_t configure_post_body(const size_t n, char post_body[n], const Query query,
 
             body_len += snprintf(post_body + body_len, n - body_len,
                      "  \"params\": \"%s\",\n"
-                            "  \"query\": \"%s\",\n", params, query.string);
+                            "  \"query\": \"%s\",\n"
+                            "}", params, query.string);
             break;
         }
 
         case APPENDING: 
             body_len += snprintf(post_body + body_len, n - body_len,
-                    "  \"continuation\": \"%s\"\n", continuation_token);
+                    "  \"continuation\": \"%s\"\n"
+                           "}", continuation_token);
             break;
 
         case TRENDING: 
             body_len += snprintf(post_body + body_len, n - body_len,
-                    "  \"browseId\": \"FEtrending\"\n");
+                    "  \"browseId\": \"FEtrending\"\n"
+                           "}");
             break;
 
         case QUERY_VIDEO_PRESSED: 
             body_len += snprintf(post_body + body_len, n - body_len,
-                    "  \"videoId\": \"%s\"\n", video_id);
+                    "  \"videoId\": \"%s\"\n"
+                           "}", video_id);
             break;
     }
 
-    strcat(post_body, "}");
-    
-    return body_len + 1;
+    return body_len < n;
 }
 
 size_t trim_whitespace(char* string)
@@ -1319,6 +1320,7 @@ int get_continuation_token_from_query_type(const QueryType type, cJSON* root, co
     const cJSON* token_tag = cjson_pointer_get(root, token_path);
     if (valid_cjson_string(token_tag) == false) {
         printf("get_continuation_token_from_query_type: failed\n");
+        token[0] = '\0';
         return 0;
     }
 
@@ -1506,9 +1508,9 @@ int create_results_from_json(cJSON* cjson, Results *results, const bool allow_yo
             return 0;
         }
         
-        cJSON *videoRenderer = cJSON_GetObjectItem(item, "videoRenderer");     // video
-        cJSON *channelRenderer = cJSON_GetObjectItem(item, "channelRenderer"); // channel
-        cJSON *lockupViewModel = cJSON_GetObjectItem(item, "lockupViewModel"); // playlist
+        cJSON *videoRenderer =   cjson_pointer_get(item, "/videoRenderer");     // video
+        cJSON *channelRenderer = cjson_pointer_get(item, "/channelRenderer");   // channel
+        cJSON *lockupViewModel = cjson_pointer_get(item, "/lockupViewModel");   // playlist
             
         if (videoRenderer) {
             parse_video_from_json(videoRenderer, allow_youtube_shorts, search_result);
@@ -1984,7 +1986,7 @@ void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, 
     switch (search_result->media_type) {
         case SHORT:
         case VIDEO:
-            DrawTextBoxed(TextFormat("%s - %s views", search_result->date_published, search_result->view_count), padded_rectangle(ui.padding, subtext_area), ui, 11.5, BLACK);
+            DrawTextBoxed(TextFormat("%s %s views", search_result->date_published, search_result->view_count), padded_rectangle(ui.padding, subtext_area), ui, 11.5, BLACK);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, search_result->duration);
             break;
         case LIVE:
@@ -2202,14 +2204,13 @@ int anticipate_lines_wordwrap(Font font, const char* text, float fontSize, float
 void draw_video_desc(const Rectangle container, Ui ui, Vector2* scrollbar_position, char* video_desc)
 {
     const Color text_color = BLACK;
-    const int SCROLLBAR_WIDTH = 13;
     const int font_size = 12;
     const int spacing = 2;
 
     const Rectangle scroll_window_area = {
         .x = container.x,
         .y = container.y + (container.height * 0.25f),
-        .width = container.width + SCROLLBAR_WIDTH,
+        .width = container.width - ui.padding,
         .height = container.height * 0.75f,
     };
 
@@ -2254,6 +2255,22 @@ typedef struct
     size_t desc_size;
 } FocusedInfoArgs;
 
+FocusedInfoArgs* init_focused_info_args(PreparedRequest req, PersistentConnection* conn, char* video_desc_ptr, size_t strlen)
+{
+    FocusedInfoArgs* targs = malloc(sizeof(FocusedInfoArgs));
+    if (targs == NULL) {
+        printf("init_focused_info_args: malloc returned NULL for 'targs'\n");
+        return NULL;
+    }
+
+    targs->req = req;
+    targs->conn = conn;
+    targs->desc_size = strlen;
+    targs->desc_ptr = video_desc_ptr;
+
+    return targs;
+}
+
 void* get_focused_video_information(void* args)
 {
     cJSON* json = NULL;
@@ -2288,56 +2305,14 @@ void* get_focused_video_information(void* args)
     }
 
     cleanup:
+        search_finished = true;
+
         if (https_response_ready(&response)) free_https_response(&response);
         if (json) cJSON_Delete(json);
         if (targs) free(targs);
         return NULL;
 
     // TODO: get thumbnail frames (3) for each third of the video
-}
-
-void handle_clicked_search_result(SearchResult* clicked_result, Query* query, const size_t n, char video_description[n])
-{
-    if ((clicked_result == NULL) || (query == NULL) || (video_description == NULL)) return;
-
-    query->type = QUERY_VIDEO_PRESSED;
-
-    char path[128];
-    if (configure_youtube_internal_api_path(sizeof(path), path, query->type, internal_api_key) == false) {
-        printf("handle_clicked_search_result: failed to configure internal_api_path\n");
-        return;
-    }
-
-    PreparedRequest req = {0};
-
-    if (configure_post_body(sizeof(req.body), req.body, (*query), NULL, clicked_result->id) >= sizeof(req.body)) {
-        printf("handle_clicked_search_result: 'req' body was truncated\n");
-        return;
-    }
-
-    if (configure_post_header(sizeof(req.header), req.header, youtube_pool.connections->host, path, strlen(req.body)) >= sizeof(req.header)) {
-        printf("handle_clicked_search_result: 'req' header was truncated\n");
-        return;
-    }
-    
-    PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
-    
-    FocusedInfoArgs* targs = malloc(sizeof(FocusedInfoArgs));
-    if (targs == NULL) {
-        printf("handle_clicked_search_result: malloc returned NULL for 'targs'\n");
-        return;
-    }
-
-    targs->conn = conn;
-    targs->desc_ptr = video_description;
-    targs->desc_size = n;
-    targs->req = req;
-
-    if (launch_task(&task_queue, targs, get_focused_video_information) == false) {
-        printf("handle_clicked_search_result: failed to launch task\n");
-        free(targs);
-        return;
-    }
 }
 
 bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, const MediaType media_type)
@@ -2351,13 +2326,9 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
     }
 
     PersistentConnection* conn = &pool->connections[pool->current_conn];
-    if (conn == NULL) {
-        printf("queue_thumbnail_load: 'conn' is NULL\n");
-        return false;
-    }
 
     PreparedRequest req = {0};
-    if (configure_get_header(sizeof(req.header), req.header, conn->host, thumbnail_path) >= sizeof(req.header)) {
+    if (configure_get_header(sizeof(req.header), req.header, conn->host, thumbnail_path) == false) {
         printf("queue_thumbnail_load: request header was truncated\n");
         return false;
     }
@@ -2368,95 +2339,27 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
         return false;
     }
 
-    targs->thumbnail_queue = &thumbnail_queue;
-    targs->connection = conn;
     targs->request = req;
-    if (snprintf(targs->search_result_id, sizeof(targs->search_result_id), "%s", search_result_id) >= sizeof(targs->search_result_id)) {
-        printf("queue_thumbnail_load: 'targs' search result was truncated\n");
-        free(targs); targs = NULL;
+    targs->connection = conn;
+    targs->thumbnail_queue = &thumbnail_queue;
+    strncpy(targs->search_result_id, search_result_id, sizeof(targs->search_result_id) - 1);
+
+    if (launch_task(&task_queue, targs, load_thumbnail)) {
+        cycle_connection(pool);
+        return true;
+    }
+
+    else {
+        printf("queue_thumbnail_load: launch_task failed\n");
         return false;
     }
-
-    if (launch_task(&task_queue, targs, load_thumbnail) == false) {
-        printf("queue_thumbnail_load: failed to load task\n");
-        free(targs); targs = NULL;
-        return false;
-    }
-
-    cycle_connection(pool);
-
-    return true;
 }
 
-void draw_results_window(const Rectangle window, const Ui ui, Vector2* scrollbar_position, const Results* results, TextureCacheEntry** cached_textures, Query* query, const size_t n, char video_description[n])
-{
-    const int SCROLLBAR_WIDTH = 13;
-    const int container_height = 80;
-    
-    const Rectangle content_area = {
-        .x = window.x,
-        .y = window.y,
-        .width = window.width,
-        .height = container_height * results->count,
-    };
-
-    const bool vertical_scrollbar_visible = content_area.height > window.height;
-
-    GuiScrollPanel(window, NULL, content_area, scrollbar_position, NULL, true);
-
-    const Rectangle scissor_rect = padded_rectangle(1, window);
-
-    BeginScissorMode(scissor_rect.x, scissor_rect.y, scissor_rect.width, scissor_rect.height);
-
-    int i = 0;
-    float container_y = window.y;
-    for (SearchResult* search_result = results->head; search_result; search_result = search_result->next, i++, container_y += container_height) {
-        const Rectangle container = { 
-            .x = ui.padding, 
-            .y = container_y + scrollbar_position->y, 
-            .width = window.width - (vertical_scrollbar_visible ? SCROLLBAR_WIDTH : 0),
-            .height = container_height 
-        };
-
-        const Color container_color = (i % 2) ? WHITE : RAYWHITE;
-
-        DrawRectangleRec(container, container_color);
-
-        Texture2D thumbnail = (Texture2D){0};
-
-        TextureCacheEntry *cached = find_cached_thumbnail(search_result->id, cached_textures);
-        if (cached_texture_is_ready(cached)) {
-            thumbnail = cached->thumbnail;
-            start_timer(&cached->timer, THUMBNAIL_LIFETIME); // refresh lifetime
-        }
-
-        else if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
-            search_result->thumbnail_loaded = true;
-
-            if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, search_result->media_type) == false) {
-                printf("draw_results_window: failed to queue thumbnail\n");
-            }
-        }
-
-        if (CheckCollisionRecs(container, scissor_rect)) {
-            draw_search_result(search_result, thumbnail, container, container_color, ui);
-
-            if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
-                (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) &&
-                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
-                handle_clicked_search_result(search_result, query, n, video_description);
-            }
-        }   
-    }
-
-    EndScissorMode();
-}
-
+// related videos button availible after focusing video (alr have code for this)
 // get thumbnail frames from video click
-// related videos button availible after focusing video
 
-// handle channel click
-// handle playlist click
+// handle channel click -> should go to homepage
+// handle playlist click -> should load videos from that playlist
 
 int main()
 {
@@ -2508,8 +2411,9 @@ int main()
     ui.spacing = 2;
     ui.word_wrap = true;
 
+    char focused_video_id[64] = {0};
+    char video_description[4096] = {0};
     Vector2 video_desc_scrollbar_pos = { 10, 10 };
-    char video_description[8192] = {0};
 
     while (!WindowShouldClose())
     {
@@ -2536,12 +2440,7 @@ int main()
         if (search) {
             search = search_finished = false;
 
-            free_thumbnail_queue(&thumbnail_queue);
-            thumbnail_queue = init_thumbnail_queue();
-
-            char app_title[512];
-            snprintf(app_title, sizeof(app_title), "[%s(loading)] - metube", query.string);
-            SetWindowTitle(app_title);
+            free_thumbnail_queue(&thumbnail_queue); thumbnail_queue = init_thumbnail_queue();
 
             // evade bot detection
             if (strcmp(last_search, query.string) == 0) {
@@ -2550,19 +2449,40 @@ int main()
 
             strncpy(last_search, query.string, sizeof(last_search) - 1);
 
-            char path[128] = {0};
-            if (configure_youtube_internal_api_path(sizeof(path), path, query.type, internal_api_key) == false) {
-                return 1;
-            }
+            char path[128];
+            if (configure_youtube_internal_api_path(sizeof(path), path, query.type, internal_api_key)) {
+                PreparedRequest req = {0};
+                if  (configure_post_body(sizeof(req.body), req.body, query, results.continuation_token, focused_video_id) && 
+                    (configure_post_header(sizeof(req.header), req.header, youtube_pool.connections->host, path, strlen(req.body)))) {
+                    
+                    PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-            PreparedRequest post = {0};
+                    void* targs = NULL;
+                    void* (*thread_funt)(void*) = NULL;
 
-            size_t body_len = configure_post_body(sizeof(post.body), post.body, query, results.continuation_token, NULL);
-                              configure_post_header(sizeof(post.header), post.header, youtube_pool.connections[youtube_pool.current_conn].host, path, body_len);
-            
-            SearchThreadArgs* targs = create_search_thread_args(query, post, &results, &thumbnail_queue, &youtube_pool.connections[youtube_pool.current_conn]);
-            if (targs && (launch_task(&task_queue, targs, get_results_from_query) == false)) {
-                free(targs);
+                    switch (query.type) {
+                        case NEW:
+                        case TRENDING:
+                        case APPENDING:
+                            targs = create_search_thread_args(query, req, &results, &thumbnail_queue, conn);
+                            thread_funt = get_results_from_query;
+                            break; 
+                        case QUERY_VIDEO_PRESSED:
+                            targs = init_focused_info_args(req, conn, video_description, sizeof(video_description));
+                            thread_funt = get_focused_video_information;
+                            break;
+                        default:
+                            printf("query type not supported\n");
+                            break;
+                    }
+
+                    if (targs && thread_funt) {
+                        if (launch_task(&task_queue, targs, thread_funt) == false) {
+                            printf("failed to launch task\n");
+                            free(targs);
+                        }
+                    }
+                }   
             }
         }
 
@@ -2594,8 +2514,10 @@ int main()
 
             if (GuiButton(search_button_bounds, "Search") || enter_key_pressed) {
                 if (trim_whitespace(query.string) > 0) {
-                    search = search_finished;
+                    // search = search_finished;
+                    search = true;
                     query.type = NEW;
+                    SetWindowTitle(TextFormat("[%s(loading)] - metube", query.string));
                 }
             }
 
@@ -2607,8 +2529,10 @@ int main()
             };
 
             if (GuiButton(trending_button_bounds, "Trending")) {
-                search = search_finished;
+                // search = search_finished;
+                search = true;
                 query.type = TRENDING;
+                SetWindowTitle(TextFormat("[trending(loading)] - metube"));
             }
 
             const Rectangle filter_window_bounds = {
@@ -2633,8 +2557,10 @@ int main()
             }
 
             if (GuiButton(load_more_button_bounds, "LOAD MORE")) {
-                search = search_finished;
+                // search = search_finished;
+                search = true;
                 query.type = APPENDING;
+                SetWindowTitle(TextFormat("[%s(appending)] - metube", last_search));
             }
 
             GuiSetState(STATE_NORMAL);
@@ -2646,7 +2572,68 @@ int main()
                 .height = GetScreenHeight() - scroll_window_bounds.y - load_more_button_bounds.height - (ui.padding * 2), 
             };
 
-            draw_results_window(scroll_window_bounds, ui, &search_result_scrollbar_pos, &results, &cached_thumbnails, &query, sizeof(video_description), video_description);
+            const int container_height = 80;
+            
+            const Rectangle content_area = {
+                .x = scroll_window_bounds.x,
+                .y = scroll_window_bounds.y,
+                .width = scroll_window_bounds.width,
+                .height = container_height * results.count,
+            };
+
+            const bool vertical_scrollbar_visible = content_area.height > scroll_window_bounds.height;
+
+            GuiScrollPanel(scroll_window_bounds, NULL, content_area, &search_result_scrollbar_pos, NULL, true);
+
+            const Rectangle scissor_rect = padded_rectangle(1, scroll_window_bounds);
+
+            BeginScissorMode(scissor_rect.x, scissor_rect.y, scissor_rect.width, scissor_rect.height);
+
+            int i = 0;
+            float container_y = scroll_window_bounds.y;
+            for (SearchResult* search_result = results.head; search_result; search_result = search_result->next, i++, container_y += container_height) {
+                const Rectangle container = { 
+                    .x = ui.padding, 
+                    .y = container_y + search_result_scrollbar_pos.y, 
+                    .width = scroll_window_bounds.width - (vertical_scrollbar_visible ? SCROLLBAR_WIDTH : 0),
+                    .height = container_height 
+                };
+
+                const Color container_color = (i % 2) ? WHITE : RAYWHITE;
+
+                DrawRectangleRec(container, container_color);
+
+                Texture2D thumbnail = (Texture2D){0};
+                TextureCacheEntry *cached = find_cached_thumbnail(search_result->id, &cached_thumbnails);
+                if (cached_texture_is_ready(cached)) {
+                    thumbnail = cached->thumbnail;
+                    start_timer(&cached->timer, THUMBNAIL_LIFETIME); // refresh lifetime
+                }
+
+                else if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
+                    search_result->thumbnail_loaded = true;
+
+                    if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, search_result->media_type) == false) {
+                        printf("failed to queue thumbnail\n");
+                    }
+                }
+
+                if (CheckCollisionRecs(container, scissor_rect)) {
+                    draw_search_result(search_result, thumbnail, container, container_color, ui);
+
+                    if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
+                        (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) &&
+                        (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
+                        strncpy(focused_video_id, search_result->id, sizeof(focused_video_id) - 1);
+                        // search = search_finished
+                        search = true;
+                        query.type = QUERY_VIDEO_PRESSED;
+                        SetWindowTitle(TextFormat("[%s] - metube", search_result->title));
+                    }
+                }   
+            }
+
+            EndScissorMode();
 
             const Rectangle focused_video_bounds = {
                 .x = scroll_window_bounds.x + scroll_window_bounds.width + ui.padding,
@@ -2687,7 +2674,6 @@ int main()
     // clean everything
 
 // video playing function
-    // show relavent videos from the one selected
     // play video when pressing button
 
 // video management function
@@ -2703,4 +2689,6 @@ int main()
         // search arguements
         // cached thumbnails
         // handle clicked search results
-    // reccomendation
+    // reccomendations
+    // use goto's for redundant cleanups
+    // set ptrs to NULL after freeing them
