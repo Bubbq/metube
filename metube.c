@@ -352,8 +352,7 @@ typedef enum
 const char* search_type_to_endpoint(const SearchType search_type)
 {
     switch (search_type) {
-        case SEARCH_TYPE_QUERIED:
-        case SEARCH_TYPE_LOAD_MORE: return "search";
+        case SEARCH_TYPE_QUERIED: return "search";
         case SEARCH_TYPE_VIEW_CHANNEL:
         case SEARCH_TYPE_VIEW_PLAYLIST:
         case SEARCH_TYPE_TRENDING: return "browse";
@@ -377,7 +376,8 @@ bool resolve_youtube_api_path(const size_t n, char path[n], SearchType search_ty
 // represents user-defined parameters for a YouTube search request
 typedef struct
 {
-    bool allow_youtube_shorts;      
+    bool allow_youtube_shorts; 
+    char focused_id[64];     
     char string[256];        
     MediaType media;          
     SortType sort;
@@ -929,71 +929,6 @@ bool configure_get_header(const size_t n, char get_header[n], const char *host, 
                         "\r\n",
                         path, host);
     return len < n;
-}
-
-bool configure_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_body_length)
-{
-    const size_t len = snprintf(post_header, n,
-                        "POST %s HTTP/1.1\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-                        "Content-Type: application/json\r\n"
-                        "Accept: application/json\r\n"
-                        "Content-Length: %zu\r\n"
-                        "Connection: keep-alive\r\n"
-                        "\r\n",
-                        path, host, post_body_length);
-    return len < n;
-}
-
-bool configure_post_body(const size_t n, char post_body[n], const Query query, const char* continuation_token, const char* content_id)
-{
-    size_t body_len = snprintf(post_body, n,
-                        "{\n"
-                        "  \"context\": {\n"
-                        "    \"client\": {\n"
-                        "      \"clientName\": \"WEB\",\n"
-                        "      \"clientVersion\": \"2.20210721.00.00\"\n"
-                        "    }\n"
-                        "  },\n");
-
-    switch (query.search_type) {
-        case SEARCH_TYPE_QUERIED:
-            body_len += snprintf(post_body + body_len, n - body_len,
-                        "  \"params\": \"%s%s\",\n"
-                                "  \"query\": \"%s\",\n"
-                                "}", sort_type_to_url(query.sort), media_type_to_url(query.media), query.string);
-            break;
-        case SEARCH_TYPE_LOAD_MORE:
-            body_len += snprintf(post_body + body_len, n - body_len,
-                        "  \"continuation\": \"%s\"\n"
-                            "}", continuation_token);
-            break;
-        case SEARCH_TYPE_TRENDING:
-            body_len += snprintf(post_body + body_len, n - body_len,
-                        "  \"browseId\": \"FEtrending\"\n"
-                            "}");
-            break;
-        case SEARCH_TYPE_RELATED:
-        case SEARCH_TYPE_VIDEO_FOCUS:
-            body_len += snprintf(post_body + body_len, n - body_len,
-                        "  \"videoId\": \"%s\"\n"
-                            "}", content_id);
-            break;
-        case SEARCH_TYPE_VIEW_PLAYLIST:
-            body_len += snprintf(post_body + body_len, n - body_len,
-                        "  \"browseId\": \"VL%s\"\n"
-                            "}", content_id);
-            break;
-        case SEARCH_TYPE_VIEW_CHANNEL:
-            body_len += snprintf(post_body + body_len, n - body_len,
-                        "  \"browseId\": \"%s\",\n"
-                               "  \"params\": \"EgZ2aWRlb3PyBgQKAjoA\"\n"
-                            "}", content_id);
-            break;
-    }
-
-    return (body_len < n);
 }
 
 size_t trim_whitespace(char* string)
@@ -1948,8 +1883,7 @@ void draw_filter_window(Query *query, const Rectangle container, const Font font
     }
 }
 
-static char internal_api_key[64];
-void get_internal_api_key(const char* response_body)
+void get_internal_api_key(const char* response_body, const size_t n, char* internal_api_key)
 {
     if (response_body == NULL) return;
 
@@ -1965,7 +1899,7 @@ void get_internal_api_key(const char* response_body)
     int i = 0;
     bool in_quotes = false;
 
-    for (char* current = location + tag_len; (current && (i < sizeof(internal_api_key) - 1)); current++) {
+    for (char* current = location + tag_len; (current && (i < n - 1)); current++) {
         const char c = *current;
 
         if (!in_quotes) {
@@ -1985,7 +1919,7 @@ void get_internal_api_key(const char* response_body)
     internal_api_key[i] = '\0';
 }
 
-void parse_youtube_page(PersistentConnection *youtube_connection)
+void parse_youtube_page(PersistentConnection *youtube_connection, const size_t n, char* internal_api_key)
 {
     PreparedRequest request = {
         .body = "",
@@ -1997,12 +1931,12 @@ void parse_youtube_page(PersistentConnection *youtube_connection)
 
     HTTPS_Response youtube_page_response = send_https_request(request, youtube_connection);
     if (https_response_ready(&youtube_page_response) == false) {
-        memset(internal_api_key, 0, sizeof(internal_api_key));
+        memset(internal_api_key, 0, n);
         printf("parse_youtube_page: page response is invalid\n");
         return;
     }
 
-    get_internal_api_key(youtube_page_response.body.data);
+    get_internal_api_key(youtube_page_response.body.data, n, internal_api_key);
 
     free_https_response(&youtube_page_response);
 }
@@ -2424,6 +2358,285 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
     return launch_task(&task_queue, targs, load_thumbnail);
 }
 
+#define CLIENT_NAME "WEB"
+#define CLIENT_VER "2.20210721.00.00"
+#define YT_API_PLAYLIST_BROWSE_ID_PREFIX "VL"    // "video list" (playlist)
+#define YT_API_BROWSE_ID_TRENDING "FEtrending"   // "frontend trending"
+#define YT_API_CHANNEL_VIDEOS_PARAMS "EgZ2aWRlb3PyBgQKAjoA"  // filters to "Videos" tab in a channel's homepage
+#define USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
+
+bool valid_post_request(const PreparedRequest post)
+{
+    return (post.path[0] != '\0') && (post.header[0] != '\0') && (post.body[0] != '\0');
+}
+
+bool init_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_body_length)
+{
+    const size_t len = snprintf(post_header, n,
+                        "POST %s HTTP/1.1\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: " USER_AGENT "\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Accept: application/json\r\n"
+                        "Content-Length: %zu\r\n"
+                        "Connection: keep-alive\r\n"
+                        "\r\n",
+                        path, host, post_body_length);
+    
+    return (len > 0) && (len < n);
+}
+
+bool add_queried_search_payload(cJSON* root, const Query* q)
+{
+    if ((root == NULL) || (q == NULL) || (q->string[0] == '\0')) {
+        printf("add_queried_search_payload: invalid input\n");
+        return false;
+    }
+
+    const char* sort_url = sort_type_to_url(q->sort);
+    const char* media_url = media_type_to_url(q->media);
+
+    char params[16];
+    const int len = snprintf(params, sizeof(params), "%s%s",  sort_url, media_url);
+    if (len < 0 || len >= sizeof(params)) {
+        printf("add_queried_search_payload: snprintf returned %d\n", len);
+        return false;
+    }
+
+    if (cJSON_AddStringToObject(root, "query", q->string) == NULL) {
+        printf("add_queried_search_payload: failed to add 'query'\n");
+        return false;
+    }
+
+    if (cJSON_AddStringToObject(root, "params", params) == NULL) {
+        printf("add_queried_search_payload: failed to add 'params'\n");
+        return false;
+    }
+
+    return true;
+}
+
+bool add_view_channel_videos_payload(cJSON* root, const Query* q)
+{
+    if ((root == NULL) || (q == NULL) || (q->focused_id[0] == '\0')) {
+        printf("add_view_channel_videos_payload: invalid input\n");
+        return false;
+    }
+
+    if (cJSON_AddStringToObject(root, "browseId", q->focused_id) == NULL) {
+        printf("add_view_channel_videos_payload: failed to add 'browseId\n");
+        return false;
+    }
+
+    if (cJSON_AddStringToObject(root, "params", YT_API_CHANNEL_VIDEOS_PARAMS) == NULL) {
+        printf("add_view_channel_videos_payload: failed to add 'browseId\n");
+        return false;
+    }
+
+    return true;
+}
+
+bool add_view_playlist_videos_payload(cJSON* root, const Query* q)
+{
+    if ((root == NULL) || (q == NULL) || (q->focused_id[0] == '\0')) {
+        printf("add_view_playlist_videos_payload: invalid input\n");
+        return false;
+    }
+
+    char playlist_browse_id[64];
+    const int len = snprintf(playlist_browse_id, sizeof(playlist_browse_id), YT_API_PLAYLIST_BROWSE_ID_PREFIX "%s", q->focused_id);
+    if ((len < 0) || (len >= sizeof(playlist_browse_id))) {
+        printf("add_view_playlist_videos_payload: snprintf returned %d\n", len);
+        return false;
+    }
+
+    if (cJSON_AddStringToObject(root, "browseId", playlist_browse_id) == NULL) {
+        printf("add_view_playlist_videos_payload: failed to add 'browseId'\n");
+        return false;
+    }
+
+    return true;
+}
+
+bool add_view_trending_videos_payload(cJSON* root, const Query* q)
+{
+    if ((root == NULL) || (q == NULL)) {
+        printf("add_view_trending_videos_payload: invalid input\n");
+        return false;
+    }
+
+    if (cJSON_AddStringToObject(root, "browseId", YT_API_BROWSE_ID_TRENDING) == NULL) {
+        printf("add_view_trending_videos_payload: failed to add 'browseId'\n");
+        return false;
+    }
+
+    return true;
+}
+
+bool add_view_related_videos_payload(cJSON* root, const Query* q)
+{
+    if ((root == NULL) || (q == NULL) || (q->focused_id[0] == '\0')) {
+        printf("add_view_related_videos_payload: invalid input\n");
+        return false;
+    }
+
+    if (cJSON_AddStringToObject(root, "videoId", q->focused_id) == NULL) {
+        printf("add_view_related_videos_payload: failed to add 'videoId'\n");
+        return false;
+    }
+
+    return true;
+}
+
+cJSON* init_payload_root()
+{
+    cJSON* client = cJSON_CreateObject();
+    cJSON* context = cJSON_CreateObject();
+    cJSON* root = cJSON_CreateObject();
+
+    if ((client == NULL) || (context == NULL) || (root == NULL)) {
+        cJSON_Delete(client);  
+        cJSON_Delete(context); 
+        cJSON_Delete(root);    
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(client, "clientName", CLIENT_NAME);
+    cJSON_AddStringToObject(client, "clientVersion", CLIENT_VER);
+    cJSON_AddItemToObject(context, "client", client);  
+    cJSON_AddItemToObject(root, "context", context);  
+
+    return root; 
+}
+
+cJSON* init_payload(const Query* q)
+{   
+    if (!q) {
+        printf("init_payload: invalid input\n");
+        return NULL;
+    }
+
+    cJSON* root = init_payload_root();
+    if (!root) {
+        printf("init_payload: failed to init root\n");
+        return NULL;
+    }
+
+    switch (q->search_type) {
+        case SEARCH_TYPE_RELATED:
+        case SEARCH_TYPE_VIDEO_FOCUS: 
+            if (add_view_related_videos_payload(root, q) == false) {
+                cJSON_Delete(root); root = NULL;
+            }
+            break;
+        case SEARCH_TYPE_QUERIED: 
+            if (add_queried_search_payload(root, q) == false) {
+                cJSON_Delete(root); root = NULL;
+            }
+            break;
+        case SEARCH_TYPE_VIEW_CHANNEL: 
+            if (add_view_channel_videos_payload(root, q) == false) {
+                cJSON_Delete(root); root = NULL;
+            }
+            break;
+        case SEARCH_TYPE_VIEW_PLAYLIST: 
+            if (add_view_playlist_videos_payload(root, q) == false) {
+                cJSON_Delete(root); root = NULL;
+            } 
+            break;
+        case SEARCH_TYPE_TRENDING: 
+            if (add_view_trending_videos_payload(root, q) == false) {
+                cJSON_Delete(root); root = NULL;
+            }
+            break;
+    }
+
+    return root;
+}
+
+PreparedRequest init_post_request(const Query query, const char* internal_api_key, const char* host)
+{
+    PreparedRequest req = (PreparedRequest) {0};
+
+    if ((internal_api_key == NULL) || (host == NULL)) {
+        printf("init_post_request: invalid input\n");
+        return (PreparedRequest) {0};
+    }
+
+    if (resolve_youtube_api_path(sizeof(req.path), req.path, query.search_type, internal_api_key) == false) {
+        printf("init_post_request: failed to resolve path\n");
+        return (PreparedRequest) {0};
+    }
+
+    cJSON* payload = init_payload(&query);
+
+    if (!payload) {
+        printf("init_post_request: 'payload' is NULL'\n");
+        return (PreparedRequest) {0};
+    }
+
+    char* buffer = cJSON_Print(payload);
+
+    strncpy(req.body, buffer, sizeof(req.body) - 1);
+
+    if (init_post_header(sizeof(req.header), req.header, host, req.path, strlen(req.body)) == false) {
+        printf("init_post_request: failed to configure header\n");
+        free(buffer); buffer = NULL;
+        cJSON_Delete(payload); payload = NULL;
+        return (PreparedRequest) {0};
+    }
+    
+    free(buffer); buffer = NULL;
+    cJSON_Delete(payload); payload = NULL;
+    
+    return req;
+}
+
+
+bool queue_search_task(Query query, PersistentConnection* conn, Results* results, const char* internal_api_key)
+{
+    if ((conn == NULL) || (results == NULL) || (internal_api_key == NULL)) {
+        printf("queue_search_task: invalid input\n");
+        return false;
+    }
+
+    PreparedRequest post = init_post_request(query, internal_api_key, conn->host);
+    if (valid_post_request(post) == false) {
+        printf("queue_search_task: invalid post req\n");
+        return false;
+    }
+
+    printf("%s\n%s\n", post.header, post.body);
+
+    SearchThreadArgs* targs = init_search_thread_args(query, post, results, &thumbnail_queue, conn);
+    if (!targs) {
+        printf("queue_search_task: 'targs' is NULL\n");
+        return false;
+    }
+
+    return launch_task(&task_queue, targs, get_results_from_query);
+}
+
+bool queue_focused_video_task(const Query query, PersistentConnection* conn, const char* internal_api_key, const size_t n, char video_description[n])
+{
+    if ((conn == NULL) || (internal_api_key == NULL)) {
+        printf("queue_focused_video_task: invalid input\n");
+        return false;
+    }
+
+    PreparedRequest post = init_post_request(query, internal_api_key, conn->host);
+    if (valid_post_request(post) == false) {
+        printf("queue_focused_video_task: 'post' is invalid\n");
+        return false;
+    }
+    
+    printf("%s\n%s\n", post.header, post.body);
+
+    FocusedInfoArgs* targs = init_focused_info_args(post, conn, video_description, n);
+
+    return launch_task(&task_queue, targs, get_focused_video_information);
+}
+
 // redo continuation tokens for everything
 int main()
 {
@@ -2449,7 +2662,10 @@ int main()
     video_thumbnail_pool = init_connection_pool(media_type_to_host(VIDEO)); // playlists, videos, shorts, and live videos all share the same host
     channel_thumbnail_pool = init_connection_pool(media_type_to_host(CHANNEL));
 
-    parse_youtube_page(&youtube_pool.connections[youtube_pool.current_conn]);
+    PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
+
+    char internal_api_key[64];
+    parse_youtube_page(conn, sizeof(internal_api_key), internal_api_key);
     printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
     
     // when true, the application starts the search process
@@ -2476,11 +2692,9 @@ int main()
     ui.spacing = 2;
     ui.word_wrap = true;
 
-    char focused_id[64] = {0};
-    MediaType focused_type = -1;
-
-    char focused_video_id[64] = {0};
-    char focused_video_description[4096] = {0};
+    bool clicked_video = false;
+    char clicked_video_id[64] = {0};
+    char clicked_video_description[4096] = {0};
     Vector2 video_desc_scrollbar_pos = { 10, 10 };
 
     while (!WindowShouldClose())
@@ -2505,6 +2719,16 @@ int main()
             } 
         }
 
+        if (clicked_video) {
+            clicked_video = false;
+
+            PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
+
+            if (queue_focused_video_task(query, conn, internal_api_key, sizeof(clicked_video_description), clicked_video_description) == false) {
+                printf("failed to queue focused video task\n");
+            }
+        }
+
         if (search) {
             search = search_finished = false;
 
@@ -2517,43 +2741,10 @@ int main()
 
             strncpy(last_search, query.string, sizeof(last_search) - 1);
 
-            char path[128];
-            if (resolve_youtube_api_path(sizeof(path), path, query.search_type, internal_api_key)) {
-                PreparedRequest req = {0};
-                if  (configure_post_body(sizeof(req.body), req.body, query, results.continuation_token, focused_id) && 
-                    (configure_post_header(sizeof(req.header), req.header, youtube_pool.connections->host, path, strlen(req.body)))) {
+            PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-                    PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
-
-                    void* targs = NULL;
-                    void* (*thread_funt)(void*) = NULL;
-
-                    switch (query.search_type) {
-                        case SEARCH_TYPE_QUERIED:
-                        case SEARCH_TYPE_TRENDING:
-                        case SEARCH_TYPE_LOAD_MORE:
-                        case SEARCH_TYPE_RELATED:
-                        case SEARCH_TYPE_VIEW_PLAYLIST:
-                        case SEARCH_TYPE_VIEW_CHANNEL:
-                            targs = init_search_thread_args(query, req, &results, &thumbnail_queue, conn);
-                            thread_funt = get_results_from_query;
-                            break; 
-                        case SEARCH_TYPE_VIDEO_FOCUS:
-                            targs = init_focused_info_args(req, conn, focused_video_description, sizeof(focused_video_description));
-                            thread_funt = get_focused_video_information;
-                            break;
-                        default:
-                            printf("query type not supported\n");
-                            break;
-                    }
-
-                    if (targs && thread_funt) {
-                        if (launch_task(&task_queue, targs, thread_funt) == false) {
-                            printf("failed to launch task\n");
-                            free(targs);
-                        }
-                    }
-                }   
+            if (queue_search_task(query, conn, &results, internal_api_key) == false) {
+                printf("failed to queue search task\n");
             }
         }
 
@@ -2585,10 +2776,9 @@ int main()
 
             if (GuiButton(search_button_bounds, "Search") || enter_key_pressed) {
                 if (trim_whitespace(query.string) > 0) {
-                    // search = search_finished;
                     search = true;
-                    query.search_type = SEARCH_TYPE_QUERIED;
                     query.search_attr = SEARCH_ATTR_NEW;
+                    query.search_type = SEARCH_TYPE_QUERIED;
                     SetWindowTitle(TextFormat("[%s(loading)] - metube", query.string));
                 }
             }
@@ -2601,11 +2791,10 @@ int main()
             };
 
             if (GuiButton(trending_button_bounds, "Trending")) {
-                // search = search_finished;
                 search = true;
-                query.search_type = SEARCH_TYPE_TRENDING;
                 query.search_attr = SEARCH_ATTR_NEW;
-                SetWindowTitle(TextFormat("[trending(loading)] - metube"));
+                query.search_type = SEARCH_TYPE_TRENDING;
+                SetWindowTitle("[Trending(loading)] - metube");
             }
 
             const Rectangle related_videos_button_bounds = {
@@ -2615,17 +2804,16 @@ int main()
                 .height = 25
             };
 
-            if (focused_video_id[0] == '\0') {
+            if (clicked_video_id[0] == '\0') {
                 GuiSetState(STATE_DISABLED);
             }
             
             if (GuiButton(related_videos_button_bounds, "Related Videos")) {
-                // search = search_finished;
                 search = true;
-                query.search_type = SEARCH_TYPE_RELATED;
                 query.search_attr = SEARCH_ATTR_NEW;
-                strncpy(focused_id, focused_video_id, sizeof(focused_video_id) - 1);
-                SetWindowTitle(TextFormat("[%s(loading)] - metube", focused_id));
+                query.search_type = SEARCH_TYPE_RELATED;
+                strncpy(query.focused_id, clicked_video_id, sizeof(query.focused_id) - 1);
+                SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", clicked_video_id));                
             }
 
             GuiSetState(STATE_NORMAL);
@@ -2716,38 +2904,30 @@ int main()
 
                 if (CheckCollisionRecs(container, scissor_rect)) {
                     draw_search_result(search_result, thumbnail, container, container_color, ui);
-
                     if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
                         (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) &&
                         (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
                         if ((search_result->media_type == VIDEO) || (search_result->media_type == SHORT) || (search_result->media_type == LIVE)) {
-                            // search = search_finished
-                            search = true;
+                            clicked_video = true;
                             query.search_type = SEARCH_TYPE_VIDEO_FOCUS;
-                            
-                            focused_type = VIDEO;
-                            strncpy(focused_id, search_result->id, sizeof(focused_id) - 1);
-                            strncpy(focused_video_id, search_result->id, sizeof(focused_video_id) - 1);
+                            strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
+                            strncpy(clicked_video_id, search_result->id, sizeof(clicked_video_id) - 1);
                         }
 
                         else if (search_result->media_type == PLAYLIST) {
-                            // search = search_finished;
                             search = true;
                             query.search_attr = SEARCH_ATTR_NEW;
                             query.search_type = SEARCH_TYPE_VIEW_PLAYLIST;
-                            
-                            focused_type = PLAYLIST;
-                            strncpy(focused_id, search_result->id, sizeof(focused_id) - 1);
+                            strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
+                            SetWindowTitle(TextFormat("[Playlist:%s(loading)] - metube", query.focused_id));
                         }
 
                         else if (search_result->media_type == CHANNEL) {
-                            // search = search_finished;
                             search = true;
                             query.search_attr = SEARCH_ATTR_NEW;
                             query.search_type = SEARCH_TYPE_VIEW_CHANNEL;
-                            
-                            focused_type = CHANNEL;
-                            strncpy(focused_id, search_result->id, sizeof(focused_id) - 1);
+                            strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
+                            SetWindowTitle(TextFormat("[Channel:%s(loading)] - metube", search_result->id));
                         }
                     }
                 }   
@@ -2762,7 +2942,7 @@ int main()
                 .height = GetScreenHeight() - focused_video_bounds.y - ui.padding,
             };
             
-            draw_video_desc(focused_video_bounds, ui, &video_desc_scrollbar_pos, focused_video_description);
+            draw_video_desc(focused_video_bounds, ui, &video_desc_scrollbar_pos, clicked_video_description);
 
         EndDrawing();
     }
@@ -2791,6 +2971,7 @@ int main()
 }
 
 // searching feature
+    // make highlighted video struct
     // get users videos button, need to get the author url @author_name for ALL video parsings... 
     // clean everything
 
