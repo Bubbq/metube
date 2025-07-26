@@ -2238,29 +2238,7 @@ void draw_video_desc(const Rectangle container, Ui ui, Vector2* scrollbar_positi
     EndScissorMode();
 }
 
-typedef struct
-{
-    PreparedRequest req;
-    PersistentConnection* conn;
-    char* desc_ptr;
-    size_t desc_size;
-} FocusedInfoArgs;
 
-FocusedInfoArgs* init_focused_info_args(PreparedRequest req, PersistentConnection* conn, char* video_desc_ptr, size_t strlen)
-{
-    FocusedInfoArgs* targs = malloc(sizeof(FocusedInfoArgs));
-    if (targs == NULL) {
-        printf("init_focused_info_args: malloc returned NULL for 'targs'\n");
-        return NULL;
-    }
-
-    targs->req = req;
-    targs->conn = conn;
-    targs->desc_size = strlen;
-    targs->desc_ptr = video_desc_ptr;
-
-    return targs;
-}
 
 int get_level_string(const int level, const char* spec_link, const size_t n, char level_parameters[n])
 {
@@ -2294,45 +2272,6 @@ const float seconds_to_microseconds(const float seconds)
     return (seconds * 1e3);
 }
 
-void* get_focused_video_information(void* args)
-{
-    cJSON* json = NULL;
-    HTTPS_Response response = create_https_response();
-    FocusedInfoArgs* targs = (FocusedInfoArgs*) args;
-    if (targs == NULL) {
-        printf("get_focused_video_information: 'targs' is NULL\n");
-        goto cleanup;
-    }
-
-    response = send_https_request(targs->req, targs->conn); 
-    if (https_response_ready(&response) == false) {
-        printf("get_focused_video_information: invaild https response\n");
-        goto cleanup;
-    }
-
-    json = cJSON_Parse(response.body.data);
-    if (json == NULL) {
-        printf("get_focused_video_information: cJSON_Parse returned NULL\n");
-        goto cleanup;
-    }
-
-    const cJSON* shortDescription = cjson_pointer_get(json, "/videoDetails/shortDescription");
-    if (valid_cjson_string(shortDescription) == false) {
-        printf("get_focused_video_information: video description not found\n");
-        targs->desc_ptr[0] = '\0';
-        goto cleanup;
-    }
-
-    snprintf(targs->desc_ptr, targs->desc_size, "%s", shortDescription->valuestring);
-
-    cleanup:
-        search_finished = true;
-
-        if (https_response_ready(&response)) free_https_response(&response);
-        if (json) cJSON_Delete(json);
-        if (targs) free(targs);
-        return NULL;
-}
 
 bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, PersistentConnection* conn)
 {
@@ -2592,7 +2531,6 @@ PreparedRequest init_post_request(const Query query, const char* internal_api_ke
     return req;
 }
 
-
 bool queue_search_task(Query query, PersistentConnection* conn, Results* results, const char* internal_api_key)
 {
     if ((conn == NULL) || (results == NULL) || (internal_api_key == NULL)) {
@@ -2606,8 +2544,6 @@ bool queue_search_task(Query query, PersistentConnection* conn, Results* results
         return false;
     }
 
-    printf("%s\n%s\n", post.header, post.body);
-
     SearchThreadArgs* targs = init_search_thread_args(query, post, results, &thumbnail_queue, conn);
     if (!targs) {
         printf("queue_search_task: 'targs' is NULL\n");
@@ -2617,9 +2553,82 @@ bool queue_search_task(Query query, PersistentConnection* conn, Results* results
     return launch_task(&task_queue, targs, get_results_from_query);
 }
 
-bool queue_focused_video_task(const Query query, PersistentConnection* conn, const char* internal_api_key, const size_t n, char video_description[n])
+typedef struct
 {
-    if ((conn == NULL) || (internal_api_key == NULL)) {
+    char id[64];
+    char description[2048];
+} HighlightedVideo;
+
+typedef struct
+{
+    PreparedRequest req;
+    PersistentConnection* conn;
+    HighlightedVideo* highlighted_video;
+} FocusedInfoArgs;
+
+FocusedInfoArgs* init_focused_info_args(PreparedRequest req, PersistentConnection* conn, HighlightedVideo* highlighted_video)
+{
+    if ((conn == NULL) || (highlighted_video == NULL)) {
+        printf("init_focused_info_args: invalid input\n");
+        return NULL;
+    }
+
+    FocusedInfoArgs* targs = malloc(sizeof(FocusedInfoArgs));
+    if (targs == NULL) {
+        printf("init_focused_info_args: malloc returned NULL for 'targs'\n");
+        return NULL;
+    }
+
+    targs->req = req;
+    targs->conn = conn;
+    targs->highlighted_video = highlighted_video;
+
+    return targs;
+}
+
+void* get_focused_video_information(void* args)
+{
+    cJSON* json = NULL;
+    HTTPS_Response response = create_https_response();
+    FocusedInfoArgs* targs = (FocusedInfoArgs*) args;
+    if (targs == NULL) {
+        printf("get_focused_video_information: 'targs' is NULL\n");
+        goto cleanup;
+    }
+
+    response = send_https_request(targs->req, targs->conn); 
+    if (https_response_ready(&response) == false) {
+        printf("get_focused_video_information: invaild https response\n");
+        goto cleanup;
+    }
+
+    json = cJSON_Parse(response.body.data);
+    if (json == NULL) {
+        printf("get_focused_video_information: cJSON_Parse returned NULL\n");
+        goto cleanup;
+    }
+
+    const cJSON* shortDescription = cjson_pointer_get(json, "/videoDetails/shortDescription");
+    if (valid_cjson_string(shortDescription) == false) {
+        printf("get_focused_video_information: video description not found\n");
+        targs->highlighted_video->description[0] = '\0';
+        goto cleanup;
+    }
+
+    strncpy(targs->highlighted_video->description, shortDescription->valuestring, sizeof(targs->highlighted_video->description) - 1);
+
+    cleanup:
+        search_finished = true;
+
+        if (https_response_ready(&response)) free_https_response(&response);
+        if (json) cJSON_Delete(json);
+        if (targs) free(targs);
+        return NULL;
+}
+
+bool queue_focused_video_task(const Query query, PersistentConnection* conn, HighlightedVideo* highlighted_video, const char* internal_api_key)
+{
+    if ((conn == NULL) || (highlighted_video == NULL) || (internal_api_key == NULL)) {
         printf("queue_focused_video_task: invalid input\n");
         return false;
     }
@@ -2632,7 +2641,7 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, con
     
     printf("%s\n%s\n", post.header, post.body);
 
-    FocusedInfoArgs* targs = init_focused_info_args(post, conn, video_description, n);
+    FocusedInfoArgs* targs = init_focused_info_args(post, conn, highlighted_video);
 
     return launch_task(&task_queue, targs, get_focused_video_information);
 }
@@ -2693,8 +2702,7 @@ int main()
     ui.word_wrap = true;
 
     bool clicked_video = false;
-    char clicked_video_id[64] = {0};
-    char clicked_video_description[4096] = {0};
+    HighlightedVideo highlighted_video = {0};
     Vector2 video_desc_scrollbar_pos = { 10, 10 };
 
     while (!WindowShouldClose())
@@ -2724,7 +2732,7 @@ int main()
 
             PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-            if (queue_focused_video_task(query, conn, internal_api_key, sizeof(clicked_video_description), clicked_video_description) == false) {
+            if (queue_focused_video_task(query, conn, &highlighted_video, internal_api_key) == false) {
                 printf("failed to queue focused video task\n");
             }
         }
@@ -2804,7 +2812,7 @@ int main()
                 .height = 25
             };
 
-            if (clicked_video_id[0] == '\0') {
+            if (highlighted_video.id[0] == '\0') {
                 GuiSetState(STATE_DISABLED);
             }
             
@@ -2812,8 +2820,8 @@ int main()
                 search = true;
                 query.search_attr = SEARCH_ATTR_NEW;
                 query.search_type = SEARCH_TYPE_RELATED;
-                strncpy(query.focused_id, clicked_video_id, sizeof(query.focused_id) - 1);
-                SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", clicked_video_id));                
+                strncpy(query.focused_id, highlighted_video.id, sizeof(query.focused_id) - 1);
+                SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", query.focused_id));                
             }
 
             GuiSetState(STATE_NORMAL);
@@ -2862,6 +2870,7 @@ int main()
                 .height = container_height * results.count,
             };
 
+            const int SCROLLBAR_WIDTH = 13;
             const bool vertical_scrollbar_visible = content_area.height > scroll_window_bounds.height;
 
             GuiScrollPanel(scroll_window_bounds, NULL, content_area, &search_result_scrollbar_pos, NULL, true);
@@ -2880,7 +2889,7 @@ int main()
                     .height = container_height 
                 };
 
-                const Color container_color = (i % 2) ? WHITE : RAYWHITE;
+                const Color container_color = strcmp(search_result->id, highlighted_video.id) ? ((i % 2) ? WHITE : RAYWHITE) : BLUE;
 
                 DrawRectangleRec(container, container_color);
 
@@ -2911,7 +2920,7 @@ int main()
                             clicked_video = true;
                             query.search_type = SEARCH_TYPE_VIDEO_FOCUS;
                             strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
-                            strncpy(clicked_video_id, search_result->id, sizeof(clicked_video_id) - 1);
+                            strncpy(highlighted_video.id, search_result->id, sizeof(highlighted_video.id) - 1);
                         }
 
                         else if (search_result->media_type == PLAYLIST) {
@@ -2942,7 +2951,7 @@ int main()
                 .height = GetScreenHeight() - focused_video_bounds.y - ui.padding,
             };
             
-            draw_video_desc(focused_video_bounds, ui, &video_desc_scrollbar_pos, clicked_video_description);
+            draw_video_desc(focused_video_bounds, ui, &video_desc_scrollbar_pos, highlighted_video.description);
 
         EndDrawing();
     }
