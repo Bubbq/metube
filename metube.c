@@ -1,4 +1,5 @@
 #include <math.h>
+#include <openssl/asn1.h>
 #include <time.h>
 #include <ctype.h>
 #include <netdb.h>
@@ -1216,28 +1217,65 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 {
     if ((root == NULL) || (path == NULL)) return NULL;
 
+    const int last_element_index = -1;
+
     int n = 0;
-    const char** elements = TextSplit(path, '/', &n); 
+    const char** elements = TextSplit(path, '.', &n); 
 
     cJSON* ret = root;
 
-    for(int i = 0; (ret && i < n); i++) {
+    for(int i = 0; (i < n); i++) {
         if (elements[i][0] == '\0') {
             continue;
         }
 
-        if (string_is_integer(elements[i])) {
-            if (cJSON_IsArray(ret)) {
-                const int index = atoi(elements[i]) == -1 ? cJSON_GetArraySize(ret) - 1 : atoi(elements[i]);
-                if (index <= cJSON_GetArraySize(ret)) {
-                    ret = cJSON_GetArrayItem(ret, index);
-                }
+        const char* opening_brace_ptr = strchr(elements[i], '[');
+        if (opening_brace_ptr) {
+            const size_t name_len = opening_brace_ptr - elements[i] + 1; 
 
-                else return NULL;
+            char array_name[name_len];
+            strncpy(array_name, elements[i], name_len - 1);
+            array_name[name_len - 1] = '\0';
+
+            ret = cJSON_GetObjectItem(ret, array_name);
+            if (ret == NULL) {
+                printf("cjson_pointer_get: failed to add array object \"%s\"\n", elements[i]);
+                return NULL;
             }
 
-            else return NULL;
-        }
+            if (cJSON_IsArray(ret) == false) {
+                printf("cjson_pointer_get: accessing element in non-array object (%s)\n", elements[i]);
+                return NULL;
+            }
+
+            const char* closing_brace_ptr = strchr(opening_brace_ptr, ']');
+            if (closing_brace_ptr == NULL) {
+                printf("cjson_pointer_get: \"%s\" is an unbalanced array\n", elements[i]);
+                return NULL;
+            }
+
+            const size_t len = closing_brace_ptr - opening_brace_ptr; 
+
+            char index_buffer[len];
+            strncpy(index_buffer, opening_brace_ptr + 1, len - 1);
+            index_buffer[len - 1] = '\0';
+
+            if (string_is_integer(index_buffer) == false) {
+                printf("cjson_pointer_get: invalid array element: \"%s\"\n", index_buffer);
+                return NULL;
+            }
+
+            const size_t arr_size = cJSON_GetArraySize(ret);
+            
+            const int index_buffer_val = atoi(index_buffer);
+            const size_t index = (index_buffer_val == last_element_index) ? (arr_size - 1) : index_buffer_val;
+            if (index >= arr_size) {
+                printf("cjson_pointer_get: accessing element %zu in %zu size array (%s)\n", index, arr_size, elements[i]);
+                return NULL;
+            }
+
+            ret = cJSON_GetArrayItem(ret, index);
+        } 
 
         else ret = cJSON_GetObjectItem(ret, elements[i]);
     }
@@ -1247,7 +1285,7 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
 bool video_is_youtube_short(cJSON *videoRenderer) 
 {
-    const char* path = "/navigationEndpoint/commandMetadata/webCommandMetadata/url";
+    const char* path = ".navigationEndpoint.commandMetadata.webCommandMetadata.url";
     const cJSON* url = cjson_pointer_get(videoRenderer, path); 
     if (valid_cjson_string(url)) {
         return strstr(url->valuestring, "/shorts");
@@ -1258,7 +1296,7 @@ bool video_is_youtube_short(cJSON *videoRenderer)
 
 bool video_is_live(cJSON* videoRenderer)
 {
-    const char* path = "/badges/0/metadataBadgeRenderer/label";
+    const char* path = ".badges[0].metadataBadgeRenderer.label";
     const cJSON* label = cjson_pointer_get(videoRenderer, path);
     if (valid_cjson_string(label)) {
         return (strcmp("LIVE", label->valuestring) == 0);
@@ -1313,7 +1351,7 @@ void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchRe
         else video->media_type = SHORT;
     }
 
-    const char* id_json_path = "/videoId";
+    const char* id_json_path = ".videoId";
 
     if (!assign_string_from_path(videoRenderer, id_json_path, video->id, sizeof(video->id))) {
         printf("parse_video: id assign fail (json path: \"%s\")\n", id_json_path);
@@ -1325,14 +1363,14 @@ void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchRe
         printf("parse_video: thumbnail path fail\n");
     }
     
-    const char* title_json_path = "/title/runs/0/text";
+    const char* title_json_path = ".title.runs[0].text";
     
     if (!assign_string_from_path(videoRenderer, title_json_path, video->title, sizeof(video->title))) {
         printf("parse_video: title assign fail (json path: \"%s\")\n", title_json_path);
     }
 
-    const char* author_json_path = "/ownerText/runs/0/text";
-    
+    const char* author_json_path = ".ownerText.runs[0].text";
+
     if (!assign_string_from_path(videoRenderer, author_json_path, video->author, sizeof(video->author))) {
         printf("parse_video: author assign fail (json path: \"%s\")\n", author_json_path);
     }
@@ -1340,7 +1378,7 @@ void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchRe
     if (video_is_live(videoRenderer)) {
         video->media_type = LIVE;
 
-        const char* live_viewers_json_path = "/viewCountText/runs/0/text";
+        const char* live_viewers_json_path = ".viewCountText.runs[0].text";
 
         if (!assign_string_from_path(videoRenderer, live_viewers_json_path, video->view_count, sizeof(video->view_count))) {
             video->view_count[0] = '0';
@@ -1349,7 +1387,7 @@ void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchRe
         return;
     }
 
-    const char* view_count_path = "/viewCountText/simpleText";
+    const char* view_count_path = ".viewCountText.simpleText";
 
     if (assign_string_from_path(videoRenderer, view_count_path, video->view_count, sizeof(video->view_count))) {
         format_view_count(video->view_count);
@@ -1357,17 +1395,16 @@ void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchRe
     
     else snprintf(video->view_count, sizeof(video->view_count), "no views");
 
-    const char* video_age_json_path = "/publishedTimeText/simpleText";
+    const char* video_age_json_path = ".publishedTimeText.simpleText";
 
     if (!assign_string_from_path(videoRenderer, video_age_json_path, video->date_published, sizeof(video->date_published))) {
         printf("parse_video: date published assign fail (json path: \"%s\")\n", video_age_json_path);
     }
 
-    const char* length_json_path = "/lengthText/simpleText";
+    const char* length_json_path = ".lengthText.simpleText";
 
     if (!assign_string_from_path(videoRenderer, length_json_path, video->duration, sizeof(video->duration))) {
         printf("parse_video: length assign fail (json path: \"%s\")\n", length_json_path);
-
     }
 }
 
@@ -1375,7 +1412,7 @@ void parse_related_video(cJSON* lockupViewModel, SearchResult* related_vid)
 {
     if ((lockupViewModel == NULL) || (related_vid == NULL)) return;
 
-    const char* id_path = "/contentId";
+    const char* id_path = ".contentId";
 
     if (!assign_string_from_path(lockupViewModel, id_path, related_vid->id, sizeof(related_vid->id))) {
         printf("parse_related_video: id assign fail (json path: \"%s\")\n", id_path);
@@ -1389,25 +1426,25 @@ void parse_related_video(cJSON* lockupViewModel, SearchResult* related_vid)
         printf("parse_related_video: thumbnail path fail\n");
     } 
 
-    const char* title_path = "/metadata/lockupMetadataViewModel/title/content";
+    const char* title_path = ".metadata.lockupMetadataViewModel.title.content";
 
     if (!assign_string_from_path(lockupViewModel, title_path, related_vid->title, sizeof(related_vid->title))) {
         printf("parse_related_video: title assign fail (json path: \"%s\")\n", title_path);
     }
 
-    const char* duration_path = "/contentImage/thumbnailViewModel/overlays/0/thumbnailOverlayBadgeViewModel/thumbnailBadges/0/thumbnailBadgeViewModel/text";
+    const char* duration_path = ".contentImage.thumbnailViewModel.overlays[0].thumbnailOverlayBadgeViewModel.thumbnailBadges[0].thumbnailBadgeViewModel.text";
 
     if (!assign_string_from_path(lockupViewModel, duration_path, related_vid->duration, sizeof(related_vid->duration))) {
         printf("parse_related_video: duration assign fail (json path: \"%s\")\n", duration_path);
     }
 
-    const char* view_count_path = "/metadata/lockupMetadataViewModel/metadata/contentMetadataViewModel/metadataRows/1/metadataParts/0/text/content";
+    const char* view_count_path = ".metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[0].text.content";
 
     if (!assign_string_from_path(lockupViewModel, view_count_path, related_vid->view_count, sizeof(related_vid->view_count))) {
         printf("parse_related_video: view count assign fail (json path: \"%s\")\n", view_count_path);
     }
 
-    const char* date_published_path = "/metadata/lockupMetadataViewModel/metadata/contentMetadataViewModel/metadataRows/1/metadataParts/1/text/content";
+    const char* date_published_path = ".metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[1].text.content";
 
     if (!assign_string_from_path(lockupViewModel, date_published_path, related_vid->date_published, sizeof(related_vid->date_published))) {
         printf("parse_related_video: duration assign fail (json path: \"%s\")\n", date_published_path);
@@ -1418,7 +1455,7 @@ void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* playlist_v
 {
     if ((playlistVideoRenderer == NULL) || (playlist_vid == NULL)) return;
 
-    const char* id_path = "/videoId";
+    const char* id_path = ".videoId";
 
     if (!assign_string_from_path(playlistVideoRenderer, id_path, playlist_vid->id, sizeof(playlist_vid->id))) {
         printf("parse_playlist_video: id assign fail (json path: \"%s\")\n", id_path);
@@ -1432,25 +1469,25 @@ void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* playlist_v
         printf("parse_playlist_video: thumbnail path fail\n");
     }
 
-    const char* title_path = "/title/runs/0/text";
+    const char* title_path = ".title.runs[0].text";
 
     if (!assign_string_from_path(playlistVideoRenderer, title_path, playlist_vid->title, sizeof(playlist_vid->title))) {
         printf("parse_playlist_video: title assign fail (json path: \"%s\")\n", title_path);
     }
 
-    const char* author_path = "/shortBylineText/runs/0/text";
+    const char* author_path = ".shortBylineText.runs[0].text";
 
     if (!assign_string_from_path(playlistVideoRenderer, author_path, playlist_vid->author, sizeof(playlist_vid->author))) {
         printf("parse_playlist_video: author assign fail (json path: \"%s\")\n", author_path);
     }
 
-    const char* length_path = "/lengthText/simpleText";
+    const char* length_path = ".lengthText.simpleText";
 
     if (!assign_string_from_path(playlistVideoRenderer, length_path, playlist_vid->duration, sizeof(playlist_vid->duration))) {
         printf("parse_playlist_video: duration assign fail (json path: \"%s\")\n", length_path);
     }
 
-    const char* views_path = "/videoInfo/runs/0/text";
+    const char* views_path = ".videoInfo.runs[0].text";
 
     if (assign_string_from_path(playlistVideoRenderer, views_path, playlist_vid->view_count, sizeof(playlist_vid->view_count))) {
         char* end = strstr(playlist_vid->view_count, " views");
@@ -1459,7 +1496,7 @@ void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* playlist_v
 
     else printf("parse_playlist_video: views assign fail (json path: \"%s\")\n", views_path);
 
-    const char* publish_date_path = "/videoInfo/runs/2/text";
+    const char* publish_date_path = ".videoInfo.runs[2].text";
 
     if (!assign_string_from_path(playlistVideoRenderer, publish_date_path, playlist_vid->date_published, sizeof(playlist_vid->date_published))) {
         printf("parse_playlist_video: date published assign fail (json path: \"%s\")\n", publish_date_path);
@@ -1470,7 +1507,7 @@ void parse_channel(cJSON* channelRenderer, SearchResult* channel)
 {
     if ((channelRenderer == NULL) || (channel == NULL)) return;
 
-    const char* id_path = "/channelId";
+    const char* id_path = ".channelId";
 
     if (!assign_string_from_path(channelRenderer, id_path, channel->id, sizeof(channel->id))) {
         printf("parse_channel: id assign fail (json path: \"%s\")\n", id_path);
@@ -1480,19 +1517,19 @@ void parse_channel(cJSON* channelRenderer, SearchResult* channel)
 
     channel->media_type = CHANNEL;
 
-    const char* title_path = "/title/simpleText";
+    const char* title_path = ".title.simpleText";
 
     if (!assign_string_from_path(channelRenderer, title_path, channel->title, sizeof(channel->title))) {
         printf("parse_channel: title assign fail (json path: \"%s\")\n", title_path);
     }
 
-    const char* sub_count_path = "/videoCountText/simpleText";
+    const char* sub_count_path = ".videoCountText.simpleText";
 
     if (!assign_string_from_path(channelRenderer, sub_count_path, channel->subscriber_count, sizeof(channel->subscriber_count))) {
         printf("parse_channel: subscriber count assign fail (json path: \"%s\")\n", sub_count_path);
     }
 
-    const cJSON* channelThumbnailLink = cjson_pointer_get(channelRenderer, "/thumbnail/thumbnails/0/url");
+    const cJSON* channelThumbnailLink = cjson_pointer_get(channelRenderer, ".thumbnail.thumbnails[0].url");
     if (valid_cjson_string(channelThumbnailLink)) {
         // the path either starts with '/ytc', or just '/'
         const char* path1 = strstr(channelThumbnailLink->valuestring, "/ytc");
@@ -1505,7 +1542,7 @@ void parse_playlist(cJSON *lockupViewModel, SearchResult *playlist)
 {
     if ((lockupViewModel == NULL) || (playlist == NULL)) return;
 
-    const char* id_path = "/contentId";
+    const char* id_path = ".contentId";
 
     if (!assign_string_from_path(lockupViewModel, id_path, playlist->id, sizeof(playlist->id))) {
         printf("parse_playlist: id assign fail (json path: \"%s\")\n", id_path);
@@ -1515,13 +1552,13 @@ void parse_playlist(cJSON *lockupViewModel, SearchResult *playlist)
     
     playlist->media_type = PLAYLIST;
 
-    const char* title_path = "/metadata/lockupMetadataViewModel/title/content";
+    const char* title_path = ".metadata.lockupMetadataViewModel.title.content";
 
     if (!assign_string_from_path(lockupViewModel, title_path, playlist->title, sizeof(playlist->title))) {
         printf("parse_playlist: title assign fail (json path: \"%s\")\n", title_path);
     }
 
-    const char* first_video_id_path = "/rendererContext/commandContext/onTap/innertubeCommand/watchEndpoint/videoId";
+    const char* first_video_id_path = ".rendererContext.commandContext.onTap.innertubeCommand.watchEndpoint.videoId";
 
     char video_id[16];
     if (assign_string_from_path(lockupViewModel, first_video_id_path, video_id, sizeof(video_id))) {
@@ -1532,7 +1569,7 @@ void parse_playlist(cJSON *lockupViewModel, SearchResult *playlist)
     
     else printf("parse_playlist: video id assign fail (json path: \"%s\")\n", first_video_id_path);
 
-    const char* video_count_path = "/contentImage/collectionThumbnailViewModel/primaryThumbnail/thumbnailViewModel/overlays/0/thumbnailOverlayBadgeViewModel/thumbnailBadges/0/thumbnailBadgeViewModel/text";
+    const char* video_count_path = ".contentImage.collectionThumbnailViewModel.primaryThumbnail.thumbnailViewModel.overlays[0].thumbnailOverlayBadgeViewModel.thumbnailBadges[0].thumbnailBadgeViewModel.text";
 
     if (!assign_string_from_path(lockupViewModel, video_count_path, playlist->video_count, sizeof(playlist->video_count))) {
         printf("parse_playlist: video count assign fail (json path: \"%s\")\n", video_count_path);
@@ -1556,11 +1593,11 @@ int create_results_from_json(cJSON* list, Results *results, const SearchType sea
             return 0;
         }
         
-        cJSON* videoRenderer   =       cjson_pointer_get(item, "/videoRenderer");     // video
-        cJSON* lockupViewModel =       cjson_pointer_get(item, "/lockupViewModel");   // playlist or related video container
-        cJSON* playlistVideoRenderer = cjson_pointer_get(item, "/playlistVideoRenderer"); // video object in playlist container
-        cJSON* channelRenderer =       cjson_pointer_get(item, "/channelRenderer");   // channel
-        cJSON* richItemRenderer =      cjson_pointer_get(item, "/richItemRenderer/content/videoRenderer"); // videos in channel window
+        cJSON* videoRenderer   =       cjson_pointer_get(item, ".videoRenderer");     // video
+        cJSON* lockupViewModel =       cjson_pointer_get(item, ".lockupViewModel");   // playlist or related video container
+        cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer"); // video object in playlist container
+        cJSON* channelRenderer =       cjson_pointer_get(item, ".channelRenderer");   // channel
+        cJSON* richItemRenderer =      cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer"); // videos in channel window
 
         if      (videoRenderer)         parse_video(videoRenderer, allow_youtube_shorts, search_result);
         else if (richItemRenderer)      parse_video(richItemRenderer, true,search_result);
@@ -1587,26 +1624,26 @@ const char* get_results_list_path(const SearchType search_type, const SearchAttr
     switch (search_type) {
         case SEARCH_TYPE_QUERIED: 
             if (search_attr == SEARCH_ATTR_REPLACE) 
-                return "/contents/twoColumnSearchResultsRenderer/primaryContents/sectionListRenderer/contents/0/itemSectionRenderer/contents";
+                return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedCommands/0/appendContinuationItemsAction/continuationItems/0/itemSectionRenderer/contents";
+                return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[0].itemSectionRenderer.contents";
         case SEARCH_TYPE_RELATED: 
             if (search_attr == SEARCH_ATTR_REPLACE)
-                return "/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results";
+                return "contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedEndpoints/0/appendContinuationItemsAction/continuationItems";
+                return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems";
         case SEARCH_TYPE_VIEW_PLAYLIST: 
             if (search_attr == SEARCH_ATTR_REPLACE)
-                return "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/itemSectionRenderer/contents/0/playlistVideoListRenderer/contents";
+                return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems";
+                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
         case SEARCH_TYPE_VIEW_CHANNEL: 
             if (search_attr == SEARCH_ATTR_REPLACE) 
-                return "/contents/twoColumnBrowseResultsRenderer/tabs/1/tabRenderer/content/richGridRenderer/contents";
+                return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems";
+                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
         case SEARCH_TYPE_TRENDING: 
-            return "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/2/itemSectionRenderer/contents/0/shelfRenderer/content/expandedShelfContentsRenderer/items";
+            return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[2].itemSectionRenderer.contents[0].shelfRenderer.content.expandedShelfContentsRenderer.items";
         // should never happen...
         case SEARCH_TYPE_VIDEO_FOCUS: 
             break;
@@ -1644,24 +1681,24 @@ const char* get_continuation_token_path(const SearchType search_type, const Sear
     switch (search_type) {
         case SEARCH_TYPE_QUERIED:
             if (search_attr == SEARCH_ATTR_REPLACE)
-                return "/contents/twoColumnSearchResultsRenderer/primaryContents/sectionListRenderer/contents/1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+                return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedCommands/0/appendContinuationItemsAction/continuationItems/1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+                return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case SEARCH_TYPE_RELATED:
             if (search_attr == SEARCH_ATTR_REPLACE)
-                return "/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+                return ".contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedEndpoints/0/appendContinuationItemsAction/continuationItems/-1//continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+                return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case SEARCH_TYPE_VIEW_PLAYLIST:
             if (search_attr == SEARCH_ATTR_REPLACE)
-                return "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/itemSectionRenderer/contents/0/playlistVideoListRenderer/contents/-1/continuationItemRenderer/continuationEndpoint/commandExecutorCommand/commands/1/continuationCommand/token";
+                return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.commandExecutorCommand.commands[1].continuationCommand.token";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case SEARCH_TYPE_VIEW_CHANNEL:
             if (search_attr == SEARCH_ATTR_REPLACE)
-                return "/contents/twoColumnBrowseResultsRenderer/tabs/1/tabRenderer/content/richGridRenderer/contents/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+                return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
             if (search_attr == SEARCH_ATTR_APPENDING)
-                return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case SEARCH_TYPE_TRENDING:
         case SEARCH_TYPE_VIDEO_FOCUS:
             return NULL;
@@ -1689,8 +1726,6 @@ void* get_results_from_query(void* args)
         SetWindowTitle("[failed] - metube");
         goto cleanup;
     }
-
-    create_file_from_memory("body.json", response.body);
 
     json = cJSON_Parse(response.body.data);
     if (json == NULL) {
@@ -1724,7 +1759,6 @@ void* get_results_from_query(void* args)
     const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
     if (valid_cjson_string(token_obj)) {
         (*dest) = strdup(token_obj->valuestring);
-        printf("%s\n", *dest);
     }
 
     else printf("get_results_from_query: failed to parse continuation token (path: %s)\n", continuation_path);
@@ -2747,7 +2781,7 @@ void* get_focused_video_information(void* args)
         goto cleanup;
     }
 
-    const char* desc_path = "/videoDetails/shortDescription";
+    const char* desc_path = ".videoDetails.shortDescription";
 
     if (!assign_string_from_path(json, desc_path, targs->highlighted_video->description, sizeof(targs->highlighted_video->description))) {
         printf("get_focused_video_information: assign video desc fail (json path: %s)\n", desc_path);
