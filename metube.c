@@ -221,8 +221,8 @@ typedef struct SearchResult
     MediaType media_type;               
 
     char id[64];                // used to identify the availible media types                 
+    char authorId[64];          // id of content creator
     char title[256];            // name of the content           
-    char author[128];           // creator of video, livestream or playlist         
     char subscriber_count[32];  // X.XX k/M/B formatted   
     char view_count[16];        // ^         
     char date_published[32];    // 'X years/months/weeks/seconds ago'    
@@ -246,7 +246,7 @@ SearchResult* init_search_result()
     search_result->thumbnail_loaded = false;
     memset(search_result->id, 0, sizeof(search_result->id));
     memset(search_result->title, 0, sizeof(search_result->title));
-    memset(search_result->author, 0, sizeof(search_result->author));
+    memset(search_result->authorId, 0, sizeof(search_result->authorId));
     memset(search_result->duration, 0, sizeof(search_result->duration));
     memset(search_result->view_count, 0, sizeof(search_result->view_count));
     memset(search_result->video_count, 0, sizeof(search_result->video_count));
@@ -266,7 +266,7 @@ void free_search_result(SearchResult *search_result)
 void print_search_result(const SearchResult *search_result) 
 {
     printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %s type) %d thumbnail) %s\n", 
-            search_result->id, search_result->title, search_result->author, search_result->subscriber_count, search_result->view_count, search_result->date_published, search_result->duration, search_result->video_count, search_result->media_type, search_result->thumbnail_path);
+            search_result->id, search_result->title, search_result->authorId, search_result->subscriber_count, search_result->view_count, search_result->date_published, search_result->duration, search_result->video_count, search_result->media_type, search_result->thumbnail_path);
 }
 
 // linked list of search results returned from a query
@@ -1336,9 +1336,9 @@ bool assign_video_thumbnail_path(const char* video_id, char* dest, const size_t 
     return (0 < written) && (written < dest_size);
 }
 
-void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchResult* video)
+void parse_video(cJSON* videoRenderer, const char* author_id_override, const bool allow_youtube_shorts, SearchResult* video)
 {
-    if ((videoRenderer == NULL) || (video == NULL)) return;
+    if ((videoRenderer == NULL) || (video == NULL) || (author_id_override == NULL)) return;
 
     video->media_type = VIDEO;
 
@@ -1351,36 +1351,43 @@ void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchRe
         else video->media_type = SHORT;
     }
 
-    const char* id_json_path = ".videoId";
+    const char* id_path = ".videoId";
 
-    if (!assign_string_from_path(videoRenderer, id_json_path, video->id, sizeof(video->id))) {
-        printf("parse_video: id assign fail (json path: \"%s\")\n", id_json_path);
+    if (assign_string_from_path(videoRenderer, id_path, video->id, sizeof(video->id)) == false) {
+        printf("parse_video: id assign fail (json path: \"%s\")\n", id_path);
         video->media_type = UNDF;
         return;
     }
 
-    if (!assign_video_thumbnail_path(video->id, video->thumbnail_path, sizeof(video->thumbnail_path))) {
+    if (assign_video_thumbnail_path(video->id, video->thumbnail_path, sizeof(video->thumbnail_path)) == false) {
         printf("parse_video: thumbnail path fail\n");
     }
     
-    const char* title_json_path = ".title.runs[0].text";
+    const char* title_path = ".title.runs[0].text";
     
-    if (!assign_string_from_path(videoRenderer, title_json_path, video->title, sizeof(video->title))) {
-        printf("parse_video: title assign fail (json path: \"%s\")\n", title_json_path);
+    if (assign_string_from_path(videoRenderer, title_path, video->title, sizeof(video->title)) == false) {
+        printf("parse_video: title assign fail (json path: \"%s\")\n", title_path);
     }
 
-    const char* author_json_path = ".ownerText.runs[0].text";
+    if (author_id_override[0] != '\0') {
+        strncpy(video->authorId, author_id_override, sizeof(video->authorId) - 1);
+        video->authorId[sizeof(video->authorId) - 1] = '\0';
+    }
 
-    if (!assign_string_from_path(videoRenderer, author_json_path, video->author, sizeof(video->author))) {
-        printf("parse_video: author assign fail (json path: \"%s\")\n", author_json_path);
+    else {
+        const char* author_id_path = author_id_override[0] != '\0' ? author_id_override : ".longBylineText.runs[0].navigationEndpoint.browseEndpoint.browseId";
+        
+        if (assign_string_from_path(videoRenderer, author_id_path, video->authorId, sizeof(video->authorId)) == false) {
+            printf("parse_video: author id assign fail (json path: %s)\n", author_id_path);
+        }
     }
 
     if (video_is_live(videoRenderer)) {
         video->media_type = LIVE;
 
-        const char* live_viewers_json_path = ".viewCountText.runs[0].text";
+        const char* live_viewers_path = ".viewCountText.runs[0].navigationEndpoint.browseEndpoint.browseId";
 
-        if (!assign_string_from_path(videoRenderer, live_viewers_json_path, video->view_count, sizeof(video->view_count))) {
+        if (assign_string_from_path(videoRenderer, live_viewers_path, video->view_count, sizeof(video->view_count)) == false) {
             video->view_count[0] = '0';
         }
 
@@ -1395,16 +1402,16 @@ void parse_video(cJSON* videoRenderer, const bool allow_youtube_shorts, SearchRe
     
     else snprintf(video->view_count, sizeof(video->view_count), "no views");
 
-    const char* video_age_json_path = ".publishedTimeText.simpleText";
+    const char* video_age_path = ".publishedTimeText.simpleText";
 
-    if (!assign_string_from_path(videoRenderer, video_age_json_path, video->date_published, sizeof(video->date_published))) {
-        printf("parse_video: date published assign fail (json path: \"%s\")\n", video_age_json_path);
+    if (assign_string_from_path(videoRenderer, video_age_path, video->date_published, sizeof(video->date_published)) == false) {
+        printf("parse_video: date published assign fail (json path: \"%s\")\n", video_age_path);
     }
 
-    const char* length_json_path = ".lengthText.simpleText";
+    const char* length_path = ".lengthText.simpleText";
 
-    if (!assign_string_from_path(videoRenderer, length_json_path, video->duration, sizeof(video->duration))) {
-        printf("parse_video: length assign fail (json path: \"%s\")\n", length_json_path);
+    if (assign_string_from_path(videoRenderer, length_path, video->duration, sizeof(video->duration)) == false) {
+        printf("parse_video: length assign fail (json path: \"%s\")\n", length_path);
     }
 }
 
@@ -1430,6 +1437,12 @@ void parse_related_video(cJSON* lockupViewModel, SearchResult* related_vid)
 
     if (!assign_string_from_path(lockupViewModel, title_path, related_vid->title, sizeof(related_vid->title))) {
         printf("parse_related_video: title assign fail (json path: \"%s\")\n", title_path);
+    }
+
+    const char* author_id_path = ".metadata.lockupMetadataViewModel.image.decoratedAvatarViewModel.rendererContext.commandContext.onTap.innertubeCommand.browseEndpoint.browseId";
+
+    if (assign_string_from_path(lockupViewModel, author_id_path, related_vid->authorId, sizeof(related_vid->authorId)) == false) {
+        printf("parse_related_video: author id assign fail\n");
     }
 
     const char* duration_path = ".contentImage.thumbnailViewModel.overlays[0].thumbnailOverlayBadgeViewModel.thumbnailBadges[0].thumbnailBadgeViewModel.text";
@@ -1475,10 +1488,10 @@ void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* playlist_v
         printf("parse_playlist_video: title assign fail (json path: \"%s\")\n", title_path);
     }
 
-    const char* author_path = ".shortBylineText.runs[0].text";
+    const char* author_id_path = ".shortBylineText.runs[0].navigationEndpoint.browseEndpoint.browseId";
 
-    if (!assign_string_from_path(playlistVideoRenderer, author_path, playlist_vid->author, sizeof(playlist_vid->author))) {
-        printf("parse_playlist_video: author assign fail (json path: \"%s\")\n", author_path);
+    if (assign_string_from_path(playlistVideoRenderer, author_id_path, playlist_vid->authorId, sizeof(playlist_vid->authorId)) == false) {
+        printf("parse_playlist_video: author id assign fail (json path: %s)\n", author_id_path);
     }
 
     const char* length_path = ".lengthText.simpleText";
@@ -1576,49 +1589,6 @@ void parse_playlist(cJSON *lockupViewModel, SearchResult *playlist)
     }
 }
 
-int create_results_from_json(cJSON* list, Results *results, const SearchType search_type, const bool allow_youtube_shorts)
-{
-    if (valid_cjson_array(list) == false) {
-        printf("create_results_from_json: list passed is not a valid array\n");
-        return 0;
-    }
-
-    int nelements = 0;
-
-    cJSON *item;
-    cJSON_ArrayForEach (item, list) {
-        SearchResult *search_result = init_search_result();
-        if (search_result == NULL) {
-            printf("create_results_from_json: init_search_result returned NULL\n");
-            return 0;
-        }
-        
-        cJSON* videoRenderer   =       cjson_pointer_get(item, ".videoRenderer");     // video
-        cJSON* lockupViewModel =       cjson_pointer_get(item, ".lockupViewModel");   // playlist or related video container
-        cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer"); // video object in playlist container
-        cJSON* channelRenderer =       cjson_pointer_get(item, ".channelRenderer");   // channel
-        cJSON* richItemRenderer =      cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer"); // videos in channel window
-
-        if      (videoRenderer)         parse_video(videoRenderer, allow_youtube_shorts, search_result);
-        else if (richItemRenderer)      parse_video(richItemRenderer, true,search_result);
-        else if (playlistVideoRenderer) parse_playlist_video(playlistVideoRenderer, search_result);
-        else if (channelRenderer)       parse_channel(channelRenderer, search_result);
-        else if (lockupViewModel) {
-            if (search_type == SEARCH_TYPE_RELATED) parse_related_video(lockupViewModel, search_result);
-            else parse_playlist(lockupViewModel, search_result);
-        }
-
-        if (search_result->media_type != UNDF) {
-            nelements++;
-            add_search_result(results, search_result);
-        }
-
-        else free_search_result(search_result);
-    }
-
-    return nelements;
-}
-
 const char* get_results_list_path(const SearchType search_type, const SearchAttribute search_attr)
 {
     switch (search_type) {
@@ -1650,6 +1620,62 @@ const char* get_results_list_path(const SearchType search_type, const SearchAttr
     }
 
     return NULL;
+}
+
+int create_results_from_json(cJSON* json, Results *results, const SearchType search_type, const SearchAttribute search_attr, const bool allow_youtube_shorts)
+{
+    const char* path = get_results_list_path(search_type, search_attr);
+
+    cJSON* results_array = cjson_pointer_get(json, path);
+    if ((results_array == NULL) || (cJSON_IsArray(results_array) == false)) {
+        printf("create_results_from_json: invalid results array from path %s", path);
+        return -1;
+    }
+
+    // need to get the author id if this is a view channel
+    char author_id[64] = {0};
+
+    if (search_type == SEARCH_TYPE_VIEW_CHANNEL) {
+        const char* author_id_path = ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId";
+        if (assign_string_from_path(json, author_id_path, author_id, sizeof(author_id)) == false) {
+            printf("funct: failed to parse author id from the path %s\n", author_id_path);
+        }
+    }
+
+    int elements_added = 0;
+
+    cJSON *item;
+    cJSON_ArrayForEach (item, results_array) {
+        SearchResult *search_result = init_search_result();
+        if (search_result == NULL) {
+            printf("create_results_from_json: init_search_result returned NULL\n");
+            return 0;
+        }
+        
+        cJSON* videoRenderer   =       cjson_pointer_get(item, ".videoRenderer");     // video
+        cJSON* lockupViewModel =       cjson_pointer_get(item, ".lockupViewModel");   // playlist or related video container
+        cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer"); // video object in playlist container
+        cJSON* channelRenderer =       cjson_pointer_get(item, ".channelRenderer");   // channel
+        cJSON* richItemRenderer =      cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer"); // videos in channel window
+        
+        if      (videoRenderer)         parse_video(videoRenderer, author_id, allow_youtube_shorts, search_result);
+        else if (richItemRenderer)      parse_video(richItemRenderer, author_id, allow_youtube_shorts,search_result);
+        else if (playlistVideoRenderer) parse_playlist_video(playlistVideoRenderer, search_result);
+        else if (channelRenderer)       parse_channel(channelRenderer, search_result);
+        else if (lockupViewModel) {
+            if (search_type == SEARCH_TYPE_RELATED) parse_related_video(lockupViewModel, search_result);
+            else parse_playlist(lockupViewModel, search_result);
+        }
+
+        if (search_result->media_type != UNDF) {
+            elements_added++;
+            add_search_result(results, search_result);
+        }
+
+        else free_search_result(search_result);
+    }
+
+    return elements_added;
 }
 
 const char* search_type_to_text(const SearchType search_type)
@@ -1705,6 +1731,19 @@ const char* get_continuation_token_path(const SearchType search_type, const Sear
     }
 }
 
+
+void delete_n_results(Results* results, const size_t n)
+{
+    if (results == NULL || (n > results->count)) return;
+
+    for (int i = 0; results->head && i < n; i++) {
+        SearchResult* to_del = results->head;
+        results->count--;
+        results->head = results->head->next;
+        free_search_result(to_del);
+    }
+}
+
 static bool search_finished = true;
 
 void* get_results_from_query(void* args)
@@ -1727,6 +1766,8 @@ void* get_results_from_query(void* args)
         goto cleanup;
     }
 
+    create_file_from_memory("body.json", response.body);
+
     json = cJSON_Parse(response.body.data);
     if (json == NULL) {
         printf("get_results_from_query: cJSON_Parse returned NULL\n");
@@ -1734,20 +1775,16 @@ void* get_results_from_query(void* args)
         goto cleanup;
     }
 
-    const bool allow_shorts = targs->query->allow_youtube_shorts;
     const SearchType search_type = targs->query->search_type;
     const SearchAttribute search_attr = targs->query->search_attr;
 
-    const char* path = get_results_list_path(search_type, search_attr);
-
-    cJSON* result_root = cjson_pointer_get(json, path);
-    if (result_root == NULL) {
-        printf("get_results_from_query: 'result_root' is NULL (json path: %s)\n", path);
+    const int old_size = targs->search_results->count;
+    const int elements_added = create_results_from_json(json, targs->search_results, search_type, search_attr, targs->query->allow_youtube_shorts);
+    if (elements_added < 0) {
+        printf("get_results_from_query: invalid elements added\n");
         SetWindowTitle("[failed] - metube");
         goto cleanup;
     }
-
-    const int elements_added = create_results_from_json(result_root, targs->search_results, search_type, allow_shorts);
 
     char** dest = &targs->query->continuation_token;
     if (*dest) {
@@ -1769,13 +1806,7 @@ void* get_results_from_query(void* args)
     printf("%s (%s) took %f seconds, %d items found\n", type_text, attr_text, search_time, elements_added);
     
     if (search_attr == SEARCH_ATTR_REPLACE) {
-        const int to_delete = targs->search_results->count - elements_added;
-        for (int i = 0; i < to_delete; i++) {
-            SearchResult* to_free = targs->search_results->head;
-            targs->search_results->head = targs->search_results->head->next; 
-            free_search_result(to_free);
-            targs->search_results->count--;
-        }
+        delete_n_results(targs->search_results, old_size);
     }
 
     SetWindowTitle(TextFormat("[search results(%zu)] - metube", targs->search_results->count));
@@ -2729,6 +2760,7 @@ bool queue_search_task(Query* query, PersistentConnection* conn, Results* result
 typedef struct
 {
     char id[64];
+    char author_id[64];
     char description[2048];
 } HighlightedVideo;
 
@@ -2815,9 +2847,12 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, Hig
     return launch_task(&task_queue, targs, get_focused_video_information);
 }
 
-// related vids arent always videos...
-// some issue with highlighting video
-    // happens after pressing load more video
+// bug bounty
+    // cant press two searches at once, search_finished should have solved this
+    // playlist video count not showing videos at the end (some of them)
+    // some issue with highlighting video
+        // happens after pressing load more button
+    // related videos arent always videos
 
 int main()
 {
@@ -2990,6 +3025,27 @@ int main()
 
             GuiSetState(STATE_NORMAL);
 
+            if (highlighted_video.author_id[0] == '\0') {
+                GuiSetState(STATE_DISABLED);
+            }
+
+            const Rectangle users_videos_button_bounds = {
+                .x = related_videos_button_bounds.x + related_videos_button_bounds.width + ui.padding,
+                .y = ui.padding,
+                .width = 85,
+                .height = 25,
+            };
+
+            if (GuiButton(users_videos_button_bounds, "User Videos")) {
+                search = search_finished;
+                query.search_attr = SEARCH_ATTR_REPLACE;
+                query.search_type = SEARCH_TYPE_VIEW_CHANNEL;
+                strncpy(query.focused_id, highlighted_video.author_id, sizeof(query.focused_id) - 1);
+                SetWindowTitle(TextFormat("[Channel:%s(loading)] - metube", query.focused_id));
+            }
+
+            GuiSetState(STATE_NORMAL);
+
             const Rectangle filter_window_bounds = {
                 .x = ui.padding, 
                 .y = search_button_bounds.y + search_button_bounds.height + ui.padding, 
@@ -3058,7 +3114,11 @@ int main()
                     continue;
                 }
 
-                const Color container_color = strcmp(search_result->id, highlighted_video.id) ? ((i % 2) ? WHITE : RAYWHITE) : BLUE;
+                const bool result_is_highlighted = strcmp(search_result->id, highlighted_video.id) == 0;
+
+                const Color container_color = result_is_highlighted ? 
+                                              BLUE :
+                                              ((i % 2) ? WHITE : RAYWHITE);
 
                 DrawRectangleRec(container, container_color);
 
@@ -3081,6 +3141,7 @@ int main()
                 }
 
                 draw_search_result(search_result, thumbnail, container, container_color, ui);
+
                 if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
                     (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) &&
                     (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
@@ -3088,11 +3149,12 @@ int main()
                         case LIVE:
                         case SHORT:
                         case VIDEO:
-                            if (strcmp(search_result->id, highlighted_video.id) != 0) {
+                            if (result_is_highlighted == false) {
                                 clicked_video = true;
                                 query.search_type = SEARCH_TYPE_VIDEO_FOCUS;
                                 strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
                                 strncpy(highlighted_video.id, search_result->id, sizeof(highlighted_video.id) - 1);
+                                strncpy(highlighted_video.author_id, search_result->authorId, sizeof(highlighted_video.author_id));
                             }
                             break;
                         case PLAYLIST:
