@@ -1228,8 +1228,8 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
         if (string_is_integer(elements[i])) {
             if (cJSON_IsArray(ret)) {
-                const int index = atoi(elements[i]);
-                if ((index >= 0) && (index < cJSON_GetArraySize(ret))) {
+                const int index = atoi(elements[i]) == -1 ? cJSON_GetArraySize(ret) - 1 : atoi(elements[i]);
+                if (index <= cJSON_GetArraySize(ret)) {
                     ret = cJSON_GetArrayItem(ret, index);
                 }
 
@@ -1244,8 +1244,6 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
     return ret;
 }
-
-
 
 bool video_is_youtube_short(cJSON *videoRenderer) 
 {
@@ -1590,28 +1588,25 @@ const char* get_results_list_path(const SearchType search_type, const SearchAttr
         case SEARCH_TYPE_QUERIED: 
             if (search_attr == SEARCH_ATTR_REPLACE) 
                 return "/contents/twoColumnSearchResultsRenderer/primaryContents/sectionListRenderer/contents/0/itemSectionRenderer/contents";
-            else if (search_attr == SEARCH_ATTR_APPENDING)
+            if (search_attr == SEARCH_ATTR_APPENDING)
                 return "/onResponseReceivedCommands/0/appendContinuationItemsAction/continuationItems/0/itemSectionRenderer/contents";
-        
-        case SEARCH_TYPE_TRENDING: return "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/2/itemSectionRenderer/contents/0/shelfRenderer/content/expandedShelfContentsRenderer/items";
         case SEARCH_TYPE_RELATED: 
             if (search_attr == SEARCH_ATTR_REPLACE)
                 return "/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results";
-            else if (search_attr == SEARCH_ATTR_APPENDING)
+            if (search_attr == SEARCH_ATTR_APPENDING)
                 return "/onResponseReceivedEndpoints/0/appendContinuationItemsAction/continuationItems";
-        
         case SEARCH_TYPE_VIEW_PLAYLIST: 
             if (search_attr == SEARCH_ATTR_REPLACE)
                 return "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/itemSectionRenderer/contents/0/playlistVideoListRenderer/contents";
-            else if (search_attr == SEARCH_ATTR_APPENDING)
+            if (search_attr == SEARCH_ATTR_APPENDING)
                 return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems";
-        
         case SEARCH_TYPE_VIEW_CHANNEL: 
             if (search_attr == SEARCH_ATTR_REPLACE) 
                 return "/contents/twoColumnBrowseResultsRenderer/tabs/1/tabRenderer/content/richGridRenderer/contents";
-            else if (search_attr == SEARCH_ATTR_APPENDING)
+            if (search_attr == SEARCH_ATTR_APPENDING)
                 return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems";
-        
+        case SEARCH_TYPE_TRENDING: 
+            return "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/2/itemSectionRenderer/contents/0/shelfRenderer/content/expandedShelfContentsRenderer/items";
         // should never happen...
         case SEARCH_TYPE_VIDEO_FOCUS: 
             break;
@@ -1644,61 +1639,34 @@ const char* search_attr_to_text(const SearchAttribute search_attr)
     }
 }
 
-const cJSON* get_continuation_token_obj(cJSON* root, const SearchType search_type, const SearchAttribute search_attr)
+const char* get_continuation_token_path(const SearchType search_type, const SearchAttribute search_attr)
 {
-    if (root == NULL) return false;
-
-    const char* token_path = "/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
-    cJSON* parent = NULL;
-
     switch (search_type) {
         case SEARCH_TYPE_QUERIED:
             if (search_attr == SEARCH_ATTR_REPLACE)
-                parent = cjson_pointer_get(root, "/contents/twoColumnSearchResultsRenderer/primaryContents/sectionListRenderer/contents/1");
-            else if (search_attr == SEARCH_ATTR_APPENDING)
-                parent = cjson_pointer_get(root, "/onResponseReceivedCommands/0/appendContinuationItemsAction/continuationItems/1");
-            break;
+                return "/contents/twoColumnSearchResultsRenderer/primaryContents/sectionListRenderer/contents/1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+            if (search_attr == SEARCH_ATTR_APPENDING)
+                return "/onResponseReceivedCommands/0/appendContinuationItemsAction/continuationItems/1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
         case SEARCH_TYPE_RELATED:
-            if (search_attr == SEARCH_ATTR_REPLACE) {
-                parent = cjson_pointer_get(root, "/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results");
-                parent = cJSON_GetArrayItem(parent, cJSON_GetArraySize(parent) - 1);
-            }
-            else if (search_attr == SEARCH_ATTR_APPENDING) {
-                parent = cjson_pointer_get(root, "/onResponseReceivedEndpoints/0/appendContinuationItemsAction/continuationItems");
-                parent = cJSON_GetArrayItem(parent, cJSON_GetArraySize(parent) - 1);
-            }
-            break;
+            if (search_attr == SEARCH_ATTR_REPLACE)
+                return "/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+            if (search_attr == SEARCH_ATTR_APPENDING)
+                return "/onResponseReceivedEndpoints/0/appendContinuationItemsAction/continuationItems/-1//continuationItemRenderer/continuationEndpoint/continuationCommand/token";
         case SEARCH_TYPE_VIEW_PLAYLIST:
-            if (search_attr == SEARCH_ATTR_REPLACE) {
-                parent = cjson_pointer_get(root, "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/itemSectionRenderer/contents/0/playlistVideoListRenderer/contents");
-                parent = cJSON_GetArrayItem(parent, cJSON_GetArraySize(parent) - 1);
-                parent = cjson_pointer_get(parent, "/continuationItemRenderer/continuationEndpoint/commandExecutorCommand/commands/1/continuationCommand/token");
-                return parent;
-            }
-            else if (search_attr == SEARCH_ATTR_APPENDING) {
-                parent = cjson_pointer_get(root, "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems");
-                parent = cJSON_GetArrayItem(parent, cJSON_GetArraySize(parent) - 1);
-            }
-            break;
+            if (search_attr == SEARCH_ATTR_REPLACE)
+                return "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/itemSectionRenderer/contents/0/playlistVideoListRenderer/contents/-1/continuationItemRenderer/continuationEndpoint/commandExecutorCommand/commands/1/continuationCommand/token";
+            if (search_attr == SEARCH_ATTR_APPENDING)
+                return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
         case SEARCH_TYPE_VIEW_CHANNEL:
-            if(search_attr == SEARCH_ATTR_REPLACE) {
-                parent = cjson_pointer_get(root, "/contents/twoColumnBrowseResultsRenderer/tabs/1/tabRenderer/content/richGridRenderer/contents");
-                parent = cJSON_GetArrayItem(parent, cJSON_GetArraySize(parent) - 1);
-            }
-            else if (search_attr == SEARCH_ATTR_APPENDING) {
-                parent = cjson_pointer_get(root, "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems");
-                parent = cJSON_GetArrayItem(parent, cJSON_GetArraySize(parent) - 1);
-            }
-            break;
-        case SEARCH_TYPE_TRENDING: 
-        case SEARCH_TYPE_VIDEO_FOCUS: 
-            break;
+            if (search_attr == SEARCH_ATTR_REPLACE)
+                return "/contents/twoColumnBrowseResultsRenderer/tabs/1/tabRenderer/content/richGridRenderer/contents/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+            if (search_attr == SEARCH_ATTR_APPENDING)
+                return "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems/-1/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+        case SEARCH_TYPE_TRENDING:
+        case SEARCH_TYPE_VIDEO_FOCUS:
+            return NULL;
     }
-
-    const cJSON* token_obj = cjson_pointer_get(parent, token_path);
-    
-    return token_obj;
-} 
+}
 
 static bool search_finished = true;
 
@@ -1747,15 +1715,19 @@ void* get_results_from_query(void* args)
     const int elements_added = create_results_from_json(result_root, targs->search_results, search_type, allow_shorts);
 
     char** dest = &targs->query->continuation_token;
-    if ((*dest) != NULL) {
-        free((*dest));
-        (*dest) = NULL;
+    if (*dest) {
+        free((*dest)); (*dest) = NULL;
     }
-  
-    const cJSON* token_obj = get_continuation_token_obj(json, search_type, search_attr);
+
+    const char* continuation_path = get_continuation_token_path(search_type, search_attr);
+
+    const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
     if (valid_cjson_string(token_obj)) {
         (*dest) = strdup(token_obj->valuestring);
+        printf("%s\n", *dest);
     }
+
+    else printf("get_results_from_query: failed to parse continuation token (path: %s)\n", continuation_path);
 
     const float search_time = GetTime() - start_time;
     const char* type_text = search_type_to_text(search_type);
@@ -2811,6 +2783,7 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, Hig
 
 // related vids arent always videos...
 // some issue with highlighting video
+    // happens after pressing load more video
 
 int main()
 {
@@ -3167,3 +3140,4 @@ int main()
     // set ptrs to NULL after freeing them
     // thumbnail frames from video click
     // playlist video count not showing videos at the end (some of them)
+    // limit the amout of results to 20 (specifically loading more playlist videos)
