@@ -274,7 +274,8 @@ typedef struct
 {
     size_t count;           
     SearchResult* head;    
-    SearchResult* tail;     
+    SearchResult* tail;
+    pthread_mutex_t mutex;     
 } Results;
 
 Results init_results() 
@@ -282,6 +283,7 @@ Results init_results()
     Results search_results;
     search_results.head = search_results.tail = NULL;
     search_results.count = 0;
+    pthread_mutex_init(&search_results.mutex, NULL);
     return search_results;
 }
 
@@ -320,6 +322,7 @@ void free_results(Results *results)
         free_search_result(to_free);
     }
 
+    pthread_mutex_destroy(&results->mutex);
     results->head = results->tail = NULL;
     results->count = 0;
 }
@@ -718,7 +721,7 @@ ConnectionPool* media_type_to_pool(const MediaType media_type)
         case PLAYLIST: return &video_thumbnail_pool;
         case CHANNEL: return &channel_thumbnail_pool;
         default:
-            printf("media_type_to_pool: invalid type passed\n");
+            printf("media_type_to_pool: invalid type passed %d\n", media_type);
             return NULL;
     }
 }
@@ -1239,7 +1242,7 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
             ret = cJSON_GetObjectItem(ret, array_name);
             if (ret == NULL) {
-                printf("cjson_pointer_get: failed to add array object \"%s\"\n", elements[i]);
+                // printf("cjson_pointer_get: failed to add array object \"%s\"\n", elements[i]);
                 return NULL;
             }
 
@@ -1778,12 +1781,14 @@ void* get_results_from_query(void* args)
 
     const SearchType search_type = targs->query->search_type;
     const SearchAttribute search_attr = targs->query->search_attr;
-
+    
+    pthread_mutex_lock(&targs->search_results->mutex);
     const int old_size = targs->search_results->count;
     const int elements_added = create_results_from_json(json, targs->search_results, search_type, search_attr, targs->query->allow_youtube_shorts);
+    pthread_mutex_unlock(&targs->search_results->mutex);
+
     if (elements_added < 0) {
         printf("get_results_from_query: invalid elements added\n");
-        SetWindowTitle("[failed] - metube");
         goto cleanup;
     }
 
@@ -1807,7 +1812,9 @@ void* get_results_from_query(void* args)
     printf("%s (%s) took %f seconds, %d items found\n", type_text, attr_text, search_time, elements_added);
     
     if (search_attr == SEARCH_ATTR_REPLACE) {
+        pthread_mutex_lock(&targs->search_results->mutex);
         delete_n_results(targs->search_results, old_size);
+        pthread_mutex_unlock(&targs->search_results->mutex);
     }
 
     SetWindowTitle(TextFormat("[search results(%zu)] - metube", targs->search_results->count));
@@ -2468,7 +2475,7 @@ const float seconds_to_microseconds(const float seconds)
 
 bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, PersistentConnection* conn)
 {
-    if (search_result_id == NULL || thumbnail_path == NULL) return false;
+    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (conn == NULL)) return false;
 
     PreparedRequest req = {0};
     if (configure_get_header(sizeof(req.header), req.header, conn->host, thumbnail_path) == false) {
@@ -2851,9 +2858,6 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, Hig
 }
 
 // bug bountys
-    // cant press two searches at once, search_finished should have solved this
-        // mutex protection?
-    // playlist video count not showing videos at the end (some of them)
     // related videos arent always videos
 
 int main()
@@ -2985,7 +2989,9 @@ int main()
 
             if (GuiButton(search_button_bounds, "Search") || enter_key_pressed) {
                 if (trim_whitespace(query.string) > 0) {
-                    search = search_finished;
+                    pthread_mutex_lock(&task_queue.mutex);
+                    search = task_queue.count == 0;
+                    pthread_mutex_unlock(&task_queue.mutex);
                     query.search_attr = SEARCH_ATTR_REPLACE;
                     query.search_type = SEARCH_TYPE_QUERIED;
                     SetWindowTitle(TextFormat("[%s(loading)] - metube", query.string));
@@ -3000,7 +3006,7 @@ int main()
             };
 
             if (GuiButton(trending_button_bounds, "Trending")) {
-                search = search_finished;
+                search = true;
                 query.search_attr = SEARCH_ATTR_REPLACE;
                 query.search_type = SEARCH_TYPE_TRENDING;
                 SetWindowTitle("[Trending(loading)] - metube");
@@ -3018,7 +3024,7 @@ int main()
             }
             
             if (GuiButton(related_videos_button_bounds, "Related Videos")) {
-                search = search_finished;
+                search = true;
                 query.search_attr = SEARCH_ATTR_REPLACE;
                 query.search_type = SEARCH_TYPE_RELATED;
                 strncpy(query.focused_id, highlighted_video.id, sizeof(query.focused_id) - 1);
@@ -3039,7 +3045,7 @@ int main()
             };
 
             if (GuiButton(users_videos_button_bounds, "User Videos")) {
-                search = search_finished;
+                search = true;
                 query.search_attr = SEARCH_ATTR_REPLACE;
                 query.search_type = SEARCH_TYPE_VIEW_CHANNEL;
                 strncpy(query.focused_id, highlighted_video.author_id, sizeof(query.focused_id) - 1);
@@ -3070,7 +3076,7 @@ int main()
             }
 
             if (GuiButton(load_more_button_bounds, "LOAD MORE")) {
-                search = search_finished;
+                search = true;
                 query.search_type = last_search_type;
                 query.search_attr = SEARCH_ATTR_APPENDING;
             }
@@ -3086,11 +3092,15 @@ int main()
 
             const int container_height = 80;
             
+            pthread_mutex_lock(&results.mutex); 
+            const size_t results_len = results.count;
+            pthread_mutex_unlock(&results.mutex); 
+
             const Rectangle content_area = {
                 .x = scroll_window_bounds.x,
                 .y = scroll_window_bounds.y,
                 .width = scroll_window_bounds.width,
-                .height = container_height * results.count,
+                .height = container_height * results_len,
             };
 
             const int SCROLLBAR_WIDTH = 13;
@@ -3104,6 +3114,8 @@ int main()
 
             int i = 0;
             float container_y = scroll_window_bounds.y;
+
+            pthread_mutex_lock(&results.mutex);
             for (SearchResult* search_result = results.head; search_result; search_result = search_result->next, i++, container_y += container_height) {
                 const Rectangle container = { 
                     .x = ui.padding, 
@@ -3135,10 +3147,11 @@ int main()
                     search_result->thumbnail_loaded = true;
                     
                     ConnectionPool* pool = media_type_to_pool(search_result->media_type);
-                    
-                    PersistentConnection* conn = &pool->connections[pool->current_conn];
-                    if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, conn)) {
-                        cycle_connection(pool);
+                    if (pool) {
+                        PersistentConnection* conn = &pool->connections[pool->current_conn];
+                        if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, conn)) {
+                            cycle_connection(pool);
+                        }
                     }
                 }
 
@@ -3161,14 +3174,20 @@ int main()
                             }
                             break;
                         case PLAYLIST:
-                            search = search_finished;
+                            pthread_mutex_lock(&task_queue.mutex);
+                            search = task_queue.count == 0;
+                            pthread_mutex_unlock(&task_queue.mutex);
+
                             query.search_attr = SEARCH_ATTR_REPLACE;
                             query.search_type = SEARCH_TYPE_VIEW_PLAYLIST;
                             strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
                             SetWindowTitle(TextFormat("[Playlist:%s(loading)] - metube", query.focused_id));
                             break;
                         case CHANNEL:
-                            search = search_finished;
+                            pthread_mutex_lock(&task_queue.mutex);
+                            search = task_queue.count == 0;
+                            pthread_mutex_unlock(&task_queue.mutex);
+
                             query.search_attr = SEARCH_ATTR_REPLACE;
                             query.search_type = SEARCH_TYPE_VIEW_CHANNEL;
                             strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
@@ -3180,6 +3199,7 @@ int main()
                     }
                 }
             }
+            pthread_mutex_unlock(&results.mutex);
 
             EndScissorMode();
 
