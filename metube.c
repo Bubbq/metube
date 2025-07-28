@@ -1184,7 +1184,7 @@ SearchThreadArgs* init_search_thread_args(Query* query, PreparedRequest request,
 
 bool valid_cjson_string(const cJSON* json_str)
 {
-    return (json_str) && (cJSON_IsString(json_str)) && (json_str->valuestring[0] != '\0');
+    return (json_str) && (cJSON_IsString(json_str)) && (json_str->valuestring) && (json_str->valuestring[0] != '\0');
 }
 
 bool valid_cjson_array(const cJSON* json_arr)
@@ -1314,12 +1314,13 @@ bool assign_string_from_path(cJSON* root, const char* path, char* dest, const si
 
     const cJSON* json_str = cjson_pointer_get(root, path);
 
-    if (valid_cjson_string(json_str) == false) return false;
+    if (valid_cjson_string(json_str)) {
+        strncpy(dest, json_str->valuestring, dest_size - 1);
+        dest[dest_size - 1] = '\0';
+        return true;
+    }
 
-    strncpy(dest, json_str->valuestring, dest_size - 1);
-    dest[dest_size - 1] = '\0';
-
-    return true;
+    else return false;
 }
 
 #define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION "mqdefault"
@@ -1628,7 +1629,7 @@ int create_results_from_json(cJSON* json, Results *results, const SearchType sea
 
     cJSON* results_array = cjson_pointer_get(json, path);
     if ((results_array == NULL) || (cJSON_IsArray(results_array) == false)) {
-        printf("create_results_from_json: invalid results array from path %s", path);
+        printf("create_results_from_json: invalid results array from path %s\n", path);
         return -1;
     }
 
@@ -1766,7 +1767,7 @@ void* get_results_from_query(void* args)
         goto cleanup;
     }
 
-    create_file_from_memory("body.json", response.body);
+    // create_file_from_memory("body.json", response.body);
 
     json = cJSON_Parse(response.body.data);
     if (json == NULL) {
@@ -2813,9 +2814,11 @@ void* get_focused_video_information(void* args)
         goto cleanup;
     }
 
+    // create_file_from_memory("focused_body.json", response.body);
+
     const char* desc_path = ".videoDetails.shortDescription";
 
-    if (!assign_string_from_path(json, desc_path, targs->highlighted_video->description, sizeof(targs->highlighted_video->description))) {
+    if (assign_string_from_path(json, desc_path, targs->highlighted_video->description, sizeof(targs->highlighted_video->description)) == false) {
         printf("get_focused_video_information: assign video desc fail (json path: %s)\n", desc_path);
         targs->highlighted_video->description[0] = '\0';
     }
@@ -2847,11 +2850,10 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, Hig
     return launch_task(&task_queue, targs, get_focused_video_information);
 }
 
-// bug bounty
+// bug bountys
     // cant press two searches at once, search_finished should have solved this
+        // mutex protection?
     // playlist video count not showing videos at the end (some of them)
-    // some issue with highlighting video
-        // happens after pressing load more button
     // related videos arent always videos
 
 int main()
@@ -3151,6 +3153,7 @@ int main()
                         case VIDEO:
                             if (result_is_highlighted == false) {
                                 clicked_video = true;
+                                query.search_attr = SEARCH_ATTR_REPLACE;
                                 query.search_type = SEARCH_TYPE_VIDEO_FOCUS;
                                 strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
                                 strncpy(highlighted_video.id, search_result->id, sizeof(highlighted_video.id) - 1);
