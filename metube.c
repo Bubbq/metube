@@ -1636,11 +1636,12 @@ int create_results_from_json(cJSON* json, Results *results, const SearchType sea
         return -1;
     }
 
-    // need to get the author id if this is a view channel
     char author_id[64] = {0};
-
     if (search_type == SEARCH_TYPE_VIEW_CHANNEL) {
-        const char* author_id_path = ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId";
+        const char* author_id_path = (search_attr == SEARCH_ATTR_REPLACE) 
+                                     ? ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId"
+                                     : ".responseContext.serviceTrackingParams[0].params[3].value";
+
         if (assign_string_from_path(json, author_id_path, author_id, sizeof(author_id)) == false) {
             printf("funct: failed to parse author id from the path %s\n", author_id_path);
         }
@@ -1770,7 +1771,7 @@ void* get_results_from_query(void* args)
         goto cleanup;
     }
 
-    // create_file_from_memory("body.json", response.body);
+    create_file_from_memory("body.json", response.body);
 
     json = cJSON_Parse(response.body.data);
     if (json == NULL) {
@@ -2395,51 +2396,7 @@ int anticipate_lines_wordwrap(Font font, const char* text, float fontSize, float
     return lines;
 }
 
-void draw_video_desc(const Rectangle container, Ui ui, Vector2* scrollbar_position, char* video_desc)
-{
-    const Color text_color = BLACK;
-    const int font_size = 12;
-    const int spacing = 2;
 
-    const Rectangle scroll_window_area = {
-        .x = container.x,
-        .y = container.y + (container.height * 0.25f),
-        .width = container.width - ui.padding,
-        .height = container.height * 0.75f,
-    };
-
-    const float padded_width = container.width - ui.padding - ui.padding;
-    
-    // HACK: adding random shit makes the content grow faster... who would've thought?
-    const float line_height = font_size + spacing + (ui.padding * 1.5);
-    const int nlines = anticipate_lines_wordwrap(ui.font, video_desc, font_size, spacing, padded_width);
-    
-    const float text_height = line_height * nlines;
-    
-    const Rectangle scroll_content_area = {
-        .x = scroll_window_area.x,
-        .y = scroll_window_area.y,
-        .width = scroll_window_area.width,
-        .height = fmaxf(text_height, scroll_window_area.height - 1),
-    };
-
-    GuiScrollPanel(scroll_window_area, NULL, scroll_content_area, scrollbar_position, NULL, false);
-
-    const Rectangle video_desc_bounds = {
-        .x = scroll_content_area.x,
-        .y = scroll_content_area.y + scrollbar_position->y,
-        .width = scroll_content_area.width,
-        .height = scroll_content_area.height,
-    };
-
-    BeginScissorMode(scroll_window_area.x, scroll_window_area.y, scroll_window_area.width, scroll_window_area.height);
-
-    const Rectangle padded = padded_rectangle(ui.padding, video_desc_bounds);
-    
-    DrawTextBoxed(video_desc, padded, ui, font_size, text_color);
-
-    EndScissorMode();
-}
 
 int get_level_string(const int level, const char* spec_link, const size_t n, char level_parameters[n])
 {
@@ -2769,8 +2726,67 @@ typedef struct
 {
     char id[64];
     char author_id[64];
+    char title[512];
     char description[2048];
 } HighlightedVideo;
+
+void draw_highlighted_video(const Rectangle container, Ui ui, Vector2* scrollbar_position, HighlightedVideo* highlighted_video)
+{
+    const Color text_color = BLACK;
+    const int title_font_size = 17;
+    const int video_desc_font_size = 12;
+    const int spacing = 2;
+
+    const Rectangle scroll_window_area = {
+        .x = container.x,
+        .y = container.y + (container.height * 0.25f),
+        .width = container.width - ui.padding,
+        .height = container.height * 0.75f,
+    };
+
+    const float padded_width = container.width - ui.padding - ui.padding;
+
+    const float title_line_height = title_font_size + spacing;
+    const int n_title_lines = anticipate_lines_wordwrap(ui.font, highlighted_video->title, title_font_size, spacing, padded_width);
+    const float title_text_height = title_line_height * (n_title_lines + 1);
+
+    const float video_desc_line_height = video_desc_font_size + spacing;
+    const int n_desc_lines = anticipate_lines_wordwrap(ui.font, highlighted_video->description, video_desc_font_size, spacing, padded_width);
+    const float video_desc_text_height = video_desc_line_height * (n_desc_lines);
+    
+    const Rectangle scroll_content_area = {
+        .x = scroll_window_area.x,
+        .y = scroll_window_area.y,
+        .width = scroll_window_area.width,
+        .height = title_text_height + video_desc_text_height,
+    };
+
+    GuiScrollPanel(scroll_window_area, NULL, scroll_content_area, scrollbar_position, NULL, false);
+
+    const Rectangle title_bounds = {
+        .x = scroll_window_area.x,
+        .y = scroll_window_area.y + scrollbar_position->y,
+        .height = title_text_height,
+        .width = scroll_window_area.width,
+    };
+    
+    const Rectangle video_desc_bounds = {
+        .x = scroll_content_area.x,
+        .y = title_bounds.y + title_bounds.height + scrollbar_position->y,
+        .height = video_desc_text_height,
+        .width = scroll_content_area.width,
+    };
+
+    BeginScissorMode(scroll_window_area.x, scroll_window_area.y, scroll_window_area.width, scroll_window_area.height);
+
+    const Rectangle padded_title_bounds = padded_rectangle(ui.padding, title_bounds);
+    DrawTextBoxed(highlighted_video->title, padded_title_bounds, ui, title_font_size, text_color);
+    
+    const Rectangle padded_video_desc_bounds = padded_rectangle(ui.padding, video_desc_bounds);
+    DrawTextBoxed(highlighted_video->description, padded_video_desc_bounds, ui, video_desc_font_size, text_color);
+
+    EndScissorMode();
+}
 
 typedef struct
 {
@@ -2989,9 +3005,7 @@ int main()
 
             if (GuiButton(search_button_bounds, "Search") || enter_key_pressed) {
                 if (trim_whitespace(query.string) > 0) {
-                    pthread_mutex_lock(&task_queue.mutex);
-                    search = task_queue.count == 0;
-                    pthread_mutex_unlock(&task_queue.mutex);
+                    search = true;
                     query.search_attr = SEARCH_ATTR_REPLACE;
                     query.search_type = SEARCH_TYPE_QUERIED;
                     SetWindowTitle(TextFormat("[%s(loading)] - metube", query.string));
@@ -3028,6 +3042,7 @@ int main()
                 query.search_attr = SEARCH_ATTR_REPLACE;
                 query.search_type = SEARCH_TYPE_RELATED;
                 strncpy(query.focused_id, highlighted_video.id, sizeof(query.focused_id) - 1);
+                query.focused_id[sizeof(query.focused_id) - 1] = '\0';
                 SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", query.focused_id));                
             }
 
@@ -3049,7 +3064,8 @@ int main()
                 query.search_attr = SEARCH_ATTR_REPLACE;
                 query.search_type = SEARCH_TYPE_VIEW_CHANNEL;
                 strncpy(query.focused_id, highlighted_video.author_id, sizeof(query.focused_id) - 1);
-                SetWindowTitle(TextFormat("[Channel:%s(loading)] - metube", query.focused_id));
+                query.focused_id[sizeof(query.focused_id) - 1] = '\0';
+                SetWindowTitle(TextFormat("[User %s Videos(loading)] - metube", query.focused_id));
             }
 
             GuiSetState(STATE_NORMAL);
@@ -3104,6 +3120,7 @@ int main()
             };
 
             const int SCROLLBAR_WIDTH = 13;
+
             const bool vertical_scrollbar_visible = content_area.height > scroll_window_bounds.height;
 
             GuiScrollPanel(scroll_window_bounds, NULL, content_area, &search_result_scrollbar_pos, NULL, true);
@@ -3166,37 +3183,37 @@ int main()
                         case VIDEO:
                             if (result_is_highlighted == false) {
                                 clicked_video = true;
-                                query.search_attr = SEARCH_ATTR_REPLACE;
                                 query.search_type = SEARCH_TYPE_VIDEO_FOCUS;
-                                strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
+                                
                                 strncpy(highlighted_video.id, search_result->id, sizeof(highlighted_video.id) - 1);
+                                highlighted_video.id[sizeof(highlighted_video.id) - 1] = '\0';
+
                                 strncpy(highlighted_video.author_id, search_result->authorId, sizeof(highlighted_video.author_id));
+                                highlighted_video.author_id[sizeof(highlighted_video.author_id) - 1] = '\0';
+                                
+                                strncpy(highlighted_video.title, search_result->title, sizeof(highlighted_video.title) - 1);
+                                highlighted_video.title[sizeof(highlighted_video.title) - 1] = '\0';
                             }
                             break;
                         case PLAYLIST:
-                            pthread_mutex_lock(&task_queue.mutex);
-                            search = task_queue.count == 0;
-                            pthread_mutex_unlock(&task_queue.mutex);
-
-                            query.search_attr = SEARCH_ATTR_REPLACE;
+                            search = true;
                             query.search_type = SEARCH_TYPE_VIEW_PLAYLIST;
-                            strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
                             SetWindowTitle(TextFormat("[Playlist:%s(loading)] - metube", query.focused_id));
                             break;
                         case CHANNEL:
-                            pthread_mutex_lock(&task_queue.mutex);
-                            search = task_queue.count == 0;
-                            pthread_mutex_unlock(&task_queue.mutex);
-
-                            query.search_attr = SEARCH_ATTR_REPLACE;
+                            search = true;
                             query.search_type = SEARCH_TYPE_VIEW_CHANNEL;
-                            strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
                             SetWindowTitle(TextFormat("[Channel:%s(loading)] - metube", query.focused_id));
                             break;
                         case ANY:
                         case UNDF:
                             break;
                     }
+                    
+                    query.search_attr = SEARCH_ATTR_REPLACE;
+
+                    strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
+                    query.focused_id[sizeof(query.focused_id) - 1] = '\0';
                 }
             }
             pthread_mutex_unlock(&results.mutex);
@@ -3210,7 +3227,7 @@ int main()
                 .height = GetScreenHeight() - focused_video_bounds.y - ui.padding,
             };
             
-            draw_video_desc(focused_video_bounds, ui, &video_desc_scrollbar_pos, highlighted_video.description);
+            draw_highlighted_video(focused_video_bounds, ui, &video_desc_scrollbar_pos, &highlighted_video);
 
         EndDrawing();
     }
@@ -3239,24 +3256,17 @@ int main()
 }
 
 // searching feature
-    // make sure all video parses have the author 
-    // "get user videos" button 
-    // clean everything
-
-// video playing function
-    // play video when pressing button
-
-// video management function
+    // watch history
     // subscribe to different channels
-    // have a liked videos playist
-    // able to add videos to playlist
+    // like/fav video list
 
 // after everythings done:
+    // able to add videos to created playlist
     // fonts for L.O.T.E.
     // handle connecticity issues (no wifi on startup, changing connections, etc.)
     // reccomendations using cookies
     // goto's for redundant cleanups
-    // set ptrs to NULL after freeing them
+    // set all ptrs to NULL after freeing them
     // thumbnail frames from video click
-    // playlist video count not showing videos at the end (some of them)
     // limit the amout of results to 20 (specifically loading more playlist videos)
+    // channel header and desc on channel view
