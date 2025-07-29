@@ -2837,12 +2837,19 @@ void* get_focused_video_information(void* args)
         goto cleanup;
     }
 
-    // create_file_from_memory("focused_body.json", response.body);
+    create_file_from_memory("focused_body.json", response.body);
 
     const char* desc_path = ".videoDetails.shortDescription";
 
     if (assign_string_from_path(json, desc_path, targs->highlighted_video->description, sizeof(targs->highlighted_video->description)) == false) {
         printf("get_focused_video_information: assign video desc fail (json path: %s)\n", desc_path);
+        targs->highlighted_video->description[0] = '\0';
+    }
+
+    const char* title_path = ".videoDetails.title";
+
+    if (assign_string_from_path(json, title_path, targs->highlighted_video->title, sizeof(targs->highlighted_video->title)) == false) {
+        printf("get_focused_video_information: assign title fail (json path: %s)\n", title_path);
         targs->highlighted_video->description[0] = '\0';
     }
 
@@ -2875,6 +2882,13 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, Hig
 
 // bug bountys
     // related videos arent always videos
+
+    // watch history
+        // need empty json to hold the ids of every video
+        // every time the user presses a video
+            // add id to json
+        // make button to load watch history
+            // fill results with the content of those videos
 
 int main()
 {
@@ -3079,38 +3093,21 @@ int main()
 
             draw_filter_window(&query, filter_window_bounds, ui.font, ui.padding);
 
-            const float button_height = 30;
-            const Rectangle load_more_button_bounds = {
-                .x = search_bar_bounds.x,
-                .height = button_height,
-                .y = GetScreenHeight() - button_height - ui.padding,
-                .width = search_bar_bounds.width,
-            };
-
-            if ((query.continuation_token == NULL) || (query.continuation_token[0] == '\0')) {
-                GuiSetState(STATE_DISABLED);
-            }
-
-            if (GuiButton(load_more_button_bounds, "LOAD MORE")) {
-                search = true;
-                query.search_type = last_search_type;
-                query.search_attr = SEARCH_ATTR_APPENDING;
-            }
-
-            GuiSetState(STATE_NORMAL);
-            
             const Rectangle scroll_window_bounds = { 
                 .x = ui.padding, 
                 .y = search_bar_bounds.y + search_bar_bounds.height + filter_window_bounds.height + (ui.padding * 2), 
                 .width = search_bar_bounds.width, 
-                .height = GetScreenHeight() - scroll_window_bounds.y - load_more_button_bounds.height - (ui.padding * 2), 
+                .height = GetScreenHeight() - scroll_window_bounds.y - (ui.padding * 2), 
             };
 
-            const int container_height = 80;
-            
             pthread_mutex_lock(&results.mutex); 
-            const size_t results_len = results.count;
+
+            const bool load_more_button_visible = (query.continuation_token != NULL) && (query.continuation_token[0] != '\0');
+            const size_t results_len = results.count + load_more_button_visible;
+
             pthread_mutex_unlock(&results.mutex); 
+
+            const int container_height = 80;
 
             const Rectangle content_area = {
                 .x = scroll_window_bounds.x,
@@ -3120,7 +3117,6 @@ int main()
             };
 
             const int SCROLLBAR_WIDTH = 13;
-
             const bool vertical_scrollbar_visible = content_area.height > scroll_window_bounds.height;
 
             GuiScrollPanel(scroll_window_bounds, NULL, content_area, &search_result_scrollbar_pos, NULL, true);
@@ -3131,15 +3127,17 @@ int main()
 
             int i = 0;
             float container_y = scroll_window_bounds.y;
+            Rectangle container = { 
+                .x = ui.padding, 
+                .y = container_y, 
+                .width = scroll_window_bounds.width - (vertical_scrollbar_visible ? SCROLLBAR_WIDTH : 0),
+                .height = container_height 
+            };
 
             pthread_mutex_lock(&results.mutex);
+
             for (SearchResult* search_result = results.head; search_result; search_result = search_result->next, i++, container_y += container_height) {
-                const Rectangle container = { 
-                    .x = ui.padding, 
-                    .y = container_y + search_result_scrollbar_pos.y, 
-                    .width = scroll_window_bounds.width - (vertical_scrollbar_visible ? SCROLLBAR_WIDTH : 0),
-                    .height = container_height 
-                };
+                container.y = container_y + search_result_scrollbar_pos.y;
 
                 if (CheckCollisionRecs(scissor_rect, container) == false) {
                     continue;
@@ -3177,6 +3175,11 @@ int main()
                 if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
                     (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) &&
                     (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
+                    query.search_attr = SEARCH_ATTR_REPLACE;
+
+                    strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
+                    query.focused_id[sizeof(query.focused_id) - 1] = '\0';
+
                     switch (search_result->media_type) {
                         case LIVE:
                         case SHORT:
@@ -3190,9 +3193,6 @@ int main()
 
                                 strncpy(highlighted_video.author_id, search_result->authorId, sizeof(highlighted_video.author_id));
                                 highlighted_video.author_id[sizeof(highlighted_video.author_id) - 1] = '\0';
-                                
-                                strncpy(highlighted_video.title, search_result->title, sizeof(highlighted_video.title) - 1);
-                                highlighted_video.title[sizeof(highlighted_video.title) - 1] = '\0';
                             }
                             break;
                         case PLAYLIST:
@@ -3209,15 +3209,24 @@ int main()
                         case UNDF:
                             break;
                     }
-                    
-                    query.search_attr = SEARCH_ATTR_REPLACE;
-
-                    strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
-                    query.focused_id[sizeof(query.focused_id) - 1] = '\0';
                 }
             }
-            pthread_mutex_unlock(&results.mutex);
 
+            const Rectangle load_more_button_bounds = {
+                .x = container.x,
+                .y = container.y + container_height,
+                .width = container.width,
+                .height = container_height,
+            };
+
+            if (load_more_button_visible && GuiButton(load_more_button_bounds, "LOAD MORE")) {
+                search = true;
+                query.search_type = last_search_type;
+                query.search_attr = SEARCH_ATTR_APPENDING;
+            }
+
+            pthread_mutex_unlock(&results.mutex);
+            
             EndScissorMode();
 
             const Rectangle focused_video_bounds = {
