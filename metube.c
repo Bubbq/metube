@@ -586,8 +586,6 @@ size_t get_content_len_from_header(const char *header)
 
     // return numeric representation
     return atoi(bytes);
-
-    return 0;
 }
 
 SSL_CTX *ctx = NULL;
@@ -2880,12 +2878,243 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, Hig
     // related videos arent always videos
 
     // watch history
-        // need empty json to hold the ids of every video
         // every time the user presses a video
-            // add id to json
+            // caveats :
+                // only want to keep n videos in history? (100)
         // make button to load watch history
             // fill results with the content of those videos
 
+bool file_exists(const char* filename)
+{
+    FILE* fp = fopen(filename, "r+");
+    if (fp) {
+        fclose(fp);
+        return true;
+    }
+
+    else return false;
+}
+
+size_t get_file_length(FILE* fp)
+{
+    const size_t original_position = ftell(fp);
+
+    fseek(fp, 0, SEEK_END);
+
+    const size_t file_len = ftell(fp) - original_position;    
+
+    fseek(fp, original_position, SEEK_SET);
+
+    return file_len;
+}
+
+char* get_file_content(const char* filepath)
+{
+    if (filepath == NULL) return NULL;
+
+    if (file_exists(filepath) == false) {
+        printf("get_file_content: %s does not exist\n", filepath);
+        return NULL;
+    }
+
+    FILE* fp = fopen(filepath, "r");
+
+    const long len = get_file_length(fp);
+    if (len == 0) {
+        printf("get_file_content: get_file_length returned 0\n");
+        fclose(fp); fp = NULL;
+        return NULL;
+    }
+
+    char* buffer = malloc((sizeof(char) * (len + 1)));
+    if (buffer == NULL) {
+        printf("get_file_content: malloc returned NULL\n");
+        fclose(fp); fp = NULL;
+        return NULL;
+    }
+
+    const unsigned long chars_read = fread(buffer, sizeof(char), len, fp);
+    
+    buffer[chars_read] = '\0';
+    
+    fclose(fp); fp = NULL;
+
+    return buffer;
+}
+
+#define WATCH_HISTORY_FILE "watch_history.json"
+#define MAX_HISTORY_LEN 3
+
+bool create_watch_history_file()
+{
+    if (file_exists(WATCH_HISTORY_FILE)) {
+        return false;
+    }
+
+    FILE* fp = fopen(WATCH_HISTORY_FILE, "w");
+    if (fp == NULL) {
+        printf("create_watch_history_file: 'fp' is NULL\n");
+        return false;
+    }
+    
+    const char* buffer = "[]";
+    const size_t size = strlen(buffer); 
+
+    const bool write_sucess = fwrite(buffer, size, sizeof(char), fp) == sizeof(char);
+
+    fclose(fp);
+
+    return write_sucess;
+}
+
+int get_watched_video_index(const char* id, const cJSON* history)
+{
+    if ((id == NULL) || (history == NULL)) return -1;
+
+    const char* id_path = ".id";
+
+    int i = 0;
+    cJSON* item;
+    cJSON_ArrayForEach(item, history) {
+        const cJSON* id_item = cjson_pointer_get(item, id_path);
+        if (valid_cjson_string(id_item) && (strcmp(id, id_item->valuestring) == 0)) {
+            return i;
+        }
+
+        i++;
+    }
+
+    return -1;
+}
+
+cJSON* init_video_json_object(const SearchResult* video)
+{
+    if ((video == NULL) || (video->media_type != VIDEO)) return NULL;
+
+    cJSON* video_obj = cJSON_CreateObject();
+    if (video_obj == NULL) {
+        printf("init_video_json_object: cJSON_CreateObject returned NULL\n");
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(video_obj, "id", video->id);
+    cJSON_AddNumberToObject(video_obj, "media_type", VIDEO);
+    cJSON_AddStringToObject(video_obj, "title", video->title);
+    cJSON_AddStringToObject(video_obj, "authorId", video->authorId);
+    cJSON_AddStringToObject(video_obj, "duration", video->duration);
+    cJSON_AddStringToObject(video_obj, "view_count", video->view_count);
+    cJSON_AddNumberToObject(video_obj, "time_added", (double)time(NULL));
+    cJSON_AddStringToObject(video_obj, "thumbnail_path", video->thumbnail_path);
+    cJSON_AddStringToObject(video_obj, "date_published", video->date_published);
+
+    return video_obj;
+}
+
+int get_oldest_watched_video_index(const cJSON* history)
+{
+    if ((history == NULL) || (cJSON_IsArray(history) == false)) NULL;
+
+    const char* time_added_path = ".time_added";
+
+    int oldest_watched_index = -1;
+    double min_time_added = time(NULL);
+
+    int i = 0;
+    cJSON* item;
+    cJSON_ArrayForEach(item, history) {
+        const cJSON* time_added_obj = cjson_pointer_get(item, time_added_path); 
+        if (valid_cjson_number(time_added_obj) && (time_added_obj->valuedouble < min_time_added)) {
+            oldest_watched_index = i;
+            min_time_added = time_added_obj->valuedouble;
+        }
+
+        i++;
+    }
+
+    return oldest_watched_index;
+}
+
+void remove_oldest_watched_video(cJSON* history_array)
+{
+    if (history_array == NULL) return;
+
+    const int oldest_index = get_oldest_watched_video_index(history_array);
+    if (oldest_index >= 0) {
+        cJSON_Delete(cJSON_DetachItemFromArray(history_array, oldest_index));
+    }
+}
+
+void update_watch_history(const SearchResult* watched_video)
+{
+    if (watched_video == NULL) return;
+
+    char* history_buffer = get_file_content(WATCH_HISTORY_FILE);
+    if (history_buffer == NULL) {
+        printf("update_watch_history: 'history_buffer' is NULL\n");
+        return;
+    }
+
+    cJSON* history_array = cJSON_Parse(history_buffer);
+    if (history_array == NULL) {
+        printf("update_watch_history: cJSON_Parse returned NULL\n");
+        goto cleanup_buffer;
+    } 
+
+    // if you hit max size and you need to increase the size
+        // need to find the oldest video and remove it
+
+    const int watched_video_index = get_watched_video_index(watched_video->id, history_array);
+
+    const bool found = (watched_video_index >= 0);
+    cJSON* to_add = (found)
+                    ? cJSON_DetachItemFromArray(history_array, watched_video_index)
+                    : init_video_json_object(watched_video);
+
+    if (to_add == NULL) {
+        printf("update_watch_history: 'to_add' is NULL\n");
+        goto cleanup_array;
+    }
+
+    if (found == false) {
+        if (cJSON_GetArraySize(history_array) == MAX_HISTORY_LEN) {
+            remove_oldest_watched_video(history_array);
+        }
+    }
+
+    else cJSON_ReplaceItemInObject(to_add, "time_added", cJSON_CreateNumber((double)time(NULL)));
+    
+    cJSON_InsertItemInArray(history_array, 0, to_add);
+    
+    FILE* fp = fopen(WATCH_HISTORY_FILE, "w");
+    if (fp == NULL) {
+        printf("update_watch_history: 'fopen' returned NULL\n");
+        goto cleanup_array;
+    }
+
+    char* new_history_buffer = cJSON_Print(history_array);
+    if (new_history_buffer == NULL) {
+        printf("update_watch_history: 'cJSON_Print' returned NULL\n");
+        goto cleanup_fp;
+    }
+
+    const size_t size = strlen(new_history_buffer);
+
+    if (fwrite(new_history_buffer, size, sizeof(char), fp) == 0) {
+        printf("update_watch_history: 'fwrite' returned 0\n");
+        goto cleanup_fwrite;
+    }
+    
+    cleanup_fwrite:
+        free(new_history_buffer);
+    cleanup_fp:
+        fclose(fp);
+    cleanup_array:
+        cJSON_Delete(history_array);
+    cleanup_buffer:
+        free(history_buffer);
+}
+
+// make enum 
 int main()
 {
     SSL_library_init();
@@ -2916,6 +3145,12 @@ int main()
     parse_youtube_page(conn, sizeof(internal_api_key), internal_api_key);
     printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
     
+    create_watch_history_file();
+    if (file_exists(WATCH_HISTORY_FILE) == false) {
+        printf("failed to create \"%s\"\n", WATCH_HISTORY_FILE);
+        return 1;
+    }
+
     // when true, the application starts the search process
     bool search = false;
     bool edit_mode = false;
@@ -3189,6 +3424,8 @@ int main()
 
                                 strncpy(highlighted_video.author_id, search_result->authorId, sizeof(highlighted_video.author_id));
                                 highlighted_video.author_id[sizeof(highlighted_video.author_id) - 1] = '\0';
+
+                                update_watch_history(search_result);
                             }
                             break;
                         case PLAYLIST:
@@ -3248,6 +3485,7 @@ int main()
     free_results(&results);
     free_thumbnail_queue(&thumbnail_queue);
     free_cached_textures(&cached_thumbnails);
+    if (query.continuation_token) free(query.continuation_token);
     
     // ssl stuff
     if (ctx) SSL_CTX_free(ctx);
@@ -3275,3 +3513,4 @@ int main()
     // thumbnail frames from video click
     // limit the amout of results to 20 (specifically loading more playlist videos)
     // channel header and desc on channel view
+    // mem leak on queue_focused_video_task on premature exit
