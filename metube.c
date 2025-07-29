@@ -956,56 +956,52 @@ size_t trim_whitespace(char* string)
     return len;
 }
 
-void format_view_count(char* view_count)
+int filter_non_numeric_chars(char* string, const size_t string_size)
 {
-    if (!view_count) {
-        printf("format_view_count: string arg is NULL\n");
-        return;
-    }
+    if (string == NULL) return -1;
 
-    // need to extract the real numbers
-    char no_commas[12] = {0};
-
-    int k = 0;
-    for(int i = 0; view_count[i] != '\0'; i++) {
-        if (isdigit(view_count[i])) {
-            no_commas[k++] = view_count[i];
+    int i = 0;
+    for (int j = 0; j < string_size; j++) {
+        const char c = string[j];
+        if (isdigit(c)) {
+            string[i++] = string[j];
         }
     }
 
-    no_commas[k] = '\0';
+    string[i] = '\0';   
 
-    // find the int representation
-    const float raw_view_count = strtof(no_commas, NULL);
+    return i;
+}
 
-    // format view string
-    int chars_written;
-    if (raw_view_count < 1e3) // 0 - 999
-        chars_written = sprintf(view_count, "%d views", (int)raw_view_count);
-    else if (raw_view_count < 1e4) // 1,000 - 9,999
-        chars_written = sprintf(view_count, "%.2fk views", (raw_view_count / 1e3));
-    else if (raw_view_count < 1e5) // 10,000 - 99,999
-        chars_written = sprintf(view_count, "%.1fk views", (raw_view_count / 1e3));
-    else if (raw_view_count < 1e6) // 100,009 - 999,999
-        chars_written = sprintf(view_count, "%.0fk views", (raw_view_count / 1e3));
-    else if (raw_view_count < 1e7) // 1,000,000 - 9,999,999
-        chars_written = sprintf(view_count, "%.2fM views", (raw_view_count / 1e6));
-    else if (raw_view_count < 1e8) // 10,000,000 - 99,999,999
-        chars_written = sprintf(view_count, "%.1fM views", (raw_view_count / 1e6));
-    else if (raw_view_count < 1e9) // 100,000,000 - 999,999,999
-        chars_written = sprintf(view_count, "%.0fM views", (raw_view_count / 1e6));
-    else if (raw_view_count < 1e10) // 1,000,000,000 - 9,999,999,999
-        chars_written = sprintf(view_count, "%.2fB views", (raw_view_count / 1e9));
-    else if (raw_view_count < 1e11) // 10,000,000,000 - 99,999,999,999
-        chars_written = sprintf(view_count, "%.1fB views", (raw_view_count / 1e9));
-    else if (raw_view_count < 1e12) // 100,000,000,000 - 999,999,999,999
-        chars_written = sprintf(view_count, "%.0fB views", (raw_view_count / 1e9));
+void format_view_count(char* dest, const size_t dest_size)
+{
+    if (dest == NULL) {
+        printf("format_view_count: 'dest' is NULL\n");
+        return;
+    }
+
+    if (filter_non_numeric_chars(dest, dest_size) <= 0) {
+        printf("format_view_count: invalid view format passed\n");
+        return;
+    } 
+
+    const float view_count = strtof(dest, NULL);
+
+    int written;
+    if      (view_count < 1e3)  written = snprintf(dest, dest_size, "%.0f  views", view_count);         // 0      - 999
+    else if (view_count < 1e4)  written = snprintf(dest, dest_size, "%.2fk views", (view_count / 1e3)); // 1,000  - 9,999
+    else if (view_count < 1e5)  written = snprintf(dest, dest_size, "%.1fk views", (view_count / 1e3)); // 10,000 - 99,999
+    else if (view_count < 1e6)  written = snprintf(dest, dest_size, "%.0fk views", (view_count / 1e3)); // 10,000 - 99,999
+    else if (view_count < 1e7)  written = snprintf(dest, dest_size, "%.2fM views", (view_count / 1e6)); // 10,000 - 99,999
+    else if (view_count < 1e8)  written = snprintf(dest, dest_size, "%.1fM views", (view_count / 1e6)); // 10,000 - 99,999
+    else if (view_count < 1e9)  written = snprintf(dest, dest_size, "%.0fM views", (view_count / 1e6)); // 10,000 - 99,999
+    else if (view_count < 1e10) written = snprintf(dest, dest_size, "%.2fB views", (view_count / 1e9)); // 10,000 - 99,999
+    else if (view_count < 1e11) written = snprintf(dest, dest_size, "%.1fB views", (view_count / 1e9)); // 10,000 - 99,999
+    else if (view_count < 1e12) written = snprintf(dest, dest_size, "%.0fB views", (view_count / 1e9)); // 10,000 - 99,999
     
-    // remove ".0"
-    char *reduntant = strstr(view_count, ".0");
-    if (reduntant) {
-        char *letter_char = view_count + chars_written - 1;
-        memmove(reduntant, letter_char, 2);
+    if (written >= dest_size) {
+        printf("format_view_count: string truncated\n");
+        return;
     }
 }
 
@@ -1401,7 +1397,7 @@ void parse_video(cJSON* videoRenderer, const char* author_id_override, const boo
     const char* view_count_path = ".viewCountText.simpleText";
 
     if (assign_string_from_path(videoRenderer, view_count_path, video->view_count, sizeof(video->view_count))) {
-        format_view_count(video->view_count);
+        format_view_count(video->view_count, sizeof(video->view_count));
     }
     
     else snprintf(video->view_count, sizeof(video->view_count), "no views");
