@@ -2390,8 +2390,6 @@ int anticipate_lines_wordwrap(Font font, const char* text, float fontSize, float
     return lines;
 }
 
-
-
 int get_level_string(const int level, const char* spec_link, const size_t n, char level_parameters[n])
 {
     if (spec_link == NULL) return 0;
@@ -2457,7 +2455,7 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
 
 bool valid_post_request(const PreparedRequest post)
 {
-    return (post.path[0] != '\0') && (post.header[0] != '\0') && (post.body[0] != '\0');
+    return (post.path[0] != '\0') && (post.header[0] != '\0') && (post.body) && (post.body[0] != '\0');
 }
 
 bool init_post_header(const size_t n, char post_header[n], const char *host, const char *path, const size_t post_body_length)
@@ -2943,7 +2941,7 @@ char* get_file_content(const char* filepath)
 }
 
 #define WATCH_HISTORY_FILE "watch_history.json"
-#define MAX_HISTORY_LEN 3
+#define MAX_HISTORY_LEN 20
 
 bool create_watch_history_file()
 {
@@ -3114,7 +3112,10 @@ void update_watch_history(const SearchResult* watched_video)
         free(history_buffer);
 }
 
-// make enum 
+// make button for loading watch history
+// parse the content from the cjson array
+// store into results array
+
 int main()
 {
     SSL_library_init();
@@ -3182,6 +3183,8 @@ int main()
     HighlightedVideo highlighted_video = {0};
     Vector2 video_desc_scrollbar_pos = { 10, 10 };
 
+    bool load_watch_history = false;
+
     while (!WindowShouldClose())
     {
         if (HASH_COUNT(cached_thumbnails) > 0) {
@@ -3220,6 +3223,67 @@ int main()
             if (queue_search_task(&query, conn, &results, internal_api_key) == false) {
                 printf("failed to queue search task\n");
             }
+        }
+
+        if (load_watch_history) {
+            load_watch_history = false;
+
+            free(query.continuation_token); query.continuation_token = NULL;
+
+            pthread_mutex_lock(&results.mutex);
+            
+            const size_t old_size = results.count;
+            
+            char* buffer = get_file_content(WATCH_HISTORY_FILE);
+            if (buffer) {
+                cJSON* history_array = cJSON_Parse(buffer);
+                if (valid_cjson_array(history_array)) {
+                    const size_t array_size = cJSON_GetArraySize(history_array);
+                    cJSON* item;
+                    cJSON_ArrayForEach(item, history_array) {
+                        SearchResult* watched_video = init_search_result();
+                        if (watched_video) {
+                            if (assign_string_from_path(item, ".id", watched_video->id, sizeof(watched_video->id)) == false) {
+                                printf("assign id fail\n");
+                            }
+
+                            watched_video->media_type = VIDEO;
+
+                            if (assign_string_from_path(item, ".title", watched_video->title, sizeof(watched_video->title)) == false) {
+                                printf("assign title fail\n");
+                            } 
+
+                            if (assign_string_from_path(item, ".authorId", watched_video->authorId, sizeof(watched_video->authorId)) == false) {
+                                printf("assign authorId fail\n");
+                            } 
+
+                            if (assign_string_from_path(item, ".duration", watched_video->duration, sizeof(watched_video->duration)) == false) {
+                                printf("assign duration fail\n");
+                            } 
+
+                            if (assign_string_from_path(item, ".view_count", watched_video->view_count, sizeof(watched_video->view_count)) == false) {
+                                printf("assign view_count fail\n");
+                            } 
+
+                            if (assign_string_from_path(item, ".thumbnail_path", watched_video->thumbnail_path, sizeof(watched_video->thumbnail_path)) == false) {
+                                printf("assign thumbnail_path fail\n");
+                            } 
+
+                            if (assign_string_from_path(item, ".date_published", watched_video->date_published, sizeof(watched_video->date_published)) == false) {
+                                printf("assign date_published fail\n");
+                            } 
+
+                            add_search_result(&results, watched_video);                        
+                        }
+                    }
+
+                    delete_n_results(&results, old_size);
+                    cJSON_Delete(history_array);
+                    free(buffer);
+                }
+            }
+            
+            pthread_mutex_unlock(&results.mutex);
         }
 
         BeginDrawing();
@@ -3314,6 +3378,17 @@ int main()
             }
 
             GuiSetState(STATE_NORMAL);
+
+            const Rectangle watch_history_button = {
+                .x = users_videos_button_bounds.x + users_videos_button_bounds.width + ui.padding,
+                .y = ui.padding,
+                .width = 80,
+                .height = 25,
+            };
+
+            if (GuiButton(watch_history_button, "Watch History")) {
+                load_watch_history = true;
+            }
 
             const Rectangle filter_window_bounds = {
                 .x = ui.padding, 
@@ -3514,3 +3589,4 @@ int main()
     // limit the amout of results to 20 (specifically loading more playlist videos)
     // channel header and desc on channel view
     // mem leak on queue_focused_video_task on premature exit
+    // ssl read read -1 error
