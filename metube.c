@@ -1,6 +1,5 @@
 #include <math.h>
 #include <openssl/asn1.h>
-#include <time.h>
 #include <ctype.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -3282,7 +3281,7 @@ int main()
                     free(buffer);
                 }
             }
-            
+
             pthread_mutex_unlock(&results.mutex);
         }
 
