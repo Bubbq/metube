@@ -2446,7 +2446,7 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
 }
 
 #define CLIENT_NAME "WEB"
-#define CLIENT_VER "2.20250331"
+#define CLIENT_VER "2.20250730"
 #define YT_API_PLAYLIST_BROWSE_ID_PREFIX "VL"    // "video list" (playlist)
 #define YT_API_BROWSE_ID_TRENDING "FEtrending"   // "frontend trending"
 #define YT_API_CHANNEL_VIDEOS_PARAMS "EgZ2aWRlb3PyBgQKAjoA"  // filters to "Videos" tab in a channel's homepage
@@ -3117,9 +3117,6 @@ void update_watch_history(const SearchResult* watched_video)
 
 int main()
 {
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-    
     TextureCacheEntry *cached_thumbnails = NULL;
     thumbnail_queue = init_thumbnail_queue();
 

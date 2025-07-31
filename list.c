@@ -2,8 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-// this contains all the functions needed to maintain and update lists in the program // 
+#include <pthread.h>
 
 typedef struct
 {
@@ -12,7 +11,7 @@ typedef struct
     char id[64];
 } MediaInfo;
 
-void print_media_info(const MediaInfo* media_info)
+void media_info_print(const MediaInfo* media_info)
 {
     if (media_info == NULL) return;
     printf("ID:%s TITLE:%s PATH:%s\n", media_info->id, media_info->title, media_info->thumbnail_path);
@@ -22,21 +21,21 @@ typedef struct
 {
     MediaInfo media_info;
     char author_id[64];
-    char age[32];
+    char date_published[32];
     char duration[16];
     char view_count[16];
 } VideoResult;
 
-VideoResult* init_video_result()
+VideoResult* video_result_init()
 {
     return calloc(1, sizeof(VideoResult));
 }
 
-void print_video_result(const VideoResult* video_result)
+void video_result_print(const VideoResult* video_result)
 {
     if (video_result == NULL) return;
-    print_media_info(&video_result->media_info);
-    printf("date_published:%s duration:%s author_id:%s view_count:%s\n", video_result->age, video_result->duration, video_result->author_id, video_result->view_count);
+    media_info_print(&video_result->media_info);
+    printf("date_published:%s duration:%s author_id:%s view_count:%s\n", video_result->date_published, video_result->duration, video_result->author_id, video_result->view_count);
 }
 
 typedef struct
@@ -45,15 +44,15 @@ typedef struct
     char subscriber_count[32];
 } ChannelResult;
 
-ChannelResult* init_channel_result()
+ChannelResult* channel_result_init()
 {
     return calloc(1, sizeof(ChannelResult));
 }
 
-void print_channel_result(ChannelResult* channel_result)
+void channel_result_print(ChannelResult* channel_result)
 {
     if (channel_result == NULL) return;
-    print_media_info(&channel_result->media_info);
+    media_info_print(&channel_result->media_info);
     printf("subscibers:%s\n", channel_result->subscriber_count);
 }
 
@@ -63,15 +62,15 @@ typedef struct
     char video_count[32];
 } PlaylistResult;
 
-PlaylistResult* init_playlist_result()
+PlaylistResult* playlist_result_init()
 {
     return calloc(1, sizeof(PlaylistResult));
 }
 
-void print_playlist_result(PlaylistResult* playlist_result)
+void playlist_result_print(PlaylistResult* playlist_result)
 {
     if (playlist_result == NULL) return;
-    print_media_info(&playlist_result->media_info);
+    media_info_print(&playlist_result->media_info);
     printf("video_count:%s\n", playlist_result->video_count);
 }
 
@@ -94,11 +93,11 @@ typedef struct Node
     NodeType type;
 } Node;
 
-Node* init_node()
+Node* node_init()
 {
     Node* node = malloc(sizeof(Node));
     if (node == NULL) {
-        printf("init_node: malloc returned NULL\n");
+        printf("node_init: malloc returned NULL\n");
         return NULL;
     }
 
@@ -107,7 +106,7 @@ Node* init_node()
     return node;
 }
 
-void free_node(Node* node)
+void node_free(Node* node)
 {
     if (node == NULL) return;
 
@@ -132,12 +131,14 @@ typedef struct
 {
     Node* head; 
     Node* tail; 
+    pthread_mutex_t mutex;
 } List;
 
-List init_list()
+List list_init()
 {
     List list;
     list.head = list.tail = NULL;
+    pthread_mutex_init(&list.mutex, NULL);
     return list;
 }
 
@@ -174,10 +175,8 @@ Node* list_dequeue(List* list)
 void list_free(List* list)
 {
     if (list == NULL) return;
-
-    while (list->head) {
-        free_node(list_dequeue(list));
-    }
+    while (list->head) node_free(list_dequeue(list));
+    pthread_mutex_destroy(&list->mutex);
 }
 
 void list_print(List* list)
@@ -189,13 +188,13 @@ void list_print(List* list)
             case NODE_TYPE_LIVE:
             case NODE_TYPE_SHORT:
             case NODE_TYPE_VIDEO:
-                print_video_result(current->content);
+                video_result_print(current->content);
                 break;
             case NODE_TYPE_CHANNEL:
-                print_channel_result(current->content);
+                channel_result_print(current->content);
                 break;
             case NODE_TYPE_PLAYLIST:
-                print_playlist_result(current->content);
+                playlist_result_print(current->content);
                 break;
             case NODE_TYPE_RAW_THUMBNAIL:
             case NODE_TYPE_WORKER_TASK:
