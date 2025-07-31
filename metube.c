@@ -1,25 +1,39 @@
-#include <math.h>
-#include <openssl/asn1.h>
 #include <ctype.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stddef.h>
 #include <pthread.h>
 #include <stdbool.h>
-#include <arpa/inet.h>
-#include <cjson/cJSON.h>
-#include <openssl/ssl.h>
-#include "uthash.h"
 
+#include "uthash.h"
 #include "raylib.h"
-#include "raylib/src/raylib.h"
+#include "arpa/inet.h"
+#include "cjson/cJSON.h"
+#include "openssl/ssl.h"
+
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
+#define MINUTE 60
+#define THUMBNAIL_LIFETIME (MINUTE * 1)
+
 #define MAX_THREADS 4
+#define N_CONN MAX_THREADS
+
+#define WATCH_HISTORY_FILE "watch_history.json"
+#define MAX_HISTORY_LEN 20
+
+#define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION "mqdefault"
+
+#define HTTPS_PORT "443"
+#define CLIENT_NAME "WEB"
+#define CLIENT_VER "2.20250730"
+#define YT_API_PLAYLIST_BROWSE_ID_PREFIX "VL"    
+#define YT_API_TRENDING_BROWSE_ID "FEtrending" 
+#define YT_API_CHANNEL_VIDEOS_PARAMS "EgZ2aWRlb3PyBgQKAjoA"  
+#define USER_AGENT "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 int bound_index_to_array (const int pos, const int array_size)
 {
@@ -233,11 +247,11 @@ typedef struct SearchResult
     struct SearchResult* next; 
 } SearchResult;
 
-SearchResult* init_search_result()
+SearchResult* search_result_init()
 {
     SearchResult *search_result = (SearchResult*) malloc(sizeof(SearchResult));
     if (search_result == NULL) {
-        printf("init_search_result: malloc returned NULL\n");
+        printf("search_result_init: malloc returned NULL\n");
         return NULL;
     }
 
@@ -268,69 +282,181 @@ void print_search_result(const SearchResult *search_result)
             search_result->id, search_result->title, search_result->authorId, search_result->subscriber_count, search_result->view_count, search_result->date_published, search_result->duration, search_result->video_count, search_result->media_type, search_result->thumbnail_path);
 }
 
-// linked list of search results returned from a query
+// holds raw thumbnail image data fetched from an HTTP request
+// intended for later conversion to a Texture (see LoadTextureFromMemory in raylib)
+typedef struct RawThumbnail
+{
+    Buffer data;              
+    char search_result_id[256];     
+    struct RawThumbnail *next;
+} RawThumbnail;
+
+RawThumbnail* raw_thumbnail_init()
+{
+    RawThumbnail* raw_thumbnail = malloc(sizeof(RawThumbnail));
+    if (raw_thumbnail == NULL) return NULL;
+
+    raw_thumbnail->next = NULL;
+    raw_thumbnail->data = init_buffer();
+    memset(raw_thumbnail->search_result_id, 0, sizeof(raw_thumbnail->search_result_id));
+
+    return raw_thumbnail;
+}
+
+void raw_thumbnail_free(RawThumbnail* raw_thumbnail)
+{
+    if (raw_thumbnail == NULL) return;
+    if (buffer_ready(&raw_thumbnail->data)) free_buffer(&raw_thumbnail->data);
+    free(raw_thumbnail); raw_thumbnail = NULL;
+}
+
+typedef struct ThreadTask
+{
+    void *(*funct)(void *);
+    void *args;
+    struct ThreadTask *next;
+} ThreadTask;
+
+ThreadTask* thread_task_init()
+{
+    return calloc(1, sizeof(ThreadTask));
+}
+
+void thread_task_free(ThreadTask* task)
+{
+    if (task == NULL) return;
+    if (task->args) {
+        free(task->args); task->args = NULL;
+    }
+    free(task); task = NULL;
+}
+
+typedef enum
+{
+    NODE_TYPE_SEACH_RESULT,
+    NODE_TYPE_RAW_THUMBNAIL,
+    NODE_TYPE_THREAD_TASK,
+    NODE_TYPE_UNDF,
+} NodeType;
+
+typedef struct Node 
+{
+    void* content;
+    struct Node* next;
+    NodeType type;
+} Node;
+
+Node* node_init(const NodeType node_type)
+{
+    Node* node = malloc(sizeof(Node));
+    if (node == NULL) {
+        printf("node_init: malloc returned NULL\n");
+        return NULL;
+    }
+
+    node->next = NULL;
+    node->type = node_type;
+    switch (node->type) {
+        case NODE_TYPE_SEACH_RESULT:  node->content = search_result_init(); break;
+        case NODE_TYPE_RAW_THUMBNAIL: node->content = raw_thumbnail_init(); break;
+        case NODE_TYPE_THREAD_TASK:   node->content = thread_task_init(); break;
+        case NODE_TYPE_UNDF:          node->content = NULL; break;
+    }
+
+    return node;
+}
+
+void node_free(Node* node)
+{
+    if (node == NULL) return;
+
+    switch (node->type) {
+        case NODE_TYPE_SEACH_RESULT:  free_search_result(node->content); break;
+        case NODE_TYPE_RAW_THUMBNAIL: raw_thumbnail_free(node->content); break;
+        case NODE_TYPE_THREAD_TASK:   thread_task_free(node->content); break;
+        case NODE_TYPE_UNDF:
+        break;
+    }
+
+    free(node); node = NULL;
+}
+
 typedef struct
 {
-    size_t count;           
-    SearchResult* head;    
-    SearchResult* tail;
-    pthread_mutex_t mutex;     
-} Results;
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    Node* head; 
+    Node* tail; 
+    size_t count;
+} List;
 
-Results init_results() 
+List list_init()
 {
-    Results search_results;
-    search_results.head = search_results.tail = NULL;
-    search_results.count = 0;
-    pthread_mutex_init(&search_results.mutex, NULL);
-    return search_results;
+    List list;
+    list.count = 0;
+    list.head = list.tail = NULL;
+    pthread_cond_init(&list.cond, NULL);
+    pthread_mutex_init(&list.mutex, NULL);
+    return list;
 }
 
-void add_search_result(Results *results, SearchResult *search_result)
+void list_append(List* list, Node* node)
 {
-    if (!results) {
-        printf("add_search_result: 'results' arg is NULL\n");
-        return;
+    if ((list == NULL) || (node == NULL)) return;
+
+    node->next = NULL;
+
+    if (list->head == NULL) {
+        list->head = list->tail = node;
     }
-
-    else if (!search_result) {
-        printf("add_search_result: 'search_result' arg is NULL\n");
-        return;
-    }
-
-    search_result->next = NULL;
-
-    if (results->count == 0) 
-        results->head = results->tail = search_result;
 
     else {
-        results->tail->next = search_result;
-        results->tail = results->tail->next;
+        list->tail->next = node;
+        list->tail = node;
     }
 
-    results->count++;
-}
+    list->count++;
+} 
 
-void free_results(Results *results) 
+Node* list_dequeue(List* list)
 {
-    if (!results) return;
+    if (list == NULL) return NULL;
 
-    while (results->head) {
-        SearchResult *to_free = results->head;
-        results->head = results->head->next;
-        free_search_result(to_free);
+    Node* detached = list->head;
+
+    list->head = list->head->next;
+    if (list->head == NULL) {
+        list->tail = NULL;
     }
 
-    pthread_mutex_destroy(&results->mutex);
-    results->head = results->tail = NULL;
-    results->count = 0;
+    list->count--;
+    
+    return detached;
 }
 
-void print_results(const Results* results)
+void list_free(List* list)
 {
-    for (SearchResult *current = results->head; current != NULL; current = current->next) {
-        print_search_result(current);
-    } 
+    if (list == NULL) return;
+    while (list->head && list->count != 0) node_free(list_dequeue(list));
+    list->count = 0;
+    list->head = list->tail = NULL;
+    pthread_cond_destroy(&list->cond);
+    pthread_mutex_destroy(&list->mutex);
+}
+
+void list_print(List* list)
+{
+    if (list == NULL) return;
+    
+    for (Node* current = list->head; current; current = current->next) {
+        switch (current->type) {
+            case NODE_TYPE_SEACH_RESULT: print_search_result(current->content); break;
+            case NODE_TYPE_RAW_THUMBNAIL:
+            case NODE_TYPE_THREAD_TASK:
+            case NODE_TYPE_UNDF:
+                break;
+        }
+    }
 }
 
 typedef enum
@@ -385,98 +511,6 @@ typedef struct
     SearchType search_type;
     SearchAttribute search_attr;    
 } Query;
-
-// holds raw thumbnail image data fetched from an HTTP request
-// intended for later conversion to a Texture (see LoadTextureFromMemory in raylib)
-typedef struct RawThumbnail
-{
-    Buffer data;              
-    char search_result_id[256];     
-    struct RawThumbnail *next;
-} RawThumbnail;
-
-void free_raw_thumbnail(RawThumbnail *raw_thumbnail)
-{
-    if (!raw_thumbnail) return;
-    if (buffer_ready(&raw_thumbnail->data)) free_buffer(&raw_thumbnail->data);
-    free(raw_thumbnail);
-}
-
-// thread-safe queue for storing in-memory thumbnail data. 
-// supports appending from a background thread and consuming from the main thread
-typedef struct 
-{
-    size_t count;
-    RawThumbnail *head;
-    RawThumbnail *tail;  
-    pthread_mutex_t mutex;
-} RawThumbnailQueue;
-
-static RawThumbnailQueue thumbnail_queue;
-
-RawThumbnailQueue init_thumbnail_queue()
-{
-    RawThumbnailQueue thumbnail_queue;
-    thumbnail_queue.count = 0;
-    thumbnail_queue.head = thumbnail_queue.tail = NULL;
-    pthread_mutex_init(&thumbnail_queue.mutex, NULL);
-    return thumbnail_queue;
-}
-
-void enqueue_thumbnail(RawThumbnailQueue *thumbnail_queue, RawThumbnail *thumbnail_data) 
-{
-    if (!thumbnail_queue) {
-        printf("enqueue_thumbnail: 'thumbnail_queue' arg is NULL\n");
-        return;
-    }
-
-    else if (!thumbnail_data) {
-        printf("enqueue_thumbnail: 'thumbnail_data' arg is NULL\n");
-        return;
-    }
-
-    thumbnail_data->next = NULL;
-
-    if (thumbnail_queue->count == 0) 
-        thumbnail_queue->head = thumbnail_queue->tail = thumbnail_data;
-    else {
-        thumbnail_queue->tail->next = thumbnail_data;
-        thumbnail_queue->tail = thumbnail_data;
-    }
-
-    thumbnail_queue->count++;
-}
-
-RawThumbnail* dequeue_thumbnail(RawThumbnailQueue *thumbnail_queue)
-{
-    if (!thumbnail_queue) {
-        printf("dequeue_thumbnail: 'thumbnail_queue' arg is NULL\n");
-        return NULL;
-    }
-
-    if (thumbnail_queue->count == 0) {
-        printf("dequeue_thumbnail: 'thumbnail_queue' arg is empty\n");
-        return NULL;
-    }
-
-    RawThumbnail *ret = thumbnail_queue->head;
-
-    thumbnail_queue->head = ret->next;
-    if (!thumbnail_queue->head) {
-        thumbnail_queue->tail = NULL;
-    }
-
-    thumbnail_queue->count--;
-
-    return ret;
-}
-
-void free_thumbnail_queue(RawThumbnailQueue *thumbnail_queue)
-{
-    if (!thumbnail_queue) return;
-    while (thumbnail_queue->head) free_raw_thumbnail(dequeue_thumbnail(thumbnail_queue));
-    pthread_mutex_destroy(&thumbnail_queue->mutex);
-}
 
 // read one line from ssl stream or n bytes into buffer (whichever comes first)
 size_t ssl_read_line(SSL *ssl, char *buffer, const size_t n) 
@@ -598,9 +632,6 @@ typedef struct {
     struct addrinfo *address_information;
 } PersistentConnection;
 
-#define HTTPS "443"
-#define N_CONN MAX_THREADS
-
 void init_persistent_connection(PersistentConnection *connection, const char *host, const char *port)
 {
     memset(connection, 0, sizeof(PersistentConnection));
@@ -654,8 +685,8 @@ bool establish_connection(PersistentConnection *connection)
     struct addrinfo desired_address_information = {0};
     desired_address_information.ai_family = AF_INET;
     desired_address_information.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(connection->host, HTTPS, &desired_address_information, &connection->address_information) != 0) {
-        printf("establish_persistent_connection: getaddrinfo failed for %s:%s\n", connection->host, HTTPS);
+    if (getaddrinfo(connection->host, HTTPS_PORT, &desired_address_information, &connection->address_information) != 0) {
+        printf("establish_persistent_connection: getaddrinfo failed for %s:%s\n", connection->host, HTTPS_PORT);
         return false;
     }
 
@@ -726,7 +757,7 @@ ConnectionPool* media_type_to_pool(const MediaType media_type)
 ConnectionPool init_connection_pool(const char* host)
 {
     ConnectionPool pool = {0};
-    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&pool.connections[c], host, HTTPS);
+    for (int c = 0; c < N_CONN; c++) init_persistent_connection(&pool.connections[c], host, HTTPS_PORT);
     return pool;
 }
 
@@ -1007,7 +1038,7 @@ typedef struct
     char search_result_id[64];
     PreparedRequest request;
     PersistentConnection *connection;
-    RawThumbnailQueue *thumbnail_queue;
+    List* thumbnail_queue;
 } LoadThumbnailArgs;
 
 void* load_thumbnail(void *args)
@@ -1021,18 +1052,19 @@ void* load_thumbnail(void *args)
         return NULL;
     }
 
-    RawThumbnail *thumbnail_data = malloc(sizeof(RawThumbnail));
-    if (thumbnail_data == NULL) {
-        printf("load_thumbnail: malloc returned NULL for thumbnail_data\n");
+    Node* node = node_init(NODE_TYPE_RAW_THUMBNAIL);
+    if ((node == NULL) || (node->content == NULL)) {
+        printf("load_thumbnail: node init failed\n");
         free(targs);
         return NULL;
     }
 
-    thumbnail_data->data = thumbnail_response.body;
-    strcpy(thumbnail_data->search_result_id, targs->search_result_id);
+    RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
+    raw_thumbnail->data = thumbnail_response.body;
+    strcpy(raw_thumbnail->search_result_id, targs->search_result_id);
 
     pthread_mutex_lock(&targs->thumbnail_queue->mutex);
-    enqueue_thumbnail(targs->thumbnail_queue, thumbnail_data);
+    list_append(targs->thumbnail_queue, node);
     pthread_mutex_unlock(&targs->thumbnail_queue->mutex);
 
     free_buffer(&thumbnail_response.header);
@@ -1040,86 +1072,10 @@ void* load_thumbnail(void *args)
     return NULL;
 }
 
-typedef struct ThreadTask
-{
-    void *(*funct)(void *);
-    void *args;
-    struct ThreadTask *next;
-} ThreadTask;
-
-typedef struct
-{
-    ThreadTask *head;
-    ThreadTask *tails;
-    size_t count;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-} TaskQueue;
-static TaskQueue task_queue;
-
-TaskQueue init_task_queue()
-{
-    TaskQueue tq;
-    tq.count = 0;
-    tq.head = tq.tails = NULL;
-    pthread_mutex_init(&tq.mutex, NULL);
-    pthread_cond_init(&tq.cond, NULL);
-    return tq;
-}
-
-void enqueue_task(ThreadTask *task, TaskQueue *queue)
-{
-    if (!task) {
-        printf("enqueue_task: Task arg is NULL\n");
-        return;
-    }
-
-    else if (!queue) {
-        printf("enqueue_task: TaskQueue arg is NULL\n");
-        return;
-    }
-    
-    if (queue->count == 0 || !queue->head) 
-        queue->head = queue->tails = task;
-    else {
-        task->next = NULL;
-        queue->tails->next = task;
-        queue->tails = task;
-    }
-
-    queue->count++;
-}
-
-ThreadTask* dequeue_task(TaskQueue *queue)
-{
-    if (!queue) {
-        printf("dequeue_task: TaskQueue arg is NULL\n");
-        return NULL;
-    }
-
-    if (queue->count == 0 || !queue->head) {
-        printf("dequeue_task: TaskQueue arg is empty\n");
-        return NULL;
-    }
-
-    ThreadTask *ret = queue->head;
-    queue->head = queue->head->next;
-    queue->count--;
-    
-    return ret; 
-}
-
-void free_task_queue(TaskQueue *queue)
-{
-    while (queue->head) free(dequeue_task(queue));
-    pthread_mutex_destroy(&queue->mutex);
-    pthread_cond_destroy(&queue->cond);
-}
-
 bool application_running = true;
 void* worker_thread_funct(void* args)
 {
-    TaskQueue* task_queue = (TaskQueue*)args;
+    List* task_queue = (List*) args;
     
     while (application_running) {
         pthread_mutex_lock(&task_queue->mutex);
@@ -1131,10 +1087,13 @@ void* worker_thread_funct(void* args)
             break;
         }
 
-        ThreadTask *task = dequeue_task(task_queue);
+        Node* node = list_dequeue(task_queue);
+        ThreadTask* task = (ThreadTask*) node->content;
+
         pthread_mutex_unlock(&task_queue->mutex); 
         task->funct(task->args);
-        free(task);
+        free(task); task = NULL;
+        free(node); node = NULL;
     }
 
     return NULL;
@@ -1156,12 +1115,12 @@ typedef struct
 {
     Query* query;
     PreparedRequest request;
-    Results *search_results;
-    RawThumbnailQueue *thumbnail_queue;
+    List* search_results;
+    List* thumbnail_queue;
     PersistentConnection *youtube_connection;
 } SearchThreadArgs;
 
-SearchThreadArgs* init_search_thread_args(Query* query, PreparedRequest request, Results* search_results, RawThumbnailQueue* thumbnail_queue, PersistentConnection* youtube_connection)
+SearchThreadArgs* init_search_thread_args(Query* query, PreparedRequest request, List* search_results, List* thumbnail_queue, PersistentConnection* youtube_connection)
 {
     SearchThreadArgs* targs = (SearchThreadArgs*) malloc(sizeof(SearchThreadArgs));
     if (targs == NULL) {
@@ -1318,8 +1277,6 @@ bool assign_string_from_path(cJSON* root, const char* path, char* dest, const si
 
     else return false;
 }
-
-#define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION "mqdefault"
 
 bool assign_video_thumbnail_path(const char* video_id, char* dest, const size_t dest_size)
 {
@@ -1619,7 +1576,7 @@ const char* get_results_list_path(const SearchType search_type, const SearchAttr
     return NULL;
 }
 
-int create_results_from_json(cJSON* json, Results *results, const SearchType search_type, const SearchAttribute search_attr, const bool allow_youtube_shorts)
+int create_results_from_json(cJSON* json, List* results, const SearchType search_type, const SearchAttribute search_attr, const bool allow_youtube_shorts)
 {
     const char* path = get_results_list_path(search_type, search_attr);
 
@@ -1644,11 +1601,13 @@ int create_results_from_json(cJSON* json, Results *results, const SearchType sea
 
     cJSON *item;
     cJSON_ArrayForEach (item, results_array) {
-        SearchResult *search_result = init_search_result();
-        if (search_result == NULL) {
-            printf("create_results_from_json: init_search_result returned NULL\n");
+        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+        if ((node == NULL) || (node->content == NULL)) {
+            printf("create_results_from_json: node_init returned NULL\n");
             return 0;
         }
+
+        SearchResult* search_result = (SearchResult*) node->content;
         
         cJSON* videoRenderer   =       cjson_pointer_get(item, ".videoRenderer");     // video
         cJSON* lockupViewModel =       cjson_pointer_get(item, ".lockupViewModel");   // playlist or related video container
@@ -1667,10 +1626,10 @@ int create_results_from_json(cJSON* json, Results *results, const SearchType sea
 
         if (search_result->media_type != UNDF) {
             elements_added++;
-            add_search_result(results, search_result);
+            list_append(results, node);
         }
 
-        else free_search_result(search_result);
+        else node_free(node);
     }
 
     return elements_added;
@@ -1723,22 +1682,7 @@ const char* get_continuation_token_path(const SearchType search_type, const Sear
                 return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
             if (search_attr == SEARCH_ATTR_APPENDING)
                 return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
-        case SEARCH_TYPE_TRENDING:
-        case SEARCH_TYPE_VIDEO_FOCUS:
-            return NULL;
-    }
-}
-
-
-void delete_n_results(Results* results, const size_t n)
-{
-    if (results == NULL || (n > results->count)) return;
-
-    for (int i = 0; results->head && i < n; i++) {
-        SearchResult* to_del = results->head;
-        results->count--;
-        results->head = results->head->next;
-        free_search_result(to_del);
+        default: return NULL;
     }
 }
 
@@ -1807,7 +1751,12 @@ void* get_results_from_query(void* args)
     
     if (search_attr == SEARCH_ATTR_REPLACE) {
         pthread_mutex_lock(&targs->search_results->mutex);
-        delete_n_results(targs->search_results, old_size);
+        
+        for (int i = 0; targs->search_results->head && (i < old_size); i++) {
+            Node* to_delete = list_dequeue(targs->search_results);
+            node_free(to_delete);
+        }
+        
         pthread_mutex_unlock(&targs->search_results->mutex);
     }
 
@@ -2192,9 +2141,6 @@ void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, 
     }
 }
 
-#define MINUTE 60
-#define THUMBNAIL_LIFETIME (MINUTE * 1)
-
 typedef struct
 {
     char id [64];
@@ -2301,14 +2247,13 @@ void remove_expired_thumbnails(TextureCacheEntry **hashtable)
     }
 }
 
-void process_thumbnail_queue(RawThumbnailQueue *queue, TextureCacheEntry **hashtable)
+void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)
 {
-    if (queue == NULL) return;
+    if (thumbnail_queue == NULL) return;
 
-    pthread_mutex_lock(&queue->mutex);
-
-    while (queue->head != NULL) {
-        RawThumbnail *raw_thumbnail = dequeue_thumbnail(queue);
+    while (thumbnail_queue->head != NULL) {
+        Node* node = list_dequeue(thumbnail_queue);
+        RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
 
         const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, 150, 80);
         if (IsTextureReady(thumbnail)) {
@@ -2318,26 +2263,30 @@ void process_thumbnail_queue(RawThumbnailQueue *queue, TextureCacheEntry **hasht
             }
         }
 
-        free_raw_thumbnail(raw_thumbnail);
+        node_free(node);
     }
-
-    pthread_mutex_unlock(&queue->mutex);
 }
 
-bool launch_task(TaskQueue* task_queue, void* targs, void* (*funct)(void*))
+bool launch_task(List* task_queue, void* targs, void* (*funct)(void*))
 {
-    ThreadTask* task = (ThreadTask*) malloc(sizeof(ThreadTask));
-    if (task == NULL) {
-        printf("launch_task: malloc returned NULL for 'task'\n");
+    if ((task_queue == NULL) || (targs == NULL) || (funct == NULL)) return false;
+
+    Node* node = node_init(NODE_TYPE_THREAD_TASK);
+    if ((node == NULL) || (node->content == NULL)) {
+        printf("launch_task: node_init failed\n");
+        if (node) {
+            free(node); node = NULL;
+        } 
         return false;
     }
 
+    ThreadTask* task = (ThreadTask*) node->content;
     task->next = NULL;
     task->args = targs;
     task->funct = funct;
 
     pthread_mutex_lock(&task_queue->mutex);
-    enqueue_task(task, task_queue);
+    list_append(task_queue, node);
     pthread_cond_signal(&task_queue->cond);
     pthread_mutex_unlock(&task_queue->mutex);
 
@@ -2421,9 +2370,9 @@ const float seconds_to_microseconds(const float seconds)
     return (seconds * 1e3);
 }
 
-bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, PersistentConnection* conn)
+bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, PersistentConnection* conn)
 {
-    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (conn == NULL)) return false;
+    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (conn == NULL) || (thumbnail_queue == NULL) || (task_queue == NULL)) return false;
 
     PreparedRequest req = {0};
     if (configure_get_header(sizeof(req.header), req.header, conn->host, thumbnail_path) == false) {
@@ -2439,18 +2388,11 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
 
     targs->request = req;
     targs->connection = conn;
-    targs->thumbnail_queue = &thumbnail_queue;
+    targs->thumbnail_queue = thumbnail_queue;
     strncpy(targs->search_result_id, search_result_id, sizeof(targs->search_result_id) - 1);
 
-    return launch_task(&task_queue, targs, load_thumbnail);
+    return launch_task(task_queue, targs, load_thumbnail);
 }
-
-#define CLIENT_NAME "WEB"
-#define CLIENT_VER "2.20250730"
-#define YT_API_PLAYLIST_BROWSE_ID_PREFIX "VL"    // "video list" (playlist)
-#define YT_API_BROWSE_ID_TRENDING "FEtrending"   // "frontend trending"
-#define YT_API_CHANNEL_VIDEOS_PARAMS "EgZ2aWRlb3PyBgQKAjoA"  // filters to "Videos" tab in a channel's homepage
-#define USER_AGENT "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 bool valid_post_request(const PreparedRequest post)
 {
@@ -2552,7 +2494,7 @@ bool add_view_trending_videos_payload(cJSON* root, const Query* q)
         return false;
     }
 
-    if (cJSON_AddStringToObject(root, "browseId", YT_API_BROWSE_ID_TRENDING) == NULL) {
+    if (cJSON_AddStringToObject(root, "browseId", YT_API_TRENDING_BROWSE_ID) == NULL) {
         printf("add_view_trending_videos_payload: failed to add 'browseId'\n");
         return false;
     }
@@ -2691,9 +2633,9 @@ PreparedRequest init_post_request(const Query query, const char* internal_api_ke
     return req;
 }
 
-bool queue_search_task(Query* query, PersistentConnection* conn, Results* results, const char* internal_api_key)
+bool queue_search_task(Query* query, PersistentConnection* conn, List* task_queue, List* results, List* thumbnail_queue, const char* internal_api_key)
 {
-    if ((conn == NULL) || (results == NULL) || (internal_api_key == NULL)) {
+    if ((conn == NULL) || (task_queue == NULL) || (results == NULL) || (thumbnail_queue == NULL) || (internal_api_key == NULL)) {
         printf("queue_search_task: invalid input\n");
         return false;
     }
@@ -2704,13 +2646,13 @@ bool queue_search_task(Query* query, PersistentConnection* conn, Results* result
         return false;
     }
 
-    SearchThreadArgs* targs = init_search_thread_args(query, post, results, &thumbnail_queue, conn);
+    SearchThreadArgs* targs = init_search_thread_args(query, post, results, thumbnail_queue, conn);
     if (!targs) {
         printf("queue_search_task: 'targs' is NULL\n");
         return false;
     }
 
-    return launch_task(&task_queue, targs, get_results_from_query);
+    return launch_task(task_queue, targs, get_results_from_query);
 }
 
 typedef struct
@@ -2853,9 +2795,9 @@ void* get_focused_video_information(void* args)
         return NULL;
 }
 
-bool queue_focused_video_task(const Query query, PersistentConnection* conn, HighlightedVideo* highlighted_video, const char* internal_api_key)
+bool queue_focused_video_task(const Query query, List* task_queue, PersistentConnection* conn, HighlightedVideo* highlighted_video, const char* internal_api_key)
 {
-    if ((conn == NULL) || (highlighted_video == NULL) || (internal_api_key == NULL)) {
+    if ((task_queue == NULL) || (conn == NULL) || (highlighted_video == NULL) || (internal_api_key == NULL)) {
         printf("queue_focused_video_task: invalid input\n");
         return false;
     }
@@ -2868,7 +2810,7 @@ bool queue_focused_video_task(const Query query, PersistentConnection* conn, Hig
 
     FocusedInfoArgs* targs = init_focused_info_args(post, conn, highlighted_video);
 
-    return launch_task(&task_queue, targs, get_focused_video_information);
+    return launch_task(task_queue, targs, get_focused_video_information);
 }
 
 // bug bountys
@@ -2938,9 +2880,6 @@ char* get_file_content(const char* filepath)
 
     return buffer;
 }
-
-#define WATCH_HISTORY_FILE "watch_history.json"
-#define MAX_HISTORY_LEN 20
 
 bool create_watch_history_file()
 {
@@ -3115,14 +3054,13 @@ void update_watch_history(const SearchResult* watched_video)
 // parse the content from the cjson array
 // store into results array
 
+
 int main()
 {
     TextureCacheEntry *cached_thumbnails = NULL;
-    thumbnail_queue = init_thumbnail_queue();
-
-    Results results = init_results();
-
-    task_queue = init_task_queue();
+    List thumbnail_queue = list_init();
+    List task_queue = list_init();
+    List results = list_init();
     pthread_t thread_pool[MAX_THREADS];
     init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
     
@@ -3188,7 +3126,9 @@ int main()
         }
 
         if (thumbnail_queue.count > 0) {
+            pthread_mutex_lock(&thumbnail_queue.mutex);
             process_thumbnail_queue(&thumbnail_queue, &cached_thumbnails);
+            pthread_mutex_unlock(&thumbnail_queue.mutex);
         }
 
         if (clicked_video) {
@@ -3196,7 +3136,7 @@ int main()
 
             PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-            if (queue_focused_video_task(query, conn, &highlighted_video, internal_api_key) == false) {
+            if (queue_focused_video_task(query, &task_queue, conn, &highlighted_video, internal_api_key) == false) {
                 printf("failed to queue focused video task\n");
             }
         }
@@ -3204,7 +3144,7 @@ int main()
         if (search) {
             search = search_finished = false;
 
-            free_thumbnail_queue(&thumbnail_queue); thumbnail_queue = init_thumbnail_queue();
+            list_free(&thumbnail_queue); thumbnail_queue = list_init();
 
             // evade bot detection
             if (strcmp(last_search_query, query.string) == 0) {
@@ -3216,7 +3156,7 @@ int main()
 
             PersistentConnection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-            if (queue_search_task(&query, conn, &results, internal_api_key) == false) {
+            if (queue_search_task(&query, conn, &task_queue, &results, &thumbnail_queue, internal_api_key) == false) {
                 printf("failed to queue search task\n");
             }
         }
@@ -3234,11 +3174,11 @@ int main()
             if (buffer) {
                 cJSON* history_array = cJSON_Parse(buffer);
                 if (valid_cjson_array(history_array)) {
-                    const size_t array_size = cJSON_GetArraySize(history_array);
                     cJSON* item;
                     cJSON_ArrayForEach(item, history_array) {
-                        SearchResult* watched_video = init_search_result();
-                        if (watched_video) {
+                        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+                        if (node && node->content) {
+                            SearchResult* watched_video = (SearchResult*) node->content;
                             if (assign_string_from_path(item, ".id", watched_video->id, sizeof(watched_video->id)) == false) {
                                 printf("assign id fail\n");
                             }
@@ -3269,11 +3209,15 @@ int main()
                                 printf("assign date_published fail\n");
                             } 
 
-                            add_search_result(&results, watched_video);                        
+                            list_append(&results, node);
                         }
                     }
 
-                    delete_n_results(&results, old_size);
+                    for (int i = 0; results.head && (i < old_size); i++) {
+                        Node* to_delete = list_dequeue(&results);
+                        node_free(to_delete);
+                    }
+
                     cJSON_Delete(history_array);
                     free(buffer);
                 }
@@ -3438,7 +3382,9 @@ int main()
 
             pthread_mutex_lock(&results.mutex);
 
-            for (SearchResult* search_result = results.head; search_result; search_result = search_result->next, i++, container_y += container_height) {
+            for (Node* node = results.head; node; node = node->next, i++, container_y += container_height) {
+                SearchResult* search_result = (SearchResult*) node->content;
+
                 container.y = container_y + search_result_scrollbar_pos.y;
 
                 if (CheckCollisionRecs(scissor_rect, container) == false) {
@@ -3466,7 +3412,7 @@ int main()
                     ConnectionPool* pool = media_type_to_pool(search_result->media_type);
                     if (pool) {
                         PersistentConnection* conn = &pool->connections[pool->current_conn];
-                        if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, conn)) {
+                        if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, conn)) {
                             cycle_connection(pool);
                         }
                     }
@@ -3549,12 +3495,12 @@ int main()
     application_running = false;
     pthread_cond_broadcast(&task_queue.cond);
     free_thread_pool(MAX_THREADS, thread_pool);
-    free_task_queue(&task_queue);         
+    list_free(&task_queue);         
     
     // deinit app
     UnloadFont(ui.font);
-    free_results(&results);
-    free_thumbnail_queue(&thumbnail_queue);
+    list_free(&results);
+    list_free(&thumbnail_queue);
     free_cached_textures(&cached_thumbnails);
     if (query.continuation_token) free(query.continuation_token);
     
@@ -3568,6 +3514,8 @@ int main()
     
     return 0;
 }
+
+// replace list with genaric one
 
 // searching feature
     // watch history
