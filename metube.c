@@ -28,6 +28,11 @@
 
 #define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION "mqdefault"
 
+#define VALID_HTTPS_RESPONSE_CODE "200"
+#define CONTENT_LENGTH_HEADER_TAG "Content-Length:"
+#define TRANSFER_ENCODING_HEADER_TAG "Transfer-Encoding:"
+#define CHUNKED_ENCODING "chunked"
+
 #define HTTPS_PORT "443"
 #define CLIENT_NAME "WEB"
 #define CLIENT_VER "2.20250730"
@@ -129,11 +134,7 @@ bool buffer_ready(const Buffer *buffer)
 
 void buffer_free(Buffer *buffer)
 {
-    if (!buffer) {
-        printf("buffer_ready: 'buffer' arg is NULL\n");
-        return;
-    }
-
+    if (buffer == NULL) return;
     if (buffer->data) free(buffer->data);
     buffer->data = NULL;
     buffer->size = 0;
@@ -141,7 +142,7 @@ void buffer_free(Buffer *buffer)
 
 void buffer_create_file(const char* filename, const Buffer* buffer)
 {
-    if ((filename == NULL) || (buffer == NULL)) return;
+    if ((filename == NULL) || (buffer == NULL) || (buffer_ready(buffer) == false)) return;
 
     FILE* fp = fopen(filename, "wb");
     if (fp == NULL) {
@@ -974,11 +975,9 @@ int ssl_read_line(SSL* ssl, char* buffer, const size_t buffer_size)
     return pos;
 }
 
-Buffer ssl_read_header(SSL* ssl)
+bool ssl_read_header(SSL* ssl, Buffer* header)
 {
-    Buffer header = buffer_init();
-
-    if (ssl == NULL) return header;
+    if ((ssl == NULL) || (header == NULL)) return false;
 
     const char* last_line = "\r\n";
 
@@ -988,22 +987,18 @@ Buffer ssl_read_header(SSL* ssl)
         int len = ssl_read_line(ssl, line, sizeof(line));
         if (len <= 0) {
             printf("ssl_read_header: ssl_read_line returned %d\n", len);
-            if (buffer_ready(&header)) {
-                buffer_create_file("unfinished_header.txt", &header);
-                buffer_free(&header);
-            } 
-            return header;
+            return false;
         }
 
-        buffer_write_data(&header, line, len);
+        buffer_write_data(header, line, len);
     }
 
-    return header;
+    return true;
 }
 
 int ssl_read_n(SSL* ssl, Buffer* buffer, const size_t n)
 {
-    if ((ssl == NULL) || (buffer == NULL) || (n == 0)) return 0;
+    if ((ssl == NULL) || (buffer == NULL)) return -1;
 
     char data[4096];
 
@@ -1026,37 +1021,6 @@ int ssl_read_n(SSL* ssl, Buffer* buffer, const size_t n)
     return bytes_read;
 }
 
-bool header_contains_tag(const char* header, const char* tag)
-{
-    if ((header == NULL) || (tag == NULL)) return false;
-    return strstr(header, tag) != NULL;
-}
-
-int get_header_content_length(const char* header)
-{
-    if (header == NULL) return -1;
-
-    char* location = strstr(header, "Content-Length:");
-    if (location == NULL) {
-        printf("get_header_content_length: content length not found\n");
-        return -1;
-    }
-
-    char* first_numeric = location;
-    while (first_numeric && !isdigit(*first_numeric)) {
-        first_numeric++;
-    } 
-
-    int i = 0;
-    char bytes[16] = {0};
-    while (first_numeric && isdigit(*first_numeric)) {
-        bytes[i++] = *first_numeric;
-        first_numeric++;
-    }
-
-    return atoi(bytes);
-}
-
 bool ssl_write_request(SSL* ssl, const HttpsRequest req)
 {
     if (ssl == NULL) return false;
@@ -1076,167 +1040,184 @@ bool ssl_write_request(SSL* ssl, const HttpsRequest req)
     return true;
 }
 
-bool encoding_is_of_type(const char* header, const char* encoding_type)
+int get_https_request_code(const char* response_line, char* dest, const size_t dest_size)
 {
-    if ((header == NULL) || (encoding_type == NULL)) return false;
+    if (response_line == NULL) return -1;
 
-    const char* needle = "Transfer-Encoding";
-
-    if (header_contains_tag(header, needle) == false) {
-        printf("encoding_is_of_type: transfer_encoding not found\n");
-        return false;
-    }
-
-    char* transfer_encoding_line = strstr(header, needle);
-
-    int i = 0;
-    char type[32];
-    for (char* ptr = transfer_encoding_line + strlen(needle); *ptr; ptr++) {
-        if (isalpha(*ptr)) {
-            type[i++] = *ptr;
-        }
-    }
-
-    type[i] = '\0';
-    printf("%s\n", type);
-
-    return (strcmp(type, encoding_type) == 0);
-}
-
-void get_https_request_code(char* response_header, char* dest, const size_t dest_size)
-{
-    if (response_header == NULL) return;
-
-    char* start = response_header + strlen("HTTP/1.1"); 
     bool in_request_code = false;
+    
     int i = 0;
 
-    for (char* current = start; current && (i < dest_size); current++) {
+    for (const char* current = response_line; (*current) && (i < dest_size); current++) {
         const char c = (*current);
 
         if (in_request_code == false) {
-            if (isdigit(c)) {
-                in_request_code = true;
-            }
+            if (isdigit(c)) in_request_code = true;
         }
 
         if (in_request_code) {
-            if (isdigit(c) == false) {
-                break;
-            }
+            if (isdigit(c) == false) break;
 
             dest[i++] = c;
         }
     }
 
     dest[i] = '\0';
+
+    return i;
 }
 
-bool https_request_code_is_valid(const char* request_code)
+bool valid_request_code(const char* response_header)
 {
-    return (strcmp(request_code, "200") == 0); 
+    if (response_header == NULL) return false;
+
+    char* response_line = strstr(response_header, "HTTP/1.1");
+    if (response_line == NULL) {
+        printf("valid_request_code: \"HTTP/1.1\" not found\n");
+        return false;
+    }
+
+    response_line += strlen("HTTP/1.1");
+
+    char request_code[8] = {0};
+    if (get_https_request_code(response_line, request_code, sizeof(request_code)) <= 0) {
+        printf("valid_request_code: get_https_request_code failed\n");
+        return false;
+    }
+
+    return (strcmp(request_code, VALID_HTTPS_RESPONSE_CODE) == 0);
 }
 
-// NEED TO REWRITE
-HttpsResponse send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx,Connection *connection)
+HttpsResponse send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx,Connection* connection)
 {
+    HttpsResponse res = https_response_init();
+
+    if ((ssl_ctx == NULL) || (connection == NULL)) return res;
+
     pthread_mutex_lock(&connection->mutex);
 
     if (connected_to_internet() == false) {
-        printf("send_https_request: not connected to the wifi\n");
+        printf("send_https_request: no internet connection\n");
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (HttpsResponse){0};
+        return res;
     }
 
     if (connection->connected == false) {
-        connection->connected = connection_establish(connection, ssl_ctx);
-        if (connection->connected == false) {
-            printf("send_https_request: failed to establish connection\n");
+        if ((connection->connected = connection_establish(connection, ssl_ctx)) == false) {
+            printf("send_https_request: connection_established failed\n");
             pthread_mutex_unlock(&connection->mutex);
-            return (HttpsResponse){0};
+            return res;
         }
     }
 
-    int header_write_status = SSL_write(connection->ssl, request.header, strlen(request.header));
-    if (header_write_status <= 0) {
-        printf("send_https_request: SSL_write (header) failed, returned %d\n", header_write_status);
+    if (ssl_write_request(connection->ssl, request) == false) {
+        printf("send_https_request: ssl_write_request failed\n");
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (HttpsResponse){0};
-    } 
-
-    if (request.payload && (request.payload[0] != '\0')) {
-        int body_write_status = SSL_write(connection->ssl, request.payload, strlen(request.payload));
-        if (body_write_status <= 0) {
-            printf("send_https_request: SSL_write (body) failed, returned %d\n", body_write_status);
-            connection->connected = false;
-            pthread_mutex_unlock(&connection->mutex);
-            return (HttpsResponse){0};
-        }
+        return res;
     }
 
-    HttpsResponse response = https_response_init();
-
-    response.header = ssl_read_header(connection->ssl);
-    if (buffer_ready(&response.header) == false) {
-        printf("send_https_request: failed to read header from ssl stream\n");
+    if (ssl_read_header(connection->ssl, &res.header) == false) {
+        printf("send_https_request: ssl_read_header failed\n");
+        if (buffer_ready(&res.header)) buffer_free(&res.header);
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (HttpsResponse){0};
+        return res;
     }
 
-    char https_request_code[4];
-    get_https_request_code(response.header.data, https_request_code, sizeof(https_request_code));
-    if (https_request_code_is_valid(https_request_code) == false) {
-        printf("send_https_request: invalid https request code (%s)\n", https_request_code);
-        buffer_create_file("error_header.txt", &response.header);
+    if (valid_request_code(res.header.data) == false) {
+        printf("send_https_request: valid_request_code failed\n");
+        buffer_create_file("error_header.txt", &res.header);
+        https_response_free(&res);
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
-        return (HttpsResponse){0};
+        return res;
     }
 
-    if (header_contains_tag(response.header.data, "Content-Length:")) {
-        size_t content_length = get_header_content_length(response.header.data);
-        if (content_length > 0) {
-            ssl_read_n(connection->ssl, &response.body, content_length);
-        }
+    char* content_length_line = strstr(res.header.data, CONTENT_LENGTH_HEADER_TAG);
+    if (content_length_line) {
+        char len_str[16] = {0};
+        int i = 0;
 
-        else {
-            printf("send_https_request: invalid content length read from header\n");
-            connection->connected = false;
-            pthread_mutex_unlock(&connection->mutex);
-            return (HttpsResponse){0};
-        }
-    }
+        char* ptr = content_length_line + strlen(CONTENT_LENGTH_HEADER_TAG);
+        if (ptr) {
+            while (*ptr && isspace((unsigned char) *ptr)) ptr++;
 
-    else if (header_contains_tag(response.header.data, "Transfer-Encoding: chunked")) {
-        const char *crlf = "\r\n";
-        const size_t crlf_len = strlen(crlf);
-        
-        int chunk_size = -1; 
-        while (chunk_size != 0) {
-            char hex[16] = {0};
-            int len = ssl_read_line(connection->ssl, hex, sizeof(hex));
-            if (len <= crlf_len) {
-                printf("send_https_request: failed to read chunk size\n");
-                connection->connected = false;
-                pthread_mutex_unlock(&connection->mutex);
-                return (HttpsResponse){0};
+            for ( ; (*ptr) && (*ptr != '\n'); ptr++) {
+                if (isdigit(*ptr)) len_str[i++] = *ptr;
             }
+        }
 
-            hex[len - crlf_len] = '\0';
+        len_str[i] = '\0';
 
-            chunk_size = strtol(hex, NULL, 16);
-            ssl_read_n(connection->ssl, &response.body, chunk_size);
+        int content_length = atoi(len_str);
+        if (content_length == 0) {
+            printf("send_https_request: invalid content length read\n");
+            if (buffer_ready(&res.header)) {
+                buffer_create_file("content_length_error.txt", &res.header);
+                buffer_free(&res.header);
+            }
+            connection->connected = false;
+            pthread_mutex_unlock(&connection->mutex);
+            return res;
+        }
 
-            char trailing_crlf[16];
-            ssl_read_line(connection->ssl, trailing_crlf, sizeof(trailing_crlf));
+        ssl_read_n(connection->ssl, &res.body, content_length);
+    }
+
+    char* transfer_encoding_line = strstr(res.header.data, TRANSFER_ENCODING_HEADER_TAG);
+    if (transfer_encoding_line) {
+        char encoding_type[16] = {0};
+        int i = 0;
+
+        char* ptr = transfer_encoding_line += strlen(TRANSFER_ENCODING_HEADER_TAG);
+        if (ptr) {
+            while (*ptr && isspace(*ptr)) ptr++;
+
+            for (; *ptr && (*ptr != '\n'); ptr++) {
+                if (isalpha(*ptr)) encoding_type[i++] = *ptr;
+            }
+        }
+        
+        encoding_type[i] = '\0';
+
+        if (strcmp(encoding_type, CHUNKED_ENCODING) == 0) {
+            const char *crlf = "\r\n";
+            const size_t crlf_len = strlen(crlf);
+            
+            int chunk_size = -1; 
+            while (chunk_size != 0) {
+                char hex[16] = {0};
+                int len = ssl_read_line(connection->ssl, hex, sizeof(hex));
+                if (len <= crlf_len) {
+                    printf("send_https_request: failed to read chunk size\n");
+                    https_response_free(&res);
+                    connection->connected = false;
+                    pthread_mutex_unlock(&connection->mutex);
+                    return res;
+                }
+
+                hex[len - crlf_len] = '\0';
+
+                chunk_size = strtol(hex, NULL, 16);
+                int read = ssl_read_n(connection->ssl, &res.body, chunk_size);
+                if (read != chunk_size) {
+                    printf("send_https_request: only %d/%d bytes read\n", read, chunk_size);
+                    https_response_free(&res);
+                    connection->connected = false;
+                    pthread_mutex_unlock(&connection->mutex);
+                    return res;
+                }
+
+                char trailing_crlf[16];
+                ssl_read_line(connection->ssl, trailing_crlf, sizeof(trailing_crlf));
+            }
         }
     }
 
     pthread_mutex_unlock(&connection->mutex);
-    return response;
+    return res;
 }
 
 size_t trim_whitespace(char* string)
