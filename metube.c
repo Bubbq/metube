@@ -41,6 +41,8 @@
 #define YT_API_CHANNEL_VIDEOS_PARAMS "EgZ2aWRlb3PyBgQKAjoA"  
 #define USER_AGENT "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
+static char* continuation_token = NULL;
+
 int bound_index_to_array (const int pos, const int array_size)
 {
     return (pos + array_size) % array_size;
@@ -120,6 +122,61 @@ char* get_file_content(const char* filepath)
     fclose(fp); fp = NULL;
 
     return buffer;
+}
+
+bool string_is_integer(const char *s)
+{
+    if (s == NULL || *s == '\0') return false;
+
+    if (*s == '-' || *s == '+') s++;
+
+    if (*s == '\0') return false;
+
+    while (*s) {
+        if (!isdigit((unsigned char)*s)) return false;
+        s++;
+    }
+
+    return true;
+}
+
+int filter_non_numeric_chars(char* string, const size_t string_size)
+{
+    if (string == NULL) return -1;
+
+    int i = 0;
+    for (int j = 0; j < string_size; j++) {
+        const char c = string[j];
+        if (isdigit(c)) {
+            string[i++] = string[j];
+        }
+    }
+
+    string[i] = '\0';   
+
+    return i;
+}
+
+size_t trim_whitespace(char* string)
+{
+    if ((string == NULL) || (string[0] == '\0')) return 0;
+    
+    char* start = string;
+    while (isspace((unsigned char) *start)) {
+        start++;
+    }
+
+    char* end = string + strlen(string) - 1;
+    while (isspace((unsigned char) *end)) {
+        end--;
+    }
+
+    size_t len = end < start ? 0 : end - start + 1;
+    memmove(string, start, len);
+    
+    string[len] = '\0';
+
+    return len;
 }
 
 typedef struct
@@ -268,6 +325,9 @@ char* media_type_to_text(const MediaType media_type)
         case MEDIA_TYPE_ANY: return "ANY";
         case MEDIA_TYPE_UNDF: return "UNDF";
         case MEDIA_TYPE_SHORT: return "SHORT";
+        default:
+            printf("media_type_to_text: invalid media_type passed\n");
+            return NULL;
     }
 }
 
@@ -556,7 +616,6 @@ typedef struct
 {
     char string[256];        
     char focused_id[64];     
-    char* continuation_token;
     QueryType type;
     QueryAttribute attr;    
     MediaType media;          
@@ -769,8 +828,8 @@ cJSON* configure_payload(const Query* query)
     bool (*payload_funct)(cJSON*,const Query*) = NULL;
 
     if (query->attr == QUERTY_ATTR_APPEND)  {
-        if (query->continuation_token && query->continuation_token[0] != '\0') {
-            if (add_continuation_payload(root, query->continuation_token) == false) {
+        if (continuation_token && continuation_token[0] != '\0') {
+            if (add_continuation_payload(root, continuation_token) == false) {
                 cJSON_Delete(root); root = NULL;
             }
         }
@@ -1280,180 +1339,6 @@ HttpsResponse send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx,Co
     return res;
 }
 
-size_t trim_whitespace(char* string)
-{
-    if ((string == NULL) || (string[0] == '\0')) return 0;
-    
-    char* start = string;
-    while (isspace((unsigned char) *start)) {
-        start++;
-    }
-
-    char* end = string + strlen(string) - 1;
-    while (isspace((unsigned char) *end)) {
-        end--;
-    }
-
-    size_t len = end < start ? 0 : end - start + 1;
-    memmove(string, start, len);
-    
-    string[len] = '\0';
-
-    return len;
-}
-
-int filter_non_numeric_chars(char* string, const size_t string_size)
-{
-    if (string == NULL) return -1;
-
-    int i = 0;
-    for (int j = 0; j < string_size; j++) {
-        const char c = string[j];
-        if (isdigit(c)) {
-            string[i++] = string[j];
-        }
-    }
-
-    string[i] = '\0';   
-
-    return i;
-}
-
-void format_view_count(char* dest, const size_t dest_size)
-{
-    if (dest == NULL) {
-        printf("format_view_count: 'dest' is NULL\n");
-        return;
-    }
-
-    if (filter_non_numeric_chars(dest, dest_size) <= 0) {
-        printf("format_view_count: invalid view format passed\n");
-        return;
-    } 
-
-    const float view_count = strtof(dest, NULL);
-
-    int written;
-    if      (view_count < 1e3)  written = snprintf(dest, dest_size, "%.0f  views", view_count);         // 0      - 999
-    else if (view_count < 1e4)  written = snprintf(dest, dest_size, "%.2fk views", (view_count / 1e3)); // 1,000  - 9,999
-    else if (view_count < 1e5)  written = snprintf(dest, dest_size, "%.1fk views", (view_count / 1e3)); // 10,000 - 99,999
-    else if (view_count < 1e6)  written = snprintf(dest, dest_size, "%.0fk views", (view_count / 1e3)); // 10,000 - 99,999
-    else if (view_count < 1e7)  written = snprintf(dest, dest_size, "%.2fM views", (view_count / 1e6)); // 10,000 - 99,999
-    else if (view_count < 1e8)  written = snprintf(dest, dest_size, "%.1fM views", (view_count / 1e6)); // 10,000 - 99,999
-    else if (view_count < 1e9)  written = snprintf(dest, dest_size, "%.0fM views", (view_count / 1e6)); // 10,000 - 99,999
-    else if (view_count < 1e10) written = snprintf(dest, dest_size, "%.2fB views", (view_count / 1e9)); // 10,000 - 99,999
-    else if (view_count < 1e11) written = snprintf(dest, dest_size, "%.1fB views", (view_count / 1e9)); // 10,000 - 99,999
-    else if (view_count < 1e12) written = snprintf(dest, dest_size, "%.0fB views", (view_count / 1e9)); // 10,000 - 99,999
-    
-    if (written >= dest_size) {
-        printf("format_view_count: string truncated\n");
-        return;
-    }
-}
-
-typedef struct 
-{
-    char search_result_id[64];
-    HttpsRequest request;
-    Connection *connection;
-    List* thumbnail_queue;
-} LoadThumbnailArgs;
-
-void* load_thumbnail(void *args)
-{
-    LoadThumbnailArgs *targs = (LoadThumbnailArgs*) args;
-    
-    HttpsResponse thumbnail_response = send_https_request(targs->request, ssl_ctx, targs->connection);
-    if (https_response_ready(&thumbnail_response) == false) {
-        printf("load_thumbnail: send_http_request returned invalid buffer\n");
-        free(targs);
-        return NULL;
-    }
-
-    Node* node = node_init(NODE_TYPE_RAW_THUMBNAIL);
-    if ((node == NULL) || (node->content == NULL)) {
-        printf("load_thumbnail: node init failed\n");
-        free(targs);
-        return NULL;
-    }
-
-    RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
-    raw_thumbnail->data = thumbnail_response.body;
-    strcpy(raw_thumbnail->search_result_id, targs->search_result_id);
-
-    pthread_mutex_lock(&targs->thumbnail_queue->mutex);
-    list_append(targs->thumbnail_queue, node);
-    pthread_mutex_unlock(&targs->thumbnail_queue->mutex);
-
-    buffer_free(&thumbnail_response.header);
-    free(targs);
-    return NULL;
-}
-
-bool application_running = true;
-void* worker_thread_funct(void* args)
-{
-    List* task_queue = (List*) args;
-    
-    while (application_running) {
-        pthread_mutex_lock(&task_queue->mutex);
-        while ((task_queue->count == 0) && application_running) 
-            pthread_cond_wait(&task_queue->cond, &task_queue->mutex);
-
-        if (application_running == false) {
-            pthread_mutex_unlock(&task_queue->mutex);
-            break;
-        }
-
-        Node* node = list_dequeue(task_queue);
-        ThreadTask* task = (ThreadTask*) node->content;
-
-        pthread_mutex_unlock(&task_queue->mutex); 
-        task->funct(task->args);
-        free(task); task = NULL;
-        free(node); node = NULL;
-    }
-
-    return NULL;
-}
-
-void init_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads], void* (*worker_funct)(void*), void* worker_args)
-{
-    for (int t = 0; t < nthreads; t++) 
-        pthread_create(&thread_pool[t], NULL, worker_funct, worker_args);
-}
-
-void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
-{
-    for (int t = 0; t < nthreads; t++) 
-        pthread_join(thread_pool[t], NULL);
-}
-
-typedef struct
-{
-    Query* query;
-    HttpsRequest request;
-    List* search_results;
-    List* thumbnail_queue;
-    Connection *youtube_connection;
-} SearchThreadArgs;
-
-SearchThreadArgs* init_search_thread_args(Query* query, HttpsRequest request, List* search_results, List* thumbnail_queue, Connection* youtube_connection)
-{
-    SearchThreadArgs* targs = (SearchThreadArgs*) malloc(sizeof(SearchThreadArgs));
-    if (targs == NULL) {
-        printf("create_search_thread_args: malloc returned NULL for 'search_thread_args'\n");
-        return NULL;
-    }
-
-    targs->query = query;
-    targs->request = request;
-    targs->search_results = search_results;
-    targs->thumbnail_queue = thumbnail_queue;
-    targs->youtube_connection = youtube_connection;
-
-    return targs;
-}
 
 bool valid_cjson_string(const cJSON* json_str)
 {
@@ -1468,22 +1353,6 @@ bool valid_cjson_array(const cJSON* json_arr)
 bool valid_cjson_number(const cJSON* json_num)
 {
     return json_num && cJSON_IsNumber(json_num);
-}
-
-bool string_is_integer(const char *s)
-{
-    if (s == NULL || *s == '\0') return false;
-
-    if (*s == '-' || *s == '+') s++;
-
-    if (*s == '\0') return false;
-
-    while (*s) {
-        if (!isdigit((unsigned char)*s)) return false;
-        s++;
-    }
-
-    return true;
 }
 
 cJSON* cjson_pointer_get(cJSON* root, const char* path)
@@ -1577,6 +1446,38 @@ bool video_is_live(cJSON* videoRenderer)
     }
 
     return false;
+}
+
+void format_view_count(char* dest, const size_t dest_size)
+{
+    if (dest == NULL) {
+        printf("format_view_count: 'dest' is NULL\n");
+        return;
+    }
+
+    if (filter_non_numeric_chars(dest, dest_size) <= 0) {
+        printf("format_view_count: invalid view format passed\n");
+        return;
+    } 
+
+    const float view_count = strtof(dest, NULL);
+
+    int written;
+    if      (view_count < 1e3)  written = snprintf(dest, dest_size, "%.0f  views", view_count);         // 0      - 999
+    else if (view_count < 1e4)  written = snprintf(dest, dest_size, "%.2fk views", (view_count / 1e3)); // 1,000  - 9,999
+    else if (view_count < 1e5)  written = snprintf(dest, dest_size, "%.1fk views", (view_count / 1e3)); // 10,000 - 99,999
+    else if (view_count < 1e6)  written = snprintf(dest, dest_size, "%.0fk views", (view_count / 1e3)); // 10,000 - 99,999
+    else if (view_count < 1e7)  written = snprintf(dest, dest_size, "%.2fM views", (view_count / 1e6)); // 10,000 - 99,999
+    else if (view_count < 1e8)  written = snprintf(dest, dest_size, "%.1fM views", (view_count / 1e6)); // 10,000 - 99,999
+    else if (view_count < 1e9)  written = snprintf(dest, dest_size, "%.0fM views", (view_count / 1e6)); // 10,000 - 99,999
+    else if (view_count < 1e10) written = snprintf(dest, dest_size, "%.2fB views", (view_count / 1e9)); // 10,000 - 99,999
+    else if (view_count < 1e11) written = snprintf(dest, dest_size, "%.1fB views", (view_count / 1e9)); // 10,000 - 99,999
+    else if (view_count < 1e12) written = snprintf(dest, dest_size, "%.0fB views", (view_count / 1e9)); // 10,000 - 99,999
+    
+    if (written >= dest_size) {
+        printf("format_view_count: string truncated\n");
+        return;
+    }
 }
 
 bool assign_string_from_path(cJSON* root, const char* path, char* dest, const size_t dest_size)
@@ -1899,6 +1800,137 @@ void parse_playlist(cJSON *lockupViewModel, SearchResult *playlist)
     }
 }
 
+static bool application_running = true;
+
+void* worker_thread_funct(void* args)
+{
+    List* task_queue = (List*) args;
+    
+    while (application_running) {
+        pthread_mutex_lock(&task_queue->mutex);
+        while ((task_queue->count == 0) && application_running) 
+            pthread_cond_wait(&task_queue->cond, &task_queue->mutex);
+
+        if (application_running == false) {
+            pthread_mutex_unlock(&task_queue->mutex);
+            break;
+        }
+
+        Node* node = list_dequeue(task_queue);
+        ThreadTask* task = (ThreadTask*) node->content;
+
+        pthread_mutex_unlock(&task_queue->mutex); 
+        task->funct(task->args);
+        free(task); task = NULL;
+        free(node); node = NULL;
+    }
+
+    return NULL;
+}
+
+bool launch_task(List* task_queue, void* targs, void* (*funct)(void*))
+{
+    if ((task_queue == NULL) || (targs == NULL) || (funct == NULL)) return false;
+
+    Node* node = node_init(NODE_TYPE_THREAD_TASK);
+    if ((node == NULL) || (node->content == NULL)) {
+        printf("launch_task: node_init failed\n");
+        if (node) {
+            free(node); node = NULL;
+        } 
+        return false;
+    }
+
+    ThreadTask* task = (ThreadTask*) node->content;
+    task->next = NULL;
+    task->args = targs;
+    task->funct = funct;
+
+    pthread_mutex_lock(&task_queue->mutex);
+    list_append(task_queue, node);
+    pthread_cond_signal(&task_queue->cond);
+    pthread_mutex_unlock(&task_queue->mutex);
+
+    return true;
+}
+
+void init_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads], void* (*worker_funct)(void*), void* worker_args)
+{
+    for (int t = 0; t < nthreads; t++) 
+        pthread_create(&thread_pool[t], NULL, worker_funct, worker_args);
+}
+
+void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
+{
+    for (int t = 0; t < nthreads; t++) 
+        pthread_join(thread_pool[t], NULL);
+}
+
+typedef struct 
+{
+    char search_result_id[64];
+    HttpsRequest request;
+    Connection *connection;
+    List* thumbnail_queue;
+} LoadThumbnailArgs;
+
+void* load_thumbnail(void *args)
+{
+    LoadThumbnailArgs *targs = (LoadThumbnailArgs*) args;
+    
+    HttpsResponse thumbnail_response = send_https_request(targs->request, ssl_ctx, targs->connection);
+    if (https_response_ready(&thumbnail_response) == false) {
+        printf("load_thumbnail: send_http_request returned invalid buffer\n");
+        free(targs);
+        return NULL;
+    }
+
+    Node* node = node_init(NODE_TYPE_RAW_THUMBNAIL);
+    if ((node == NULL) || (node->content == NULL)) {
+        printf("load_thumbnail: node init failed\n");
+        free(targs);
+        return NULL;
+    }
+
+    RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
+    raw_thumbnail->data = thumbnail_response.body;
+    strcpy(raw_thumbnail->search_result_id, targs->search_result_id);
+
+    pthread_mutex_lock(&targs->thumbnail_queue->mutex);
+    list_append(targs->thumbnail_queue, node);
+    pthread_mutex_unlock(&targs->thumbnail_queue->mutex);
+
+    buffer_free(&thumbnail_response.header);
+    free(targs);
+    return NULL;
+}
+
+typedef struct
+{
+    Query query;
+    HttpsRequest request;
+    List* search_results;
+    List* thumbnail_queue;
+    Connection *youtube_connection;
+} SearchThreadArgs;
+
+SearchThreadArgs* init_search_thread_args(Query* query, HttpsRequest request, List* search_results, List* thumbnail_queue, Connection* youtube_connection)
+{
+    SearchThreadArgs* targs = (SearchThreadArgs*) malloc(sizeof(SearchThreadArgs));
+    if (targs == NULL) {
+        printf("create_search_thread_args: malloc returned NULL for 'search_thread_args'\n");
+        return NULL;
+    }
+
+    targs->query = *query;
+    targs->request = request;
+    targs->search_results = search_results;
+    targs->thumbnail_queue = thumbnail_queue;
+    targs->youtube_connection = youtube_connection;
+
+    return targs;
+}
+
 const char* get_results_list_path(const QueryType search_type, const QueryAttribute search_attr)
 {
     switch (search_type) {
@@ -1941,7 +1973,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
                                      : ".responseContext.serviceTrackingParams[0].params[3].value";
 
         if (assign_string_from_path(json, author_id_path, author_id, sizeof(author_id)) == false) {
-            printf("funct: failed to parse author id from the path %s\n", author_id_path);
+            printf("create_results_from_json: failed to parse author id from the path %s\n", author_id_path);
         }
     }
 
@@ -2122,34 +2154,34 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    const QueryType query_type = targs->query->type;
-    const QueryAttribute query_attr = targs->query->attr;
+    const QueryType query_type = targs->query.type;
+    const QueryAttribute query_attr = targs->query.attr;
     
     pthread_mutex_lock(&targs->search_results->mutex);
 
-    const int elements_added = create_results_from_json(json, targs->search_results, query_type, query_attr, targs->query->allow_youtube_shorts);
+    const int elements_added = create_results_from_json(json, targs->search_results, query_type, query_attr, targs->query.allow_youtube_shorts);
     
     pthread_mutex_unlock(&targs->search_results->mutex);
 
     if (elements_added < 0) {
         printf("get_results_from_query: invalid elements added\n");
-        SetWindowTitle("[failed] - metube");
         free(targs); targs = NULL;
         https_response_free(&res);
         cJSON_Delete(json); json = NULL;
         return NULL;
     }
 
-    char** dest = &targs->query->continuation_token;
-    if (*dest) {
-        free((*dest)); (*dest) = NULL;
+    if (continuation_token) {
+        free(continuation_token); continuation_token = NULL;
     }
 
     const char* continuation_path = get_continuation_token_path(query_type, query_attr);
 
     const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
     if (valid_cjson_string(token_obj)) {
-        (*dest) = strdup(token_obj->valuestring);
+        if ((continuation_token = strdup(token_obj->valuestring)) == NULL) {
+            printf("get_results_from_query: strdup failed\n");
+        }
     }
 
     else printf("get_results_from_query: failed to parse continuation token (path: %s)\n", continuation_path);
@@ -2660,32 +2692,6 @@ void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtabl
 
         node_free(node);
     }
-}
-
-bool launch_task(List* task_queue, void* targs, void* (*funct)(void*))
-{
-    if ((task_queue == NULL) || (targs == NULL) || (funct == NULL)) return false;
-
-    Node* node = node_init(NODE_TYPE_THREAD_TASK);
-    if ((node == NULL) || (node->content == NULL)) {
-        printf("launch_task: node_init failed\n");
-        if (node) {
-            free(node); node = NULL;
-        } 
-        return false;
-    }
-
-    ThreadTask* task = (ThreadTask*) node->content;
-    task->next = NULL;
-    task->args = targs;
-    task->funct = funct;
-
-    pthread_mutex_lock(&task_queue->mutex);
-    list_append(task_queue, node);
-    pthread_cond_signal(&task_queue->cond);
-    pthread_mutex_unlock(&task_queue->mutex);
-
-    return true;
 }
 
 int anticipate_lines_wordwrap(Font font, const char* text, float fontSize, float spacing, float maxWidth)
@@ -3244,7 +3250,6 @@ int main()
         .sort = SORT_TYPE_RELEVANCE,
         .type = QUERY_TYPE_USER_INPUT,
         .attr = QUERY_ATTR_REPLACE,
-        .continuation_token = NULL,
     };
 
     init_app();
@@ -3306,7 +3311,9 @@ int main()
         if (load_watch_history) {
             load_watch_history = false;
 
-            free(query.continuation_token); query.continuation_token = NULL;
+            if (continuation_token) {
+                free(continuation_token); continuation_token = NULL;
+            }
 
             pthread_mutex_lock(&results.mutex);
 
@@ -3441,7 +3448,8 @@ int main()
 
             pthread_mutex_lock(&results.mutex); 
 
-            const bool load_more_button_visible = (query.continuation_token != NULL) && (query.continuation_token[0] != '\0');
+            const bool load_more_button_visible = (continuation_token) && (continuation_token[0] != '\0');
+            
             const size_t results_len = results.count + load_more_button_visible;
 
             pthread_mutex_unlock(&results.mutex); 
@@ -3593,7 +3601,9 @@ int main()
     list_free(&results);
     list_free(&thumbnail_queue);
     free_cached_textures(&cached_thumbnails);
-    if (query.continuation_token) free(query.continuation_token);
+    if (continuation_token) {
+        free(continuation_token); continuation_token = NULL;
+    } 
     
     // ssl stuff
     if (ssl_ctx) SSL_CTX_free(ssl_ctx);
@@ -3607,11 +3617,10 @@ int main()
 }
 
 // searching feature
-    // watch history
-    // subscribe to different channels
-    // like/fav video list
 
 // after everythings done:
+    // subscribe to different channels
+    // like/fav video list
     // able to add videos to created playlist
     // fonts for L.O.T.E.
     // handle connecticity issues (no wifi on startup, changing connections, etc.)
@@ -3621,7 +3630,4 @@ int main()
     // thumbnail frames from video click
     // limit the amout of results to 20 (specifically loading more playlist videos)
     // channel header and desc on channel view
-    // mem leak on queue_focused_video_task on premature exit
-    // query objects need to be seperated
-    // continuation token needs to be its own thing
     // better create_results_from_json?
