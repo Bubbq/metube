@@ -64,6 +64,64 @@ bool connected_to_internet()
     return connected;
 }
 
+bool file_exists(const char* filename)
+{
+    FILE* fp = fopen(filename, "r+");
+    if (fp) {
+        fclose(fp);
+        return true;
+    }
+
+    else return false;
+}
+
+size_t get_file_length(FILE* fp)
+{
+    const size_t original_position = ftell(fp);
+
+    fseek(fp, 0, SEEK_END);
+
+    const size_t file_len = ftell(fp) - original_position;    
+
+    fseek(fp, original_position, SEEK_SET);
+
+    return file_len;
+}
+
+char* get_file_content(const char* filepath)
+{
+    if (filepath == NULL) return NULL;
+
+    if (file_exists(filepath) == false) {
+        printf("get_file_content: %s does not exist\n", filepath);
+        return NULL;
+    }
+
+    FILE* fp = fopen(filepath, "r");
+
+    const long len = get_file_length(fp);
+    if (len == 0) {
+        printf("get_file_content: get_file_length returned 0\n");
+        fclose(fp); fp = NULL;
+        return NULL;
+    }
+
+    char* buffer = malloc((sizeof(char) * (len + 1)));
+    if (buffer == NULL) {
+        printf("get_file_content: malloc returned NULL\n");
+        fclose(fp); fp = NULL;
+        return NULL;
+    }
+
+    const unsigned long chars_read = fread(buffer, sizeof(char), len, fp);
+    
+    buffer[chars_read] = '\0';
+    
+    fclose(fp); fp = NULL;
+
+    return buffer;
+}
+
 typedef struct
 {
 	double start_time;
@@ -469,6 +527,7 @@ typedef enum
     QUERY_TYPE_VIDEO_FOCUS,
     QUERY_TYPE_VIEW_PLAYLIST,
     QUERY_TYPE_VIEW_CHANNEL,
+    QUERY_TYPE_WATCH_HISTORY,
 } QueryType;
 
 typedef enum
@@ -732,10 +791,11 @@ cJSON* configure_payload(const Query* query)
             case QUERY_TYPE_TRENDING:      payload_funct = add_view_trending_videos_payload; break;
             case QUERY_TYPE_VIEW_PLAYLIST: payload_funct = add_view_playlist_videos_payload; break;
             case QUERY_TYPE_VIEW_CHANNEL:  payload_funct = add_view_channel_videos_payload;  break;
+            case QUERY_TYPE_WATCH_HISTORY: return NULL; break;
         }
     }
 
-    if (payload_funct(root, query) == false) {
+    if (payload_funct && (payload_funct(root, query) == false)) {
         printf("configure_payload: failed to add payload\n");
         cJSON_Delete(root); root = NULL;
     }
@@ -1428,7 +1488,8 @@ bool string_is_integer(const char *s)
 
 cJSON* cjson_pointer_get(cJSON* root, const char* path)
 {
-    if ((root == NULL) || (path == NULL)) return NULL;
+    if (root == NULL) return NULL;
+    if (path == NULL) return root;
 
     const int last_element_index = -1;
 
@@ -1728,6 +1789,43 @@ void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* playlist_v
     }
 }
 
+void parse_watched_video(cJSON* root, SearchResult* watched_video)
+{
+    if ((root == NULL) || (watched_video == NULL)) return;
+
+    if (assign_string_from_path(root, ".id", watched_video->id, sizeof(watched_video->id)) == false) {
+        printf("parse_watched_video: assign id fail\n");
+        watched_video->media_type = MEDIA_TYPE_UNDF;
+        return;
+    }
+
+    watched_video->media_type = MEDIA_TYPE_VIDEO;
+
+    if (assign_string_from_path(root, ".title", watched_video->title, sizeof(watched_video->title)) == false) {
+        printf("parse_watched_video: assign title fail\n");
+    } 
+
+    if (assign_string_from_path(root, ".authorId", watched_video->authorId, sizeof(watched_video->authorId)) == false) {
+        printf("parse_watched_video: assign authorId fail\n");
+    } 
+
+    if (assign_string_from_path(root, ".duration", watched_video->duration, sizeof(watched_video->duration)) == false) {
+        printf("parse_watched_video: assign duration fail\n");
+    } 
+
+    if (assign_string_from_path(root, ".view_count", watched_video->view_count, sizeof(watched_video->view_count)) == false) {
+        printf("parse_watched_video: assign view_count fail\n");
+    } 
+
+    if (assign_string_from_path(root, ".thumbnail_path", watched_video->thumbnail_path, sizeof(watched_video->thumbnail_path)) == false) {
+        printf("parse_watched_video: assign thumbnail_path fail\n");
+    } 
+
+    if (assign_string_from_path(root, ".date_published", watched_video->date_published, sizeof(watched_video->date_published)) == false) {
+        printf("parse_watched_video: assign date_published fail\n");
+    } 
+}
+
 void parse_channel(cJSON* channelRenderer, SearchResult* channel)
 {
     if ((channelRenderer == NULL) || (channel == NULL)) return;
@@ -1805,30 +1903,20 @@ const char* get_results_list_path(const QueryType search_type, const QueryAttrib
 {
     switch (search_type) {
         case QUERY_TYPE_USER_INPUT: 
-            if (search_attr == QUERY_ATTR_REPLACE) 
-                return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[0].itemSectionRenderer.contents";
+            if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[0].itemSectionRenderer.contents";
         case QUERY_TYPE_RELATED: 
-            if (search_attr == QUERY_ATTR_REPLACE)
-                return "contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems";
+            if (search_attr == QUERY_ATTR_REPLACE) return "contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems";
         case QUERY_TYPE_VIEW_PLAYLIST: 
-            if (search_attr == QUERY_ATTR_REPLACE)
-                return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
+            if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
         case QUERY_TYPE_VIEW_CHANNEL: 
-            if (search_attr == QUERY_ATTR_REPLACE) 
-                return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
-        case QUERY_TYPE_TRENDING: 
-            return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[2].itemSectionRenderer.contents[0].shelfRenderer.content.expandedShelfContentsRenderer.items";
-        // should never happen...
-        case QUERY_TYPE_VIDEO_FOCUS: 
-            break;
+            if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
+        case QUERY_TYPE_TRENDING:                  return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[2].itemSectionRenderer.contents[0].shelfRenderer.content.expandedShelfContentsRenderer.items";
+        case QUERY_TYPE_WATCH_HISTORY:             return ".history";
+        case QUERY_TYPE_VIDEO_FOCUS: break;
     }
 
     return NULL;
@@ -1836,10 +1924,12 @@ const char* get_results_list_path(const QueryType search_type, const QueryAttrib
 
 int create_results_from_json(cJSON* json, List* results, const QueryType search_type, const QueryAttribute search_attr, const bool allow_youtube_shorts)
 {
-    const char* path = get_results_list_path(search_type, search_attr);
+    if ((json == NULL || (results == NULL))) return -1;
+
+    const char* path = get_results_list_path(search_type, search_attr); // .history
 
     cJSON* results_array = cjson_pointer_get(json, path);
-    if ((results_array == NULL) || (cJSON_IsArray(results_array) == false)) {
+    if (valid_cjson_array(results_array) == false) {
         printf("create_results_from_json: invalid results array from path %s\n", path);
         return -1;
     }
@@ -1856,6 +1946,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
     }
 
     int elements_added = 0;
+    const int old_size = results->count;
 
     cJSON *item;
     cJSON_ArrayForEach (item, results_array) {
@@ -1867,16 +1958,18 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
 
         SearchResult* search_result = (SearchResult*) node->content;
         
-        cJSON* videoRenderer   =       cjson_pointer_get(item, ".videoRenderer");     
-        cJSON* lockupViewModel =       cjson_pointer_get(item, ".lockupViewModel");   
+        cJSON* videoRenderer         = cjson_pointer_get(item, ".videoRenderer");     
+        cJSON* lockupViewModel       = cjson_pointer_get(item, ".lockupViewModel");   
         cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer"); 
-        cJSON* channelRenderer =       cjson_pointer_get(item, ".channelRenderer");  
-        cJSON* richItemRenderer =      cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
+        cJSON* channelRenderer       = cjson_pointer_get(item, ".channelRenderer");  
+        cJSON* richItemRenderer      = cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
+        cJSON* watchedVideoRenderer  = cjson_pointer_get(item, ".watchedVideoRenderer");
         
         if      (videoRenderer)         parse_video(videoRenderer, author_id, allow_youtube_shorts, search_result);
         else if (richItemRenderer)      parse_video(richItemRenderer, author_id, allow_youtube_shorts,search_result);
         else if (playlistVideoRenderer) parse_playlist_video(playlistVideoRenderer, search_result);
         else if (channelRenderer)       parse_channel(channelRenderer, search_result);
+        else if (watchedVideoRenderer)  parse_watched_video(watchedVideoRenderer, search_result);
         else if (lockupViewModel) {
             if (search_type == QUERY_TYPE_RELATED) parse_related_video(lockupViewModel, search_result);
             else parse_playlist(lockupViewModel, search_result);
@@ -1890,12 +1983,66 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
         else node_free(node);
     }
 
+    if (search_attr == QUERY_ATTR_REPLACE) {
+        for (int i = 0; i < old_size; i++) {
+            Node* to_del = list_dequeue(results);
+            node_free(to_del);
+        }
+    }
+
     return elements_added;
 }
 
-const char* search_type_to_text(const QueryType search_type)
+int create_results_from_watch_history(List* results)
 {
-    switch (search_type) {
+    if (results == NULL) return 0;
+
+    char* buffer = get_file_content(WATCH_HISTORY_FILE);
+    if (buffer == NULL) {
+        printf("create_results_from_watch_history: get_file_content failed\n");
+        return 0;
+    }
+
+    cJSON* history = cJSON_Parse(buffer);
+    if (valid_cjson_array(history) == false) {
+        printf("create_results_from_watch_history: %s is not a valid array object\n", WATCH_HISTORY_FILE); 
+        free(buffer); buffer = NULL;
+        return 0;
+    }
+
+    int elements_added = 0;
+
+    cJSON* item;
+    cJSON_ArrayForEach(item, history) {
+        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+        if ((node == NULL) || (node->content == NULL)) {
+            printf("create_results_from_watch_history: node_init returned null\n");
+            cJSON_Delete(history); history = NULL;
+            free(buffer); buffer = NULL;
+            return elements_added;
+        }
+
+        SearchResult* watched_video = (SearchResult*) node->content;
+
+        parse_watched_video(item, watched_video);
+
+        if (watched_video->media_type != MEDIA_TYPE_UNDF) {
+            list_append(results, node);
+            elements_added++;
+        }
+
+        else node_free(node);
+    }
+
+    cJSON_Delete(history); history = NULL;
+    free(buffer); buffer = NULL;
+
+    return elements_added;
+}
+
+const char* query_type_to_text(const QueryType query_type)
+{
+    switch (query_type) {
         case QUERY_TYPE_USER_INPUT: return "QUERIED";
         case QUERY_TYPE_RELATED: return "RELATED";
         case QUERY_TYPE_TRENDING: return "TRENDING";
@@ -1907,9 +2054,9 @@ const char* search_type_to_text(const QueryType search_type)
     }
 }
 
-const char* search_attr_to_text(const QueryAttribute search_attr)
+const char* query_attr_to_text(const QueryAttribute query_attr)
 {
-    switch (search_attr) {
+    switch (query_attr) {
         case QUERY_ATTR_REPLACE: return "NEW";
         case QUERTY_ATTR_APPEND: return "APPENDING";
         default:
@@ -1921,71 +2068,76 @@ const char* get_continuation_token_path(const QueryType search_type, const Query
 {
     switch (search_type) {
         case QUERY_TYPE_USER_INPUT:
-            if (search_attr == QUERY_ATTR_REPLACE)
-                return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
+            if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case QUERY_TYPE_RELATED:
-            if (search_attr == QUERY_ATTR_REPLACE)
-                return ".contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
+            if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case QUERY_TYPE_VIEW_PLAYLIST:
-            if (search_attr == QUERY_ATTR_REPLACE)
-                return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.commandExecutorCommand.commands[1].continuationCommand.token";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
+            if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.commandExecutorCommand.commands[1].continuationCommand.token";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case QUERY_TYPE_VIEW_CHANNEL:
-            if (search_attr == QUERY_ATTR_REPLACE)
-                return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
-            if (search_attr == QUERTY_ATTR_APPEND)
-                return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
+            if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
+            if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         default: return NULL;
     }
 }
 
 static bool search_finished = true;
 
+void log_search(const QueryType query_type, const QueryAttribute query_attr, const float duration, const int nresults)
+{
+    const char* type_text = query_type_to_text(query_type);
+    const char* attr_text = query_attr_to_text(query_attr);
+    printf("TYPE: %s\tATTR: %s\tDURATION: %f\tFOUND: %d\n", type_text, attr_text, duration, nresults);
+}
+
 void* get_results_from_query(void* args)
 {
     float start_time = GetTime(); // preformance check
     
-    cJSON* json = NULL;
-    HttpsResponse response = https_response_init();
     SearchThreadArgs* targs = (SearchThreadArgs*) args;
-    if (targs == NULL) {
-        printf("get_results_from_query: 'targs' is NULL\n");
+    if ((targs == NULL) || (valid_post_request(targs->request) == false)) {
+        printf("get_results_from_query: invalid arguements passed\n");
         SetWindowTitle("[failed] - metube");
-        goto cleanup;
+        return NULL;
     }
 
-    response = send_https_request(targs->request, ssl_ctx, targs->youtube_connection);
-    if (https_response_ready(&response) == false) {
+    HttpsResponse res = send_https_request(targs->request, ssl_ctx, targs->youtube_connection);
+    if (https_response_ready(&res) == false) {
         printf("get_results_from_query: invalid https response\n");
         SetWindowTitle("[failed] - metube");
-        goto cleanup;
+        free(targs); targs = NULL;
+        return NULL;
     }
 
-    buffer_create_file("body.json", &response.body);
+    buffer_create_file("body.json", &res.body);
 
-    json = cJSON_Parse(response.body.data);
+    cJSON* json = cJSON_Parse(res.body.data);
     if (json == NULL) {
         printf("get_results_from_query: cJSON_Parse returned NULL\n");
         SetWindowTitle("[failed] - metube");
-        goto cleanup;
+        free(targs); targs = NULL;
+        https_response_free(&res);
+        return NULL;
     }
 
-    const QueryType search_type = targs->query->type;
-    const QueryAttribute search_attr = targs->query->attr;
+    const QueryType query_type = targs->query->type;
+    const QueryAttribute query_attr = targs->query->attr;
     
     pthread_mutex_lock(&targs->search_results->mutex);
-    const int old_size = targs->search_results->count;
-    const int elements_added = create_results_from_json(json, targs->search_results, search_type, search_attr, targs->query->allow_youtube_shorts);
+
+    const int elements_added = create_results_from_json(json, targs->search_results, query_type, query_attr, targs->query->allow_youtube_shorts);
+    
     pthread_mutex_unlock(&targs->search_results->mutex);
 
     if (elements_added < 0) {
         printf("get_results_from_query: invalid elements added\n");
-        goto cleanup;
+        SetWindowTitle("[failed] - metube");
+        free(targs); targs = NULL;
+        https_response_free(&res);
+        cJSON_Delete(json); json = NULL;
+        return NULL;
     }
 
     char** dest = &targs->query->continuation_token;
@@ -1993,7 +2145,7 @@ void* get_results_from_query(void* args)
         free((*dest)); (*dest) = NULL;
     }
 
-    const char* continuation_path = get_continuation_token_path(search_type, search_attr);
+    const char* continuation_path = get_continuation_token_path(query_type, query_attr);
 
     const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
     if (valid_cjson_string(token_obj)) {
@@ -2002,31 +2154,16 @@ void* get_results_from_query(void* args)
 
     else printf("get_results_from_query: failed to parse continuation token (path: %s)\n", continuation_path);
 
-    const float search_time = GetTime() - start_time;
-    const char* type_text = search_type_to_text(search_type);
-    const char* attr_text = search_attr_to_text(search_attr);
-    printf("%s (%s) took %f seconds, %d items found\n", type_text, attr_text, search_time, elements_added);
-    
-    if (search_attr == QUERY_ATTR_REPLACE) {
-        pthread_mutex_lock(&targs->search_results->mutex);
-        
-        for (int i = 0; targs->search_results->head && (i < old_size); i++) {
-            Node* to_delete = list_dequeue(targs->search_results);
-            node_free(to_delete);
-        }
-        
-        pthread_mutex_unlock(&targs->search_results->mutex);
-    }
-
     SetWindowTitle(TextFormat("[search results(%zu)] - metube", targs->search_results->count));
+    
+    search_finished = true;
+    log_search(query_type, query_attr, GetTime() - start_time, elements_added);
 
-    cleanup:
-        search_finished = true;
-        if (targs->request.payload) free(targs->request.payload);
-        if (https_response_ready(&response)) https_response_free(&response);
-        if (json) cJSON_Delete(json);
-        if (targs) free(targs);
-        return NULL;
+    free(targs->request.payload); targs->request.payload = NULL;
+    free(targs); targs = NULL;
+    https_response_free(&res);
+    cJSON_Delete(json); json = NULL;
+    return NULL;
 }
 
 void init_app()
@@ -2832,64 +2969,6 @@ bool queue_focused_video_task(const Query query, List* task_queue, Connection* c
     return launch_task(task_queue, targs, get_focused_video_information);
 }
 
-bool file_exists(const char* filename)
-{
-    FILE* fp = fopen(filename, "r+");
-    if (fp) {
-        fclose(fp);
-        return true;
-    }
-
-    else return false;
-}
-
-size_t get_file_length(FILE* fp)
-{
-    const size_t original_position = ftell(fp);
-
-    fseek(fp, 0, SEEK_END);
-
-    const size_t file_len = ftell(fp) - original_position;    
-
-    fseek(fp, original_position, SEEK_SET);
-
-    return file_len;
-}
-
-char* get_file_content(const char* filepath)
-{
-    if (filepath == NULL) return NULL;
-
-    if (file_exists(filepath) == false) {
-        printf("get_file_content: %s does not exist\n", filepath);
-        return NULL;
-    }
-
-    FILE* fp = fopen(filepath, "r");
-
-    const long len = get_file_length(fp);
-    if (len == 0) {
-        printf("get_file_content: get_file_length returned 0\n");
-        fclose(fp); fp = NULL;
-        return NULL;
-    }
-
-    char* buffer = malloc((sizeof(char) * (len + 1)));
-    if (buffer == NULL) {
-        printf("get_file_content: malloc returned NULL\n");
-        fclose(fp); fp = NULL;
-        return NULL;
-    }
-
-    const unsigned long chars_read = fread(buffer, sizeof(char), len, fp);
-    
-    buffer[chars_read] = '\0';
-    
-    fclose(fp); fp = NULL;
-
-    return buffer;
-}
-
 bool create_watch_history_file()
 {
     if (file_exists(WATCH_HISTORY_FILE)) {
@@ -2902,12 +2981,38 @@ bool create_watch_history_file()
         return false;
     }
     
-    const char* buffer = "[]";
+    cJSON* root = cJSON_CreateObject();
+    if (root == NULL) {
+        printf("create_watch_history_file: root is null\n");
+        fclose(fp);
+        return false;
+    }
+
+    cJSON* history = cJSON_CreateArray();
+    if (history == NULL) {
+        printf("create_watch_history_file: history is null\n");
+        fclose(fp);
+        cJSON_Delete(root); root = NULL;
+        return false;
+    }
+
+    cJSON_AddItemToObject(root, "history", history);
+
+    char* buffer = cJSON_Print(root);
+    if (buffer == NULL) {
+        printf("create_watch_history_file: cJSON_Print returned null\n");
+        fclose(fp);
+        cJSON_Delete(root); root = NULL;
+        return false;
+    }
+
     const size_t size = strlen(buffer); 
 
-    const bool write_sucess = fwrite(buffer, size, sizeof(char), fp) == sizeof(char);
+    const bool write_sucess = (fwrite(buffer, size, sizeof(char), fp) == sizeof(char));
 
     fclose(fp);
+    free(buffer);
+    cJSON_Delete(root);
 
     return write_sucess;
 }
@@ -2916,7 +3021,7 @@ int get_watched_video_index(const char* id, const cJSON* history)
 {
     if ((id == NULL) || (history == NULL)) return -1;
 
-    const char* id_path = ".id";
+    const char* id_path = "watchedVideoRenderer.id";
 
     int i = 0;
     cJSON* item;
@@ -2959,7 +3064,7 @@ int get_oldest_watched_video_index(const cJSON* history)
 {
     if ((history == NULL) || (cJSON_IsArray(history) == false)) NULL;
 
-    const char* time_added_path = ".time_added";
+    const char* time_added_path = "watchedVideoRenderer.time_added";
 
     int oldest_watched_index = -1;
     double min_time_added = time(NULL);
@@ -2999,20 +3104,17 @@ void update_watch_history(const SearchResult* watched_video)
         return;
     }
 
-    cJSON* history_array = cJSON_Parse(history_buffer);
-    if (history_array == NULL) {
-        printf("update_watch_history: cJSON_Parse returned NULL\n");
+    cJSON* root = cJSON_Parse(history_buffer);
+    cJSON* history = cJSON_GetObjectItem(root, "history");
+    if (valid_cjson_array(history) == false) {
+        printf("update_watch_history: invalid array parsed\n");
         goto cleanup_buffer;
     } 
 
-    // if you hit max size and you need to increase the size
-        // need to find the oldest video and remove it
-
-    const int watched_video_index = get_watched_video_index(watched_video->id, history_array);
-
+    const int watched_video_index = get_watched_video_index(watched_video->id, history);
     const bool found = (watched_video_index >= 0);
     cJSON* to_add = (found)
-                    ? cJSON_DetachItemFromArray(history_array, watched_video_index)
+                    ? cJSON_DetachItemFromArray(history, watched_video_index)
                     : init_video_json_object(watched_video);
 
     if (to_add == NULL) {
@@ -3020,23 +3122,36 @@ void update_watch_history(const SearchResult* watched_video)
         goto cleanup_array;
     }
 
-    if (found == false) {
-        if (cJSON_GetArraySize(history_array) == MAX_HISTORY_LEN) {
-            remove_oldest_watched_video(history_array);
+    if (found) {
+        cJSON* watchedVideoRenderer = cjson_pointer_get(to_add, ".watchedVideoRenderer");
+        if (watchedVideoRenderer) {
+            cJSON_ReplaceItemInObject(watchedVideoRenderer, "time_added", cJSON_CreateNumber((double)time(NULL)));
+            cJSON_InsertItemInArray(history, 0, to_add);
         }
     }
 
-    else cJSON_ReplaceItemInObject(to_add, "time_added", cJSON_CreateNumber((double)time(NULL)));
-    
-    cJSON_InsertItemInArray(history_array, 0, to_add);
-    
+    else {
+        if (cJSON_GetArraySize(history) == MAX_HISTORY_LEN) {
+            remove_oldest_watched_video(history);
+        }
+
+        cJSON* watchedVideoRenderer = cJSON_CreateObject();
+        if (watchedVideoRenderer == NULL) {
+            printf("update_watch_history: failed to create watchedVideoRenderer object\n");
+            goto cleanup_array;
+        }
+
+        cJSON_AddItemToObject(watchedVideoRenderer, "watchedVideoRenderer", to_add);
+        cJSON_InsertItemInArray(history, 0, watchedVideoRenderer);
+    }
+
     FILE* fp = fopen(WATCH_HISTORY_FILE, "w");
     if (fp == NULL) {
         printf("update_watch_history: 'fopen' returned NULL\n");
         goto cleanup_array;
     }
 
-    char* new_history_buffer = cJSON_Print(history_array);
+    char* new_history_buffer = cJSON_Print(root);
     if (new_history_buffer == NULL) {
         printf("update_watch_history: 'cJSON_Print' returned NULL\n");
         goto cleanup_fp;
@@ -3050,13 +3165,36 @@ void update_watch_history(const SearchResult* watched_video)
     }
     
     cleanup_fwrite:
-        free(new_history_buffer);
+        free(new_history_buffer); new_history_buffer = NULL;
     cleanup_fp:
-        fclose(fp);
+        fclose(fp); fp = NULL;
     cleanup_array:
-        cJSON_Delete(history_array);
+        cJSON_Delete(root); root = NULL;
     cleanup_buffer:
-        free(history_buffer);
+        free(history_buffer); history_buffer = NULL;
+}
+
+void load_watch_history_results(List* dest)
+{
+    if (dest == NULL) return;
+
+    char* buffer = get_file_content(WATCH_HISTORY_FILE);
+    if (buffer == NULL) {
+        printf("load_watch_history_results: get_file_content_failed");
+        return;
+    }            
+
+    cJSON* json = cJSON_Parse(buffer);
+    if (json == NULL) {
+        printf("load_watch_history_results: cJSON_Parse returned NULL\n");
+        return;
+    }
+
+    const bool allow_youtube_shorts = true;
+    
+    create_results_from_json(json, dest, QUERY_TYPE_WATCH_HISTORY, QUERY_ATTR_REPLACE, allow_youtube_shorts);
+
+    cJSON_Delete(json); json = NULL;
 }
 
 int main()
@@ -3171,63 +3309,12 @@ int main()
             free(query.continuation_token); query.continuation_token = NULL;
 
             pthread_mutex_lock(&results.mutex);
-            
-            const size_t old_size = results.count;
-            
-            char* buffer = get_file_content(WATCH_HISTORY_FILE);
-            if (buffer) {
-                cJSON* history_array = cJSON_Parse(buffer);
-                if (valid_cjson_array(history_array)) {
-                    cJSON* item;
-                    cJSON_ArrayForEach(item, history_array) {
-                        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
-                        if (node && node->content) {
-                            SearchResult* watched_video = (SearchResult*) node->content;
-                            if (assign_string_from_path(item, ".id", watched_video->id, sizeof(watched_video->id)) == false) {
-                                printf("assign id fail\n");
-                            }
 
-                            watched_video->media_type = MEDIA_TYPE_VIDEO;
-
-                            if (assign_string_from_path(item, ".title", watched_video->title, sizeof(watched_video->title)) == false) {
-                                printf("assign title fail\n");
-                            } 
-
-                            if (assign_string_from_path(item, ".authorId", watched_video->authorId, sizeof(watched_video->authorId)) == false) {
-                                printf("assign authorId fail\n");
-                            } 
-
-                            if (assign_string_from_path(item, ".duration", watched_video->duration, sizeof(watched_video->duration)) == false) {
-                                printf("assign duration fail\n");
-                            } 
-
-                            if (assign_string_from_path(item, ".view_count", watched_video->view_count, sizeof(watched_video->view_count)) == false) {
-                                printf("assign view_count fail\n");
-                            } 
-
-                            if (assign_string_from_path(item, ".thumbnail_path", watched_video->thumbnail_path, sizeof(watched_video->thumbnail_path)) == false) {
-                                printf("assign thumbnail_path fail\n");
-                            } 
-
-                            if (assign_string_from_path(item, ".date_published", watched_video->date_published, sizeof(watched_video->date_published)) == false) {
-                                printf("assign date_published fail\n");
-                            } 
-
-                            list_append(&results, node);
-                        }
-                    }
-
-                    for (int i = 0; results.head && (i < old_size); i++) {
-                        Node* to_delete = list_dequeue(&results);
-                        node_free(to_delete);
-                    }
-
-                    cJSON_Delete(history_array);
-                    free(buffer);
-                }
-            }
+            load_watch_history_results(&results);
 
             pthread_mutex_unlock(&results.mutex);
+
+            SetWindowTitle("[History] - metube");
         }
 
         BeginDrawing();
@@ -3332,6 +3419,8 @@ int main()
 
             if (GuiButton(watch_history_button, "Watch History")) {
                 load_watch_history = true;
+                query.attr = QUERY_ATTR_REPLACE;
+                query.type = QUERY_TYPE_WATCH_HISTORY;
             }
 
             const Rectangle filter_window_bounds = {
@@ -3517,8 +3606,6 @@ int main()
     return 0;
 }
 
-// need to fix ssl read -1 by making ssl_read_n have a status to break out of the loop
-
 // searching feature
     // watch history
     // subscribe to different channels
@@ -3535,4 +3622,6 @@ int main()
     // limit the amout of results to 20 (specifically loading more playlist videos)
     // channel header and desc on channel view
     // mem leak on queue_focused_video_task on premature exit
-    // ssl read read -1 error
+    // query objects need to be seperated
+    // continuation token needs to be its own thing
+    // better create_results_from_json?
