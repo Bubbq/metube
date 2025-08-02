@@ -331,6 +331,19 @@ char* media_type_to_text(const MediaType media_type)
     }
 }
 
+const Vector2 media_type_to_thumbnail_dim(const MediaType media_type)
+{
+    switch (media_type) {
+        case MEDIA_TYPE_LIVE:
+        case MEDIA_TYPE_SHORT:
+        case MEDIA_TYPE_VIDEO:
+        case MEDIA_TYPE_PLAYLIST: return (Vector2) { 150, 80 };
+        case MEDIA_TYPE_CHANNEL:  return (Vector2) { 75, 70 };
+        case MEDIA_TYPE_UNDF:
+        case MEDIA_TYPE_ANY:      return (Vector2) { 0 }; 
+    }
+}
+
 // availible sorting types youtube provides 
 typedef enum 
 {
@@ -406,9 +419,10 @@ void print_search_result(const SearchResult *search_result)
 
 typedef struct RawThumbnail
 {
-    Buffer data;              
     char search_result_id[256];     
+    Buffer data;              
     struct RawThumbnail *next;
+    MediaType media_type;
 } RawThumbnail;
 
 RawThumbnail* raw_thumbnail_init()
@@ -418,6 +432,7 @@ RawThumbnail* raw_thumbnail_init()
 
     raw_thumbnail->next = NULL;
     raw_thumbnail->data = buffer_init();
+    raw_thumbnail->media_type = MEDIA_TYPE_UNDF;
     memset(raw_thumbnail->search_result_id, 0, sizeof(raw_thumbnail->search_result_id));
 
     return raw_thumbnail;
@@ -1559,7 +1574,7 @@ void parse_video(cJSON* videoRenderer, const char* author_id_override, const boo
     if (video_is_live(videoRenderer)) {
         video->media_type = MEDIA_TYPE_LIVE;
 
-        const char* live_viewers_path = ".viewCountText.runs[0].navigationEndpoint.browseEndpoint.browseId";
+        const char* live_viewers_path = ".viewCountText.runs[0].text";
 
         if (assign_string_from_path(videoRenderer, live_viewers_path, video->view_count, sizeof(video->view_count)) == false) {
             video->view_count[0] = '0';
@@ -1868,16 +1883,21 @@ void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
 
 typedef struct 
 {
-    char search_result_id[64];
     HttpsRequest request;
+    char search_result_id[64];
     Connection *connection;
     List* thumbnail_queue;
+    MediaType media_type;
 } LoadThumbnailArgs;
 
 void* load_thumbnail(void *args)
 {
-    LoadThumbnailArgs *targs = (LoadThumbnailArgs*) args;
-    
+    LoadThumbnailArgs* targs = (LoadThumbnailArgs*) args;
+    if (targs == NULL) {
+        printf("load_thumbnail: args are null\n");
+        return NULL;
+    }
+
     HttpsResponse thumbnail_response = send_https_request(targs->request, ssl_ctx, targs->connection);
     if (https_response_ready(&thumbnail_response) == false) {
         printf("load_thumbnail: send_http_request returned invalid buffer\n");
@@ -1889,11 +1909,13 @@ void* load_thumbnail(void *args)
     if ((node == NULL) || (node->content == NULL)) {
         printf("load_thumbnail: node init failed\n");
         free(targs);
+        https_response_free(&thumbnail_response);
         return NULL;
     }
 
     RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
     raw_thumbnail->data = thumbnail_response.body;
+    raw_thumbnail->media_type = targs->media_type;
     strcpy(raw_thumbnail->search_result_id, targs->search_result_id);
 
     pthread_mutex_lock(&targs->thumbnail_queue->mutex);
@@ -2402,7 +2424,7 @@ void draw_thumbnail_subtext(const Rectangle container, Ui ui, const Color text_c
 
     // draw box with text inside it
     DrawRectangleRec(length_area, Fade(BLACK, 0.7));
-    DrawTextBoxed(text, padded_rectangle(ui.padding, length_area), ui, font_size, text_color);
+    DrawTextEx(ui.font, text, (Vector2){length_area.x + ui.padding, length_area.y + ui.padding}, font_size, ui.spacing, text_color);
 }
 
 bool draw_filter_toggle(const Rectangle container, const Rectangle button_bounds, const char *label_text, const char *value_text, const char *button_text, const Font font, const int padding)
@@ -2518,16 +2540,12 @@ void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, 
 {
     DrawRectangleRec(container, color);
 
-    const Rectangle thumbnail_area = { 
+    Rectangle thumbnail_area = { 
         .x = container.x, 
         .y = container.y, 
         .width = container.width * 0.45f, 
         .height = container.height 
     };
-
-    if (IsTextureReady(thumbnail)) {
-        DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
-    }
 
     const Rectangle title_area = {
         .x = thumbnail_area.x + thumbnail_area.width,
@@ -2551,16 +2569,24 @@ void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, 
         case MEDIA_TYPE_SHORT:
         case MEDIA_TYPE_VIDEO:
             DrawTextBoxed(TextFormat("%s   %s", search_result->date_published, search_result->view_count), padded_rectangle(ui.padding, subtext_area), ui, 11.5, BLACK);
+            DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, search_result->duration);
             break;
         case MEDIA_TYPE_LIVE:
             DrawTextBoxed(TextFormat("%s watching", search_result->view_count), padded_rectangle(ui.padding, subtext_area), ui, 12, BLACK);
+            DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, "LIVE");
             break;
-        case MEDIA_TYPE_CHANNEL:
+        case MEDIA_TYPE_CHANNEL: {
+            const float x_padding = thumbnail.width / 2.0f;
+            const float y_padding = (container.height - thumbnail.height) / 2.0f;
+            DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x + x_padding, thumbnail_area.y + y_padding}, 0.0f, 1.0f, WHITE);
             DrawTextBoxed(search_result->subscriber_count, padded_rectangle(ui.padding, subtext_area), ui, 12, BLACK);
+            draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, "Channel");
             break;
+        }
         case MEDIA_TYPE_PLAYLIST:
+            DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, search_result->video_count);
             break;
         default:    
@@ -2682,7 +2708,8 @@ void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtabl
         Node* node = list_dequeue(thumbnail_queue);
         RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
 
-        const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, 150, 80);
+        const Vector2 dim = media_type_to_thumbnail_dim(raw_thumbnail->media_type);
+        const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, dim.x, dim.y);
         if (IsTextureReady(thumbnail)) {
             TextureCacheEntry *cached_entry = init_cached_texture(thumbnail, raw_thumbnail->search_result_id);
             if (cached_entry) {
@@ -2771,7 +2798,7 @@ const float seconds_to_microseconds(const float seconds)
     return (seconds * 1e3);
 }
 
-bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, Connection* conn)
+bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, Connection* conn, const MediaType media_type)
 {
     if ((search_result_id == NULL) || (thumbnail_path == NULL) || (conn == NULL) || (thumbnail_queue == NULL) || (task_queue == NULL)) return false;
 
@@ -2789,6 +2816,7 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
 
     targs->request = req;
     targs->connection = conn;
+    targs->media_type = media_type;
     targs->thumbnail_queue = thumbnail_queue;
     strncpy(targs->search_result_id, search_result_id, sizeof(targs->search_result_id) - 1);
 
@@ -3203,6 +3231,15 @@ void load_watch_history_results(List* dest)
     cJSON_Delete(json); json = NULL;
 }
 
+typedef struct
+{
+    char thumbnail_path[256];
+    char name[256];
+    char id[64];
+} HighlightedChannel;
+
+
+// differnt thumbnail sizes
 int main()
 {
     TextureCacheEntry *cached_thumbnails = NULL;
@@ -3439,12 +3476,23 @@ int main()
 
             draw_filter_window(&query, filter_window_bounds, ui.font, ui.padding);
 
+
+            const float focused_channel_height = 60;
+            const Rectangle focused_channel_bounds = {
+                .x = ui.padding,
+                .y = GetScreenHeight() - focused_channel_height - ui.padding,
+                .height = focused_channel_height,
+                .width = 350,
+            };
+
             const Rectangle scroll_window_bounds = { 
                 .x = ui.padding, 
                 .y = search_bar_bounds.y + search_bar_bounds.height + filter_window_bounds.height + (ui.padding * 2), 
                 .width = search_bar_bounds.width, 
-                .height = GetScreenHeight() - scroll_window_bounds.y - (ui.padding * 2), 
+                .height = GetScreenHeight() - scroll_window_bounds.y - focused_channel_height - (ui.padding * 2), 
             };
+
+            DrawRectangleRec(focused_channel_bounds, BLUE);
 
             pthread_mutex_lock(&results.mutex); 
 
@@ -3513,7 +3561,7 @@ int main()
                     ConnectionPool* pool = media_type_to_pool(search_result->media_type);
                     if (pool) {
                         Connection* conn = &pool->connections[pool->current_conn];
-                        if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, conn)) {
+                        if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, conn, search_result->media_type)) {
                             cycle_connection(pool);
                         }
                     }
@@ -3561,6 +3609,8 @@ int main()
                 }
             }
 
+            pthread_mutex_unlock(&results.mutex);
+
             const Rectangle load_more_button_bounds = {
                 .x = container.x,
                 .y = container.y + container_height,
@@ -3573,8 +3623,6 @@ int main()
                 query.type = last_search_type;
                 query.attr = QUERTY_ATTR_APPEND;
             }
-
-            pthread_mutex_unlock(&results.mutex);
             
             EndScissorMode();
 
@@ -3617,6 +3665,12 @@ int main()
 }
 
 // searching feature
+    // channel header on channel view
+        // need to make an area for the channel information to show
+    // able to subscribe button on the bottom
+    // clicking stores the information of the channel into a json
+    // pressing subscription buttons gives a list of all the channels
+    // pressing one of them loads their video homepage (alr have code for this)
 
 // after everythings done:
     // subscribe to different channels
@@ -3629,5 +3683,6 @@ int main()
     // set all ptrs to NULL after freeing them
     // thumbnail frames from video click
     // limit the amout of results to 20 (specifically loading more playlist videos)
-    // channel header and desc on channel view
     // better create_results_from_json?
+    // move ui stuff together
+    // if Im not going to do cookies, dont need httpsresponse struct but just the body
