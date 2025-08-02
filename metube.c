@@ -1,3 +1,4 @@
+#include <math.h>
 #include <time.h>
 #include <ctype.h>
 #include <netdb.h>
@@ -380,6 +381,114 @@ char* sort_type_to_text(const SortType sort_type)
     }
 }
 
+typedef struct
+{
+    char id [64];
+    UT_hash_handle hh;
+    Texture2D thumbnail;
+    Timer timer;
+} TextureCacheEntry;
+
+TextureCacheEntry* cached_texture_init(const Texture2D texture, const char* id)
+{
+    if ((id == NULL) || (id[0] == '\0') || (IsTextureReady(texture) == false)) {
+        printf("cached_texture_init: invalid args\n");
+        return NULL;
+    }
+    
+    TextureCacheEntry* cached_thumbnail = (TextureCacheEntry*) malloc(sizeof(TextureCacheEntry));
+    if (cached_thumbnail == NULL) {
+        printf("cached_texture_init: malloc returned NULL\n");
+        return NULL;
+    }
+
+    start_timer(&cached_thumbnail->timer, THUMBNAIL_LIFETIME);
+
+    cached_thumbnail->thumbnail = texture;
+    strncpy(cached_thumbnail->id, id, sizeof(cached_thumbnail->id) - 1);
+    cached_thumbnail->id[sizeof(cached_thumbnail->id) - 1] = '\0';
+
+    return cached_thumbnail;
+}
+
+bool cached_texture_is_ready(TextureCacheEntry* cached_texture)
+{
+    return cached_texture && IsTextureReady(cached_texture->thumbnail);
+}
+
+void free_cached_thumbnail(TextureCacheEntry *cached_entry)
+{
+    if (cached_entry == NULL) return;
+    if (IsTextureReady(cached_entry->thumbnail)) UnloadTexture(cached_entry->thumbnail);
+    free(cached_entry);
+}
+
+void cache_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
+{
+    if (cached_entry == NULL) {
+        printf("cache_texture: thumbnail to cache is NULL\n");
+        return;
+    }
+
+    HASH_ADD_STR(*hashtable, id, cached_entry);
+}
+
+void delete_cached_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
+{
+    if (HASH_COUNT(*hashtable) == 0) {
+        printf("delete_cached_texture: hashtable is empty");
+        return;
+    }
+
+    if (cached_entry == NULL) {
+        printf("delete_cached_texturel: cached_entry is NULL\n");
+        return;
+    }
+
+    HASH_DEL(*hashtable, cached_entry);
+
+    free_cached_thumbnail(cached_entry);
+}
+
+void free_cached_textures(TextureCacheEntry **hashtable)
+{
+    if (hashtable == NULL) return;
+
+    TextureCacheEntry *current, *tmp;
+    HASH_ITER(hh, *hashtable, current, tmp) {
+        delete_cached_texture(hashtable, current);
+    }
+}
+
+TextureCacheEntry* find_cached_thumbnail(const char *id, TextureCacheEntry **hashtable)
+{
+    if (hashtable == NULL) return NULL;
+
+    TextureCacheEntry *found = NULL;
+    
+    HASH_FIND_STR(*hashtable, id, found);
+    
+    return found;
+}
+
+bool cached_texture_exists(const char *id, TextureCacheEntry **hashtable)
+{
+    return find_cached_thumbnail(id, hashtable) != NULL;
+}
+
+void remove_expired_thumbnails(TextureCacheEntry **hashtable)
+{
+    if (hashtable == NULL) return;
+
+    TextureCacheEntry *current, *tmp;
+
+    HASH_ITER(hh, *hashtable, current, tmp) {
+        if (current && timer_done(current->timer)) {
+            delete_cached_texture(hashtable, current);
+        }
+    }
+}
+
 typedef struct SearchResult
 {
     char thumbnail_path[256];    
@@ -392,7 +501,7 @@ typedef struct SearchResult
     char view_count[16];              
     char duration[16];                   
     struct SearchResult* next; 
-    MediaType media_type;               
+    MediaType media_type;        
     bool thumbnail_loaded;
 } SearchResult;
 
@@ -2536,11 +2645,11 @@ void parse_youtube_page(Connection *youtube_connection, const size_t n, char* in
     https_response_free(&youtube_page_response);
 }
 
-void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, const Rectangle container, const Color color, const Ui ui)
+void draw_search_result(SearchResult *search_result, const Texture thumbnail, const Rectangle container,  const Color color, const Ui ui)
 {
     DrawRectangleRec(container, color);
 
-    Rectangle thumbnail_area = { 
+    const Rectangle thumbnail_area = { 
         .x = container.x, 
         .y = container.y, 
         .width = container.width * 0.45f, 
@@ -2594,112 +2703,6 @@ void draw_search_result(SearchResult *search_result, const Texture2D thumbnail, 
     }
 }
 
-typedef struct
-{
-    char id [64];
-    Timer timer;
-    Texture2D thumbnail;
-    UT_hash_handle hh;
-} TextureCacheEntry;
-
-TextureCacheEntry* init_cached_texture(const Texture2D texture, const char* id)
-{
-    if ((id == NULL) || (id[0] == '\0')) {
-        printf("init_cached_texture: invalid id passed\n");
-        return NULL;
-    }
-    
-    TextureCacheEntry *cached_thumbnail = (TextureCacheEntry*) malloc(sizeof(TextureCacheEntry));
-    if (cached_thumbnail == NULL) {
-        printf("init_cached_texture: malloc returned NULL\n");
-        return NULL;
-    }
-
-    cached_thumbnail->thumbnail = texture;
-    strcpy(cached_thumbnail->id, id);
-    start_timer(&cached_thumbnail->timer, THUMBNAIL_LIFETIME);
-
-    return cached_thumbnail;
-}
-
-bool cached_texture_is_ready(TextureCacheEntry* cached_texture)
-{
-    return cached_texture && IsTextureReady(cached_texture->thumbnail);
-}
-
-void free_cached_thumbnail(TextureCacheEntry *cached_entry)
-{
-    if (cached_entry == NULL) return;
-    if (IsTextureReady(cached_entry->thumbnail)) UnloadTexture(cached_entry->thumbnail);
-    free(cached_entry);
-}
-
-void cache_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
-{
-    if (cached_entry == NULL) {
-        printf("cache_texture: thumbnail to cache is NULL\n");
-        return;
-    }
-
-    HASH_ADD_STR(*hashtable, id, cached_entry);
-}
-
-void delete_cached_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
-{
-    if (HASH_COUNT(*hashtable) == 0) {
-        printf("delete_cached_texture: hashtable is empty");
-        return;
-    }
-
-    if (cached_entry == NULL) {
-        printf("delete_cached_texturel: cached_entry is NULL\n");
-        return;
-    }
-
-    HASH_DEL(*hashtable, cached_entry);
-
-    free_cached_thumbnail(cached_entry);
-}
-
-void free_cached_textures(TextureCacheEntry **hashtable)
-{
-    if (hashtable == NULL) return;
-
-    TextureCacheEntry *current, *tmp;
-    HASH_ITER(hh, *hashtable, current, tmp) {
-        delete_cached_texture(hashtable, current);
-    }
-}
-
-TextureCacheEntry* find_cached_thumbnail(const char *id, TextureCacheEntry **hashtable)
-{
-    if (hashtable == NULL) return NULL;
-
-    TextureCacheEntry *found = NULL;
-    
-    HASH_FIND_STR(*hashtable, id, found);
-    
-    return found;
-}
-
-bool cached_texture_exists(const char *id, TextureCacheEntry **hashtable)
-{
-    return find_cached_thumbnail(id, hashtable) != NULL;
-}
-
-void remove_expired_thumbnails(TextureCacheEntry **hashtable)
-{
-    if (hashtable == NULL) return;
-
-    TextureCacheEntry *current, *tmp;
-
-    HASH_ITER(hh, *hashtable, current, tmp) {
-        if (current && timer_done(current->timer)) {
-            delete_cached_texture(hashtable, current);
-        }
-    }
-}
-
 void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)
 {
     if (thumbnail_queue == NULL) return;
@@ -2711,7 +2714,7 @@ void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtabl
         const Vector2 dim = media_type_to_thumbnail_dim(raw_thumbnail->media_type);
         const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, dim.x, dim.y);
         if (IsTextureReady(thumbnail)) {
-            TextureCacheEntry *cached_entry = init_cached_texture(thumbnail, raw_thumbnail->search_result_id);
+            TextureCacheEntry *cached_entry = cached_texture_init(thumbnail, raw_thumbnail->search_result_id);
             if (cached_entry) {
                 cache_texture(hashtable, cached_entry);
             }
@@ -2798,13 +2801,16 @@ const float seconds_to_microseconds(const float seconds)
     return (seconds * 1e3);
 }
 
-bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, Connection* conn, const MediaType media_type)
+bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, Connection* conn, MediaType media_type)
 {
-    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (conn == NULL) || (thumbnail_queue == NULL) || (task_queue == NULL)) return false;
+    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (task_queue == NULL) || (thumbnail_queue == NULL) || (conn == NULL)) {
+        printf("queue_thumbnail_load: invalid args\n");
+        return false;
+    }
 
     HttpsRequest req = {0};
     if (configure_get_header(req.header, sizeof(req.header), conn->host, thumbnail_path) == false) {
-        printf("queue_thumbnail_load: rew header truncated\n");
+        printf("queue_thumbnail_load: req header truncated\n");
         return false;
     }
 
@@ -2819,6 +2825,7 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
     targs->media_type = media_type;
     targs->thumbnail_queue = thumbnail_queue;
     strncpy(targs->search_result_id, search_result_id, sizeof(targs->search_result_id) - 1);
+    targs->search_result_id[sizeof(targs->search_result_id) - 1] = '\0';
 
     return launch_task(task_queue, targs, load_thumbnail);
 }
@@ -3233,13 +3240,56 @@ void load_watch_history_results(List* dest)
 
 typedef struct
 {
-    char thumbnail_path[256];
     char name[256];
     char id[64];
+    char subscriber_count[32];
+    TextureCacheEntry* cached;
 } HighlightedChannel;
 
+void draw_highlighted_channel(const Rectangle container, const Ui* ui, const HighlightedChannel* highlighted_channel)
+{
+    DrawRectangleLinesEx(container, 1, GRAY);
+    
+    if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->id[0] == '\0')) return;
 
-// differnt thumbnail sizes
+    const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
+
+    if (highlighted_channel->cached && IsTextureReady(highlighted_channel->cached->thumbnail)) {
+        start_timer(&highlighted_channel->cached->timer, THUMBNAIL_LIFETIME);
+        DrawTextureEx(highlighted_channel->cached->thumbnail, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
+    }
+
+    const Rectangle name_bounds = {
+        .x = container.x + dim.x + ui->padding,
+        .y = container.y,
+        .width = container.width - dim.x,
+        .height = container.height / 2.0f, 
+    };
+
+    DrawTextEx(ui->font, highlighted_channel->name, (Vector2){name_bounds.x + ui->padding, name_bounds.y + ui->padding}, 12, ui->spacing, BLACK);
+    
+    const Rectangle subtext_bounds = {
+        .x = container.x + dim.x + ui->padding,
+        .y = name_bounds.y + name_bounds.height,
+        .width = container.width - dim.x,
+        .height = container.height / 2.0f, 
+    };
+
+    DrawTextEx(ui->font, highlighted_channel->subscriber_count, (Vector2){subtext_bounds.x + ui->padding, subtext_bounds.y + ui->padding}, 12, ui->spacing, BLACK);
+
+    const float button_width = 75;
+    const Rectangle subscribe_button_bounds = {
+        .x = container.x + dim.x + (container.width / 2.0f) - ui->padding,
+        .y = container.y + name_bounds.height,
+        .width = button_width,
+        .height = 25,
+    };
+
+    if (GuiButton(subscribe_button_bounds, "Subscribe")) {
+        // TODO: SUBSCRIBE FUNCTIONALITY
+    }
+}
+
 int main()
 {
     TextureCacheEntry *cached_thumbnails = NULL;
@@ -3298,10 +3348,12 @@ int main()
     ui.word_wrap = true;
 
     bool clicked_video = false;
-    HighlightedVideo highlighted_video = {0};
     Vector2 video_desc_scrollbar_pos = { 10, 10 };
 
     bool load_watch_history = false;
+
+    HighlightedVideo highlighted_video = {0};
+    HighlightedChannel highlighted_channel = {0};
 
     while (!WindowShouldClose())
     {
@@ -3476,14 +3528,17 @@ int main()
 
             draw_filter_window(&query, filter_window_bounds, ui.font, ui.padding);
 
-
-            const float focused_channel_height = 60;
+            // focused channel area
+            const float focused_channel_min_y = 170;
+            const float focused_channel_height = 80;
             const Rectangle focused_channel_bounds = {
                 .x = ui.padding,
-                .y = GetScreenHeight() - focused_channel_height - ui.padding,
+                .y = fmax(focused_channel_min_y, GetScreenHeight() - focused_channel_height - ui.padding),
                 .height = focused_channel_height,
                 .width = 350,
             };
+
+            draw_highlighted_channel(focused_channel_bounds, &ui, &highlighted_channel);
 
             const Rectangle scroll_window_bounds = { 
                 .x = ui.padding, 
@@ -3492,7 +3547,6 @@ int main()
                 .height = GetScreenHeight() - scroll_window_bounds.y - focused_channel_height - (ui.padding * 2), 
             };
 
-            DrawRectangleRec(focused_channel_bounds, BLUE);
 
             pthread_mutex_lock(&results.mutex); 
 
@@ -3546,9 +3600,8 @@ int main()
                                               BLUE :
                                               ((i % 2) ? WHITE : RAYWHITE);
 
-                DrawRectangleRec(container, container_color);
-
                 Texture2D thumbnail = (Texture2D){0};
+
                 TextureCacheEntry *cached = find_cached_thumbnail(search_result->id, &cached_thumbnails);
                 if (cached_texture_is_ready(cached)) {
                     thumbnail = cached->thumbnail;
@@ -3559,11 +3612,14 @@ int main()
                     search_result->thumbnail_loaded = true;
                     
                     ConnectionPool* pool = media_type_to_pool(search_result->media_type);
-                    if (pool) {
-                        Connection* conn = &pool->connections[pool->current_conn];
-                        if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, conn, search_result->media_type)) {
-                            cycle_connection(pool);
-                        }
+                    if (pool == NULL) {
+                        printf("CRITICAL: media_type_to_pool returned NULL\n");
+                        goto cleanup;
+                    }
+
+                    Connection* conn = &pool->connections[pool->current_conn];
+                    if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, conn, search_result->media_type)) {
+                        cycle_connection(pool);
                     }
                 }
 
@@ -3603,8 +3659,22 @@ int main()
                             search = true;
                             query.type = QUERY_TYPE_VIEW_CHANNEL;
                             SetWindowTitle(TextFormat("[Channel:%s(loading)] - metube", query.focused_id));
+
+                            strncpy(highlighted_channel.id, search_result->id, sizeof(highlighted_channel.id) - 1);
+                            highlighted_channel.id[sizeof(highlighted_channel.id) - 1] = '\0';
+
+                            strncpy(highlighted_channel.name, search_result->title, sizeof(highlighted_channel.name) - 1);
+                            highlighted_channel.name[sizeof(highlighted_channel.name) - 1] = '\0';
+
+                            strncpy(highlighted_channel.subscriber_count, search_result->subscriber_count, sizeof(highlighted_channel.subscriber_count) - 1);
+                            highlighted_channel.subscriber_count[sizeof(highlighted_channel.subscriber_count) - 1] = '\0';
+
+                            highlighted_channel.cached = cached;
+
                             break;
-                        default: break;
+                        default:
+                            printf("CRITICAL: invalid media type pressed\n");
+                            goto cleanup;
                     }
                 }
             }
@@ -3635,38 +3705,39 @@ int main()
             
             draw_highlighted_video(focused_video_bounds, ui, &video_desc_scrollbar_pos, &highlighted_video);
 
+            DrawFPS(GetScreenWidth() - 75, ui.padding);
+
         EndDrawing();
     }
-
-    // free worker thread stuff
-    application_running = false;
-    pthread_cond_broadcast(&task_queue.cond);
-    free_thread_pool(MAX_THREADS, thread_pool);
-    list_free(&task_queue);         
     
-    // deinit app
-    UnloadFont(ui.font);
-    list_free(&results);
-    list_free(&thumbnail_queue);
-    free_cached_textures(&cached_thumbnails);
-    if (continuation_token) {
-        free(continuation_token); continuation_token = NULL;
-    } 
-    
-    // ssl stuff
-    if (ssl_ctx) SSL_CTX_free(ssl_ctx);
-    free_connection_pool(&youtube_pool);
-    free_connection_pool(&video_thumbnail_pool);
-    free_connection_pool(&channel_thumbnail_pool);
-    
-    CloseWindow();
-    
-    return 0;
+    cleanup:
+        // free worker thread stuff
+        application_running = false;
+        pthread_cond_broadcast(&task_queue.cond);
+        free_thread_pool(MAX_THREADS, thread_pool);
+        list_free(&task_queue);         
+        
+        // deinit app
+        UnloadFont(ui.font);
+        list_free(&results);
+        list_free(&thumbnail_queue);
+        free_cached_textures(&cached_thumbnails);
+        if (continuation_token) {
+            free(continuation_token); continuation_token = NULL;
+        } 
+        
+        // ssl stuff
+        if (ssl_ctx) SSL_CTX_free(ssl_ctx);
+        free_connection_pool(&youtube_pool);
+        free_connection_pool(&video_thumbnail_pool);
+        free_connection_pool(&channel_thumbnail_pool);
+        
+        CloseWindow();
+        
+        return 0;
 }
 
 // searching feature
-    // channel header on channel view
-        // need to make an area for the channel information to show
     // able to subscribe button on the bottom
     // clicking stores the information of the channel into a json
     // pressing subscription buttons gives a list of all the channels
@@ -3686,3 +3757,4 @@ int main()
     // better create_results_from_json?
     // move ui stuff together
     // if Im not going to do cookies, dont need httpsresponse struct but just the body
+    // load highlighted channel at the same time as the channel's videos?
