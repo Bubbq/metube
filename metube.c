@@ -1332,7 +1332,7 @@ bool valid_request_code(const char* response_header)
     return (strcmp(request_code, VALID_HTTPS_RESPONSE_CODE) == 0);
 }
 
-HttpsResponse send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx,Connection* connection)
+HttpsResponse send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx, Connection* connection)
 {
     HttpsResponse res = https_response_init();
 
@@ -2148,7 +2148,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
     }
 
     if (search_attr == QUERY_ATTR_REPLACE) {
-        for (int i = 0; i < old_size; i++) {
+        for (int i = 0; results->head && (i < old_size); i++) {
             Node* to_del = list_dequeue(results);
             node_free(to_del);
         }
@@ -2247,13 +2247,57 @@ const char* get_continuation_token_path(const QueryType search_type, const Query
     }
 }
 
+void get_continuation_token(cJSON* json, const QueryType query_type, const QueryAttribute query_attr)
+{
+    if (json == NULL) {
+        printf("get_continuation_token: invalid input(s)\n");
+        return;
+    }
+
+    const char* continuation_path = get_continuation_token_path(query_type, query_attr);
+    
+    if (continuation_token) {
+        free(continuation_token); continuation_token = NULL;
+    }
+
+    const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
+    if (valid_cjson_string(token_obj) == false) {
+        printf("get_continuation_token: 'token_obj' is invalid (path: %s)\n", continuation_path);
+        return;
+    }
+
+    if ((continuation_token = strdup(token_obj->valuestring)) == NULL) {
+        printf("get_continuation_token: strdup failed\n");
+    }
+}
+
+cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* conn)
+{
+    if ((req == NULL) || (ssl_ctx == NULL) || (conn == NULL)) {
+        printf("get_json_response: invalid input(s)\n");
+        return NULL;
+    }
+
+    HttpsResponse res = send_https_request((*req), ssl_ctx, conn);
+    if (https_response_ready(&res) == false) {
+        printf("get_json_response: invalid response recived\n");
+        return NULL;
+    }
+
+    cJSON* ret = cJSON_Parse(res.body.data);
+
+    https_response_free(&res);
+    
+    return ret;
+}
+
 static bool search_finished = true;
 
 void log_search(const QueryType query_type, const QueryAttribute query_attr, const float duration, const int nresults)
 {
     const char* type_text = query_type_to_text(query_type);
     const char* attr_text = query_attr_to_text(query_attr);
-    printf("TYPE: %s\tATTR: %s\tDURATION: %f\tFOUND: %d\n", type_text, attr_text, duration, nresults);
+    printf("%s (%s) took %f seconds, %d items found\n", type_text, attr_text, duration, nresults);
 }
 
 void* get_results_from_query(void* args)
@@ -2267,22 +2311,10 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    HttpsResponse res = send_https_request(targs->request, ssl_ctx, targs->youtube_connection);
-    if (https_response_ready(&res) == false) {
-        printf("get_results_from_query: invalid https response\n");
-        SetWindowTitle("[failed] - metube");
-        free(targs); targs = NULL;
-        return NULL;
-    }
-
-    buffer_create_file("body.json", &res.body);
-
-    cJSON* json = cJSON_Parse(res.body.data);
+    cJSON* json = get_json_response(&targs->request, ssl_ctx, targs->youtube_connection);
     if (json == NULL) {
-        printf("get_results_from_query: cJSON_Parse returned NULL\n");
-        SetWindowTitle("[failed] - metube");
+        printf("get_results_from_query: 'json' is null\n");
         free(targs); targs = NULL;
-        https_response_free(&res);
         return NULL;
     }
 
@@ -2295,37 +2327,16 @@ void* get_results_from_query(void* args)
     
     pthread_mutex_unlock(&targs->search_results->mutex);
 
-    if (elements_added < 0) {
-        printf("get_results_from_query: invalid elements added\n");
-        free(targs); targs = NULL;
-        https_response_free(&res);
-        cJSON_Delete(json); json = NULL;
-        return NULL;
-    }
-
-    if (continuation_token) {
-        free(continuation_token); continuation_token = NULL;
-    }
-
-    const char* continuation_path = get_continuation_token_path(query_type, query_attr);
-
-    const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
-    if (valid_cjson_string(token_obj)) {
-        if ((continuation_token = strdup(token_obj->valuestring)) == NULL) {
-            printf("get_results_from_query: strdup failed\n");
-        }
-    }
-
-    else printf("get_results_from_query: failed to parse continuation token (path: %s)\n", continuation_path);
+    get_continuation_token(json, query_type, query_attr);
 
     SetWindowTitle(TextFormat("[search results(%zu)] - metube", targs->search_results->count));
     
     search_finished = true;
+
     log_search(query_type, query_attr, GetTime() - start_time, elements_added);
 
     free(targs->request.payload); targs->request.payload = NULL;
     free(targs); targs = NULL;
-    https_response_free(&res);
     cJSON_Delete(json); json = NULL;
     return NULL;
 }
@@ -3861,6 +3872,8 @@ int main()
     // hashing for subscribed channels and watched videos? 
     // determine if you can subscribe after press the channel, dont just calculate every frame
         // can unsub using this logic
+    // pressing sub button gives a list of all channels that the user is subbed to
+    // channel should show up when you press view user videos
     
     // subscribe to different channels
     // like/fav video list
