@@ -3266,9 +3266,29 @@ typedef struct
     TextureCacheEntry* cached;
 } HighlightedChannel;
 
-bool already_subscribed(const char* id, const cJSON* channels)
+// bool is_subbed_to_channel(const char* id, const cJSON* channels)
+bool is_subbed_to_channel(const char* id)
 {
-    if ((id == NULL) || channels == NULL) return false;
+    char* buffer = get_file_content(SUBSCRIPTIONS_FILE);
+    if (buffer == NULL) {
+        printf("is_subbed_to_channel: 'buffer' is null\n");
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(buffer);
+    if (root == NULL) {
+        printf("is_subbed_to_channel: 'root' is null\n");
+        free(buffer); buffer = NULL;
+        return false;
+    }
+
+    cJSON* channels = cjson_pointer_get(root, "channels");
+    if (valid_cjson_array(channels) == false) {
+        printf("is_subbed_to_channel: 'channels' is invalid array\n");
+        free(buffer); buffer = NULL;
+        cJSON_Delete(root); root = NULL;
+    }
+
     const char* id_path = ".channelRenderer.id";
     
     cJSON* item;
@@ -3284,62 +3304,88 @@ bool already_subscribed(const char* id, const cJSON* channels)
     return false;
 }
 
-void subscribe_to_channel(const HighlightedChannel* channel_info)
+int find_channel_by_id(const cJSON* channels, const char* id)
+{
+    if ((channels == NULL) || (valid_cjson_array(channels) == false) || (id == NULL)) return -1;
+
+    const char* id_path = ".channelRenderer.id";
+    
+    int i = 0;  
+    cJSON* item;
+    cJSON_ArrayForEach(item, channels) {
+        const cJSON* id_item = cjson_pointer_get(item, id_path);
+        if ((valid_cjson_string(id_item)) && (strcmp(id_item->valuestring, id) == 0)) {
+            return i;
+        }
+
+        i++;
+    }
+
+    return -1;
+}
+
+void update_subscription(const HighlightedChannel* channel_info, const bool subbed_to_channel)
 {
     if (channel_info == NULL) return;
 
     char* buffer = get_file_content(SUBSCRIPTIONS_FILE);
     if (buffer == NULL) {
-        printf("subscribe_to_channel: buffer is null\n");
+        printf("update_subscription: buffer is null\n");
         return;
     }
 
     cJSON* root = cJSON_Parse(buffer);
     if (root == NULL) {
-        printf("subscribe_to_channel: root is null\n");
+        printf("update_subscription: root is null\n");
         free(buffer); buffer = NULL;
         return;
     }
 
     cJSON* channels = cJSON_GetObjectItem(root, "channels");
     if (valid_cjson_array(channels) == false) {
-        printf("subscribe_to_channel: 'channels' array not found\n");
+        printf("update_subscription: 'channels' array not found\n");
         free(buffer); buffer = NULL;
         cJSON_Delete(root); root = NULL;
         return;
     }
 
-    if (already_subscribed(channel_info->id, channels)) {
-        return;
+    if (subbed_to_channel) {
+        int i = find_channel_by_id(channels, channel_info->id);
+        if (i >= 0) {
+            cJSON* to_del = cJSON_DetachItemFromArray(channels, i);
+            cJSON_Delete(to_del); to_del = NULL;
+        }
     }
 
-    cJSON* channel = cJSON_CreateObject(); 
-    if (channel == NULL) {
-        printf("subscribe_to_channel: channel object is null\n");
-        free(buffer); buffer = NULL;
-        cJSON_Delete(root); root = NULL;
-        return;
-    }    
+    else {
+        cJSON* channel = cJSON_CreateObject(); 
+        if (channel == NULL) {
+            printf("update_subscription: channel object is null\n");
+            free(buffer); buffer = NULL;
+            cJSON_Delete(root); root = NULL;
+            return;
+        }    
 
-    cJSON_AddStringToObject(channel, "thumbnail_path", channel_info->thumbnail_path);
-    cJSON_AddStringToObject(channel, "title", channel_info->name);
-    cJSON_AddStringToObject(channel, "id", channel_info->id);
-    cJSON_AddStringToObject(channel, "subscriber_count", channel_info->subscriber_count);
+        cJSON_AddStringToObject(channel, "thumbnail_path", channel_info->thumbnail_path);
+        cJSON_AddStringToObject(channel, "title", channel_info->name);
+        cJSON_AddStringToObject(channel, "id", channel_info->id);
+        cJSON_AddStringToObject(channel, "subscriber_count", channel_info->subscriber_count);
 
-    cJSON* channelRenderer = cJSON_CreateObject();
-    if (channelRenderer == NULL) {
-        printf("subscribe_to_channel: channelRender is null\n");
-        free(buffer); buffer = NULL;
-        cJSON_Delete(root); root = NULL;
-        return;
+        cJSON* channelRenderer = cJSON_CreateObject();
+        if (channelRenderer == NULL) {
+            printf("update_subscription: channelRender is null\n");
+            free(buffer); buffer = NULL;
+            cJSON_Delete(root); root = NULL;
+            return;
+        }
+
+        cJSON_AddItemToObject(channelRenderer, "channelRenderer", channel);
+        cJSON_AddItemToArray(channels, channelRenderer);
     }
-
-    cJSON_AddItemToObject(channelRenderer, "channelRenderer", channel);
-    cJSON_AddItemToArray(channels, channelRenderer);
 
     char* write_data = cJSON_Print(root);
     if (write_data == NULL) {
-        printf("subscribe_to_channel: 'write_data' is null\n");
+        printf("update_subscription: 'write_data' is null\n");
         free(buffer); buffer = NULL;
         cJSON_Delete(root); root = NULL;
         return;
@@ -3347,7 +3393,7 @@ void subscribe_to_channel(const HighlightedChannel* channel_info)
 
     FILE* fp = fopen(SUBSCRIPTIONS_FILE, "w");
     if (fp == NULL) {
-        printf("subscribe_to_channel: 'fp' is null\n");
+        printf("update_subscription: 'fp' is null\n");
         free(write_data); write_data = NULL;
         free(buffer); buffer = NULL;
         cJSON_Delete(root); root = NULL;
@@ -3357,7 +3403,7 @@ void subscribe_to_channel(const HighlightedChannel* channel_info)
     const size_t size = strlen(write_data);
     const size_t written = fwrite(write_data, sizeof(char), size, fp);
     if (written != size) {
-        printf("subscribe_to_channel: %zu of %zu chars written to %s", written, size, SUBSCRIPTIONS_FILE);
+        printf("update_subscription: %zu of %zu chars written to %s", written, size, SUBSCRIPTIONS_FILE);
     }
 
     fclose(fp);
@@ -3366,7 +3412,7 @@ void subscribe_to_channel(const HighlightedChannel* channel_info)
     cJSON_Delete(root); root = NULL;    
 }
 
-void draw_highlighted_channel(const Rectangle container, const Ui* ui, const HighlightedChannel* highlighted_channel)
+void draw_highlighted_channel(const Rectangle container, const Ui* ui, const HighlightedChannel* highlighted_channel, bool* subbed_to_channel)
 {
     DrawRectangleLinesEx(container, 1, GRAY);
     
@@ -3405,9 +3451,11 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, const Hig
         .height = 25,
     };
 
-    // pressed subscribe to already subscibed to (unsub)
-    if (GuiButton(subscribe_button_bounds, "Subscribe")) {
-        subscribe_to_channel(highlighted_channel);
+    const char* button_text = (*subbed_to_channel) ? "Unsubscribe" : "Subscribe";
+
+    if (GuiButton(subscribe_button_bounds, button_text)) {
+        update_subscription(highlighted_channel, (*subbed_to_channel));
+        (*subbed_to_channel) = !(*subbed_to_channel);
     }
 }
 
@@ -3437,12 +3485,13 @@ int main()
     printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
     
     create_empty_array_file(WATCH_HISTORY_FILE, "history");
+    create_empty_array_file(SUBSCRIPTIONS_FILE, "channels");
+    
     if (file_exists(WATCH_HISTORY_FILE) == false) {
         printf("failed to create \"%s\"\n", WATCH_HISTORY_FILE);
         return 1;
     }
 
-    create_empty_array_file(SUBSCRIPTIONS_FILE, "channels");
     if (file_exists(SUBSCRIPTIONS_FILE) == false) {
         printf("failed to create subscriptions file\n");
         return 1;
@@ -3480,8 +3529,10 @@ int main()
     bool load_watch_history = false;
 
     HighlightedVideo highlighted_video = {0};
+    
+    bool subbed_to_channel = false;
     HighlightedChannel highlighted_channel = {0};
-
+    
     while (!WindowShouldClose())
     {
         if (HASH_COUNT(cached_thumbnails) > 0) {
@@ -3665,7 +3716,7 @@ int main()
                 .width = 350,
             };
 
-            draw_highlighted_channel(focused_channel_bounds, &ui, &highlighted_channel);
+            draw_highlighted_channel(focused_channel_bounds, &ui, &highlighted_channel, &subbed_to_channel);
 
             const Rectangle scroll_window_bounds = { 
                 .x = ui.padding, 
@@ -3801,6 +3852,7 @@ int main()
 
                             highlighted_channel.cached = cached;
 
+                            subbed_to_channel = is_subbed_to_channel(highlighted_channel.id);
                             break;
                         default:
                             printf("CRITICAL: invalid media type pressed\n");
@@ -3868,14 +3920,13 @@ int main()
 }
 
 // stuff to do:
+    // unsub from channels
+    // make array find index based on id (compatible for both watch history and subscriptions)
     // load highlighted channel at the same time as the channel's videos
     // hashing for subscribed channels and watched videos? 
-    // determine if you can subscribe after press the channel, dont just calculate every frame
-        // can unsub using this logic
     // pressing sub button gives a list of all channels that the user is subbed to
     // channel should show up when you press view user videos
     
-    // subscribe to different channels
     // like/fav video list
     // able to add videos to created playlist
     // fonts for L.O.T.E.
