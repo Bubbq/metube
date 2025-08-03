@@ -8,6 +8,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <sys/socket.h>
 
 #include "uthash.h"
 #include "raylib.h"
@@ -19,13 +20,17 @@
 #include "raygui.h"
 
 #define MINUTE 60
-#define THUMBNAIL_LIFETIME (MINUTE * 1)
+#define CACHED_TEXTURE_LIFETIME (MINUTE * 1)
 
 #define MAX_THREADS 4
 #define N_CONN MAX_THREADS
 
 #define SUBSCRIPTIONS_FILE "subscriptions.json"
+#define SUBSCRIBED_CHANNEL_ID_PATH ".subscribedChannelRenderer.id"
+#define MAX_SUBSCRIBED_CHANNELS 20
+
 #define WATCH_HISTORY_FILE "watch_history.json"
+#define WATCHED_VIDEO_ID_PATH ".watchedVideoRenderer.id"
 #define MAX_HISTORY_LEN 20
 
 #define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION "mqdefault"
@@ -124,6 +129,30 @@ char* get_file_content(const char* filepath)
     fclose(fp); fp = NULL;
 
     return buffer;
+}
+
+bool create_file(const char* filename, const char* buffer)
+{
+    if ((filename == NULL) || (buffer == NULL)) return false;
+
+    FILE* fp = fopen(filename, "w");
+    if (fp == NULL) {
+        printf("create_file: 'fp' is null\n");
+        return false;
+    }
+
+    const size_t len = strlen(buffer);
+
+    const size_t written = fwrite(buffer, sizeof(char), len, fp);
+
+    fclose(fp); fp = NULL;
+
+    if (written != len) {
+        printf("create_file: (%zu/%zu) chars written\n", written, len);
+        return false;
+    }
+
+    return true;
 }
 
 bool string_is_integer(const char *s)
@@ -257,24 +286,6 @@ void buffer_free(Buffer *buffer)
     buffer->size = 0;
 }
 
-void buffer_create_file(const char* filename, const Buffer* buffer)
-{
-    if ((filename == NULL) || (buffer == NULL) || (buffer_ready(buffer) == false)) return;
-
-    FILE* fp = fopen(filename, "wb");
-    if (fp == NULL) {
-        printf("buffer_create_file: fopen returned NULL\n");
-        return;
-    }
-
-    unsigned long written = fwrite(buffer->data, sizeof(char), buffer->size, fp);
-    if (written != buffer->size) {
-        printf("buffer_create_file: %ld out of %zu chars written\n", written, buffer->size);
-    }
-
-    fclose(fp);
-}
-
 typedef enum
 {
     MEDIA_TYPE_ANY,
@@ -403,7 +414,7 @@ TextureCacheEntry* cached_texture_init(const Texture2D texture, const char* id)
         return NULL;
     }
 
-    start_timer(&cached_thumbnail->timer, THUMBNAIL_LIFETIME);
+    start_timer(&cached_thumbnail->timer, CACHED_TEXTURE_LIFETIME);
 
     cached_thumbnail->thumbnail = texture;
     strncpy(cached_thumbnail->id, id, sizeof(cached_thumbnail->id) - 1);
@@ -713,6 +724,7 @@ typedef enum
     QUERY_TYPE_VIEW_PLAYLIST,
     QUERY_TYPE_VIEW_CHANNEL,
     QUERY_TYPE_WATCH_HISTORY,
+    QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS,
 } QueryType;
 
 typedef enum
@@ -976,6 +988,7 @@ cJSON* configure_payload(const Query* query)
             case QUERY_TYPE_VIEW_PLAYLIST: payload_funct = add_view_playlist_videos_payload; break;
             case QUERY_TYPE_VIEW_CHANNEL:  payload_funct = add_view_channel_videos_payload;  break;
             case QUERY_TYPE_WATCH_HISTORY: return NULL; break;
+            case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS: return NULL; break;
         }
     }
 
@@ -1372,7 +1385,7 @@ HttpsResponse send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx, C
 
     if (valid_request_code(res.header.data) == false) {
         printf("send_https_request: valid_request_code failed\n");
-        buffer_create_file("error_header.txt", &res.header);
+        create_file("invalid_code_header.txt", res.header.data);
         https_response_free(&res);
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
@@ -1399,7 +1412,7 @@ HttpsResponse send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx, C
         if (content_length == 0) {
             printf("send_https_request: invalid content length read\n");
             if (buffer_ready(&res.header)) {
-                buffer_create_file("content_length_error.txt", &res.header);
+                create_file("invalid_content_len_header.txt", res.header.data);
                 buffer_free(&res.header);
             }
             connection->connected = false;
@@ -1478,6 +1491,43 @@ bool valid_cjson_array(const cJSON* json_arr)
 bool valid_cjson_number(const cJSON* json_num)
 {
     return json_num && cJSON_IsNumber(json_num);
+}
+
+cJSON* cjson_parse_file(const char* filename)
+{
+    if (filename == NULL) {
+        printf("cjson_parse_file: 'filename' is null\n");
+        return NULL;
+    }
+
+    char* buffer = get_file_content(filename);
+    if (buffer == NULL) {
+        printf("cjson_parse_file: 'buffer' is null\n");
+        return NULL;
+    }
+
+    cJSON* json = cJSON_Parse(buffer);
+
+    free(buffer); buffer = NULL;
+
+    return json;
+}
+
+bool create_file_from_json(const cJSON* json, const char* filename)
+{
+    if ((json == NULL) || (filename == NULL)) return false;
+
+    char* buffer = cJSON_Print(json);
+    if (buffer == NULL) {
+        printf("create_file_from_json: 'buffer' is null\n");
+        return false; 
+    }
+
+    const bool write_status = create_file(filename, buffer);
+
+    free(buffer); buffer = NULL;
+
+    return write_status;
 }
 
 cJSON* cjson_pointer_get(cJSON* root, const char* path)
@@ -1887,6 +1937,34 @@ void parse_channel(cJSON* channelRenderer, SearchResult* channel)
     }
 }
 
+void parse_subscribed_channel(cJSON* subscribedChannelRenderer, SearchResult* channel)
+{
+    if ((subscribedChannelRenderer == NULL) || (channel == NULL)) {
+        printf("parse_subscribed_channel: invalid input(s)\n");
+        return;
+    }
+
+    if (assign_string_from_path(subscribedChannelRenderer, ".id", channel->id, sizeof(channel->id)) == false) {
+        printf("parse_subscribed_channel: id assign fail\n");
+        channel->media_type = MEDIA_TYPE_UNDF;
+        return;
+    }
+
+    channel->media_type = MEDIA_TYPE_CHANNEL;
+
+    if (assign_string_from_path(subscribedChannelRenderer, ".thumbnail_path", channel->thumbnail_path, sizeof(channel->thumbnail_path)) == false) {
+        printf("parse_subscribed_channel: thumbail_path assign fail\n");
+    }
+    
+    if (assign_string_from_path(subscribedChannelRenderer, ".title", channel->title, sizeof(channel->title)) == false) {
+        printf("parse_subscribed_channel: title assign fail\n");
+    }
+
+    if (assign_string_from_path(subscribedChannelRenderer, ".subscriber_count", channel->subscriber_count, sizeof(channel->subscriber_count)) == false) {
+        printf("parse_subscribed_channel: subscriber_count assign fail\n");
+    }
+}
+
 void parse_playlist(cJSON *lockupViewModel, SearchResult *playlist)
 {
     if ((lockupViewModel == NULL) || (playlist == NULL)) return;
@@ -2080,6 +2158,7 @@ const char* get_results_list_path(const QueryType search_type, const QueryAttrib
             if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
         case QUERY_TYPE_TRENDING:                  return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[2].itemSectionRenderer.contents[0].shelfRenderer.content.expandedShelfContentsRenderer.items";
         case QUERY_TYPE_WATCH_HISTORY:             return ".history";
+        case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS:  return ".channels";
         case QUERY_TYPE_VIDEO_FOCUS: break;
     }
 
@@ -2090,7 +2169,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
 {
     if ((json == NULL || (results == NULL))) return -1;
 
-    const char* path = get_results_list_path(search_type, search_attr); // .history
+    const char* path = get_results_list_path(search_type, search_attr); // .channels
 
     cJSON* results_array = cjson_pointer_get(json, path);
     if (valid_cjson_array(results_array) == false) {
@@ -2122,18 +2201,20 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
 
         SearchResult* search_result = (SearchResult*) node->content;
         
-        cJSON* videoRenderer         = cjson_pointer_get(item, ".videoRenderer");     
-        cJSON* lockupViewModel       = cjson_pointer_get(item, ".lockupViewModel");   
-        cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer"); 
-        cJSON* channelRenderer       = cjson_pointer_get(item, ".channelRenderer");  
-        cJSON* richItemRenderer      = cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
-        cJSON* watchedVideoRenderer  = cjson_pointer_get(item, ".watchedVideoRenderer");
+        cJSON* videoRenderer             = cjson_pointer_get(item, ".videoRenderer");     
+        cJSON* richItemRenderer          = cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
+        cJSON* playlistVideoRenderer     = cjson_pointer_get(item, ".playlistVideoRenderer"); 
+        cJSON* watchedVideoRenderer      = cjson_pointer_get(item, ".watchedVideoRenderer");
+        cJSON* channelRenderer           = cjson_pointer_get(item, ".channelRenderer");  
+        cJSON* subscribedChannelRenderer = cjson_pointer_get(item, ".subscribedChannelRenderer");
+        cJSON* lockupViewModel           = cjson_pointer_get(item, ".lockupViewModel");   
         
-        if      (videoRenderer)         parse_video(videoRenderer, author_id, allow_youtube_shorts, search_result);
-        else if (richItemRenderer)      parse_video(richItemRenderer, author_id, allow_youtube_shorts,search_result);
-        else if (playlistVideoRenderer) parse_playlist_video(playlistVideoRenderer, search_result);
-        else if (channelRenderer)       parse_channel(channelRenderer, search_result);
-        else if (watchedVideoRenderer)  parse_watched_video(watchedVideoRenderer, search_result);
+        if      (videoRenderer)             parse_video(videoRenderer, author_id, allow_youtube_shorts, search_result);
+        else if (richItemRenderer)          parse_video(richItemRenderer, author_id, allow_youtube_shorts,search_result);
+        else if (playlistVideoRenderer)     parse_playlist_video(playlistVideoRenderer, search_result);
+        else if (watchedVideoRenderer)      parse_watched_video(watchedVideoRenderer, search_result);
+        else if (channelRenderer)           parse_channel(channelRenderer, search_result);
+        else if (subscribedChannelRenderer) parse_subscribed_channel(subscribedChannelRenderer, search_result);
         else if (lockupViewModel) {
             if (search_type == QUERY_TYPE_RELATED) parse_related_video(lockupViewModel, search_result);
             else parse_playlist(lockupViewModel, search_result);
@@ -2153,53 +2234,6 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
             node_free(to_del);
         }
     }
-
-    return elements_added;
-}
-
-int create_results_from_watch_history(List* results)
-{
-    if (results == NULL) return 0;
-
-    char* buffer = get_file_content(WATCH_HISTORY_FILE);
-    if (buffer == NULL) {
-        printf("create_results_from_watch_history: get_file_content failed\n");
-        return 0;
-    }
-
-    cJSON* history = cJSON_Parse(buffer);
-    if (valid_cjson_array(history) == false) {
-        printf("create_results_from_watch_history: %s is not a valid array object\n", WATCH_HISTORY_FILE); 
-        free(buffer); buffer = NULL;
-        return 0;
-    }
-
-    int elements_added = 0;
-
-    cJSON* item;
-    cJSON_ArrayForEach(item, history) {
-        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
-        if ((node == NULL) || (node->content == NULL)) {
-            printf("create_results_from_watch_history: node_init returned null\n");
-            cJSON_Delete(history); history = NULL;
-            free(buffer); buffer = NULL;
-            return elements_added;
-        }
-
-        SearchResult* watched_video = (SearchResult*) node->content;
-
-        parse_watched_video(item, watched_video);
-
-        if (watched_video->media_type != MEDIA_TYPE_UNDF) {
-            list_append(results, node);
-            elements_added++;
-        }
-
-        else node_free(node);
-    }
-
-    cJSON_Delete(history); history = NULL;
-    free(buffer); buffer = NULL;
 
     return elements_added;
 }
@@ -2979,7 +3013,7 @@ void* get_focused_video_information(void* args)
         goto cleanup;
     }
 
-    buffer_create_file("focused_body.json", &response.body);
+    create_file("clicked_video.json", response.body.data);
 
     const char* desc_path = ".videoDetails.shortDescription";
 
@@ -3028,67 +3062,46 @@ void create_empty_array_file(const char* filename, const char* array_name)
 
     if (file_exists(filename)) return;
 
-    FILE* fp = fopen(filename, "w");
-    if (fp == NULL) {
-        printf("create_empty_array_file: 'fp' is NULL\n");
-        return;
-    }
-
     cJSON* root = cJSON_CreateObject();
     if (root == NULL) {
         printf("create_empty_array_file: root is null\n");
-        fclose(fp);
         return;
     }
 
     cJSON* array = cJSON_CreateArray();
     if (array == NULL) {
         printf("create_empty_array_file: 'array' is null\n");
-        fclose(fp);
         cJSON_Delete(root); root = NULL;
         return;
     }
 
-    if (cJSON_AddItemToObject(root, array_name, array) == false) {
-        printf("create_empty_array_file: failed to add array to root\n");
-        fclose(fp);
-        cJSON_Delete(root); root = NULL;
-        return;
+    cJSON_AddItemToObject(root, array_name, array);
+
+    if (create_file_from_json(root, filename) == false) {
+        printf("create_empty_array_file: failed to create %s\n", filename);
     }
 
-    char* buffer = cJSON_Print(root);
-    if (buffer == NULL) {
-        printf("create_empty_array_file: buffer is null\n");
-        fclose(fp);
-        cJSON_Delete(root); root = NULL;
-        return;
-    }
-
-    const size_t len = strlen(buffer); 
-
-    const size_t written = fwrite(buffer, sizeof(char), len, fp);
-    if (written != len) {
-        printf("create_empty_array_file: %zu of %zu chars written to %s\n", written, len, filename);
-    }
-
-    fclose(fp);
-    free(buffer); buffer = NULL;
     cJSON_Delete(root); root = NULL;
 }
 
-
-int get_watched_video_index(const char* id, const cJSON* history)
+int find_array_item_by_id(const cJSON* array, const char* id, const char* id_path)
 {
-    if ((id == NULL) || (history == NULL)) return -1;
-
-    const char* id_path = "watchedVideoRenderer.id";
+    if ((array == NULL) || (id == NULL) || (id_path == NULL)) {
+        printf("find_array_item_by_id: invalid input(s)\n");
+        return -1;
+    }
 
     int i = 0;
     cJSON* item;
-    cJSON_ArrayForEach(item, history) {
+    cJSON_ArrayForEach(item, array) {
         const cJSON* id_item = cjson_pointer_get(item, id_path);
-        if (valid_cjson_string(id_item) && (strcmp(id, id_item->valuestring) == 0)) {
-            return i;
+        if (valid_cjson_string(id_item) == false) {
+            printf("find_array_item_by_id: path %s not found\n", id_path);
+            return -1;
+        }
+
+        if (strcmp(id_item->valuestring, id) == 0) {
+            return i; 
         }
 
         i++;
@@ -3122,7 +3135,7 @@ cJSON* init_video_json_object(const SearchResult* video)
 
 int get_oldest_watched_video_index(const cJSON* history)
 {
-    if ((history == NULL) || (cJSON_IsArray(history) == false)) NULL;
+    if ((history == NULL) || (cJSON_IsArray(history) == false)) return -1;
 
     const char* time_added_path = "watchedVideoRenderer.time_added";
 
@@ -3158,20 +3171,20 @@ void update_watch_history(const SearchResult* watched_video)
 {
     if (watched_video == NULL) return;
 
-    char* history_buffer = get_file_content(WATCH_HISTORY_FILE);
-    if (history_buffer == NULL) {
-        printf("update_watch_history: 'history_buffer' is NULL\n");
+    cJSON* root = cjson_parse_file(WATCH_HISTORY_FILE);
+    if (root == NULL) {
+        printf("update_watch_history: 'root' is null\n");
         return;
     }
-
-    cJSON* root = cJSON_Parse(history_buffer);
-    cJSON* history = cJSON_GetObjectItem(root, "history");
+    
+    cJSON* history = cjson_pointer_get(root, ".history");
     if (valid_cjson_array(history) == false) {
         printf("update_watch_history: invalid array parsed\n");
-        goto cleanup_buffer;
+        cJSON_Delete(root); root = NULL;
+        return;
     } 
 
-    const int watched_video_index = get_watched_video_index(watched_video->id, history);
+    const int watched_video_index = find_array_item_by_id(history, watched_video->id, WATCHED_VIDEO_ID_PATH);
     const bool found = (watched_video_index >= 0);
     cJSON* to_add = (found)
                     ? cJSON_DetachItemFromArray(history, watched_video_index)
@@ -3179,7 +3192,8 @@ void update_watch_history(const SearchResult* watched_video)
 
     if (to_add == NULL) {
         printf("update_watch_history: 'to_add' is NULL\n");
-        goto cleanup_array;
+        cJSON_Delete(root); root = NULL;
+        return;
     }
 
     if (found) {
@@ -3198,63 +3212,19 @@ void update_watch_history(const SearchResult* watched_video)
         cJSON* watchedVideoRenderer = cJSON_CreateObject();
         if (watchedVideoRenderer == NULL) {
             printf("update_watch_history: failed to create watchedVideoRenderer object\n");
-            goto cleanup_array;
+            cJSON_Delete(root); root = NULL;
+            return;
         }
 
         cJSON_AddItemToObject(watchedVideoRenderer, "watchedVideoRenderer", to_add);
         cJSON_InsertItemInArray(history, 0, watchedVideoRenderer);
     }
 
-    FILE* fp = fopen(WATCH_HISTORY_FILE, "w");
-    if (fp == NULL) {
-        printf("update_watch_history: 'fopen' returned NULL\n");
-        goto cleanup_array;
+    if (create_file_from_json(root, WATCH_HISTORY_FILE) == false) {
+        printf("update_watch_history: failed to write to %s\n", WATCH_HISTORY_FILE);
     }
 
-    char* new_history_buffer = cJSON_Print(root);
-    if (new_history_buffer == NULL) {
-        printf("update_watch_history: 'cJSON_Print' returned NULL\n");
-        goto cleanup_fp;
-    }
-
-    const size_t size = strlen(new_history_buffer);
-
-    if (fwrite(new_history_buffer, size, sizeof(char), fp) == 0) {
-        printf("update_watch_history: 'fwrite' returned 0\n");
-        goto cleanup_fwrite;
-    }
-    
-    cleanup_fwrite:
-        free(new_history_buffer); new_history_buffer = NULL;
-    cleanup_fp:
-        fclose(fp); fp = NULL;
-    cleanup_array:
-        cJSON_Delete(root); root = NULL;
-    cleanup_buffer:
-        free(history_buffer); history_buffer = NULL;
-}
-
-void load_watch_history_results(List* dest)
-{
-    if (dest == NULL) return;
-
-    char* buffer = get_file_content(WATCH_HISTORY_FILE);
-    if (buffer == NULL) {
-        printf("load_watch_history_results: get_file_content_failed");
-        return;
-    }            
-
-    cJSON* json = cJSON_Parse(buffer);
-    if (json == NULL) {
-        printf("load_watch_history_results: cJSON_Parse returned NULL\n");
-        return;
-    }
-
-    const bool allow_youtube_shorts = true;
-    
-    create_results_from_json(json, dest, QUERY_TYPE_WATCH_HISTORY, QUERY_ATTR_REPLACE, allow_youtube_shorts);
-
-    cJSON_Delete(json); json = NULL;
+    cJSON_Delete(root); root = NULL;
 }
 
 typedef struct
@@ -3266,91 +3236,48 @@ typedef struct
     TextureCacheEntry* cached;
 } HighlightedChannel;
 
-// bool is_subbed_to_channel(const char* id, const cJSON* channels)
 bool is_subbed_to_channel(const char* id)
 {
-    char* buffer = get_file_content(SUBSCRIPTIONS_FILE);
-    if (buffer == NULL) {
-        printf("is_subbed_to_channel: 'buffer' is null\n");
-        return false;
-    }
+    if (id == NULL) return false;
 
-    cJSON* root = cJSON_Parse(buffer);
+    cJSON* root = cjson_parse_file(SUBSCRIPTIONS_FILE);
     if (root == NULL) {
         printf("is_subbed_to_channel: 'root' is null\n");
-        free(buffer); buffer = NULL;
         return false;
     }
 
-    cJSON* channels = cjson_pointer_get(root, "channels");
+    cJSON* channels = cjson_pointer_get(root, ".channels");
     if (valid_cjson_array(channels) == false) {
         printf("is_subbed_to_channel: 'channels' is invalid array\n");
-        free(buffer); buffer = NULL;
         cJSON_Delete(root); root = NULL;
     }
 
-    const char* id_path = ".channelRenderer.id";
-    
-    cJSON* item;
-    cJSON_ArrayForEach(item, channels) {
-        const cJSON* id_item = cjson_pointer_get(item, id_path);
-        if (valid_cjson_string(id_item)) {
-            if (strcmp(id_item->valuestring, id) == 0) {
-                return true;
-            }
-        }
-    }
+    const int found = find_array_item_by_id(channels, id, SUBSCRIBED_CHANNEL_ID_PATH);
 
-    return false;
-}
+    cJSON_Delete(root); root = NULL;
 
-int find_channel_by_id(const cJSON* channels, const char* id)
-{
-    if ((channels == NULL) || (valid_cjson_array(channels) == false) || (id == NULL)) return -1;
-
-    const char* id_path = ".channelRenderer.id";
-    
-    int i = 0;  
-    cJSON* item;
-    cJSON_ArrayForEach(item, channels) {
-        const cJSON* id_item = cjson_pointer_get(item, id_path);
-        if ((valid_cjson_string(id_item)) && (strcmp(id_item->valuestring, id) == 0)) {
-            return i;
-        }
-
-        i++;
-    }
-
-    return -1;
+    return (found >= 0);
 }
 
 void update_subscription(const HighlightedChannel* channel_info, const bool subbed_to_channel)
 {
     if (channel_info == NULL) return;
 
-    char* buffer = get_file_content(SUBSCRIPTIONS_FILE);
-    if (buffer == NULL) {
-        printf("update_subscription: buffer is null\n");
-        return;
-    }
-
-    cJSON* root = cJSON_Parse(buffer);
+    cJSON* root = cjson_parse_file(SUBSCRIPTIONS_FILE);
     if (root == NULL) {
-        printf("update_subscription: root is null\n");
-        free(buffer); buffer = NULL;
+        printf("update_subscription: 'root' is null\n");
         return;
     }
 
     cJSON* channels = cJSON_GetObjectItem(root, "channels");
     if (valid_cjson_array(channels) == false) {
         printf("update_subscription: 'channels' array not found\n");
-        free(buffer); buffer = NULL;
         cJSON_Delete(root); root = NULL;
         return;
     }
 
     if (subbed_to_channel) {
-        int i = find_channel_by_id(channels, channel_info->id);
+        int i = find_array_item_by_id(channels, channel_info->id, SUBSCRIBED_CHANNEL_ID_PATH);
         if (i >= 0) {
             cJSON* to_del = cJSON_DetachItemFromArray(channels, i);
             cJSON_Delete(to_del); to_del = NULL;
@@ -3361,7 +3288,6 @@ void update_subscription(const HighlightedChannel* channel_info, const bool subb
         cJSON* channel = cJSON_CreateObject(); 
         if (channel == NULL) {
             printf("update_subscription: channel object is null\n");
-            free(buffer); buffer = NULL;
             cJSON_Delete(root); root = NULL;
             return;
         }    
@@ -3371,45 +3297,48 @@ void update_subscription(const HighlightedChannel* channel_info, const bool subb
         cJSON_AddStringToObject(channel, "id", channel_info->id);
         cJSON_AddStringToObject(channel, "subscriber_count", channel_info->subscriber_count);
 
-        cJSON* channelRenderer = cJSON_CreateObject();
-        if (channelRenderer == NULL) {
+        cJSON* subscribedChannelRenderer = cJSON_CreateObject();
+        if (subscribedChannelRenderer == NULL) {
             printf("update_subscription: channelRender is null\n");
-            free(buffer); buffer = NULL;
             cJSON_Delete(root); root = NULL;
             return;
         }
 
-        cJSON_AddItemToObject(channelRenderer, "channelRenderer", channel);
-        cJSON_AddItemToArray(channels, channelRenderer);
+        cJSON_AddItemToObject(subscribedChannelRenderer, "subscribedChannelRenderer", channel);
+        cJSON_AddItemToArray(channels, subscribedChannelRenderer);
     }
 
-    char* write_data = cJSON_Print(root);
-    if (write_data == NULL) {
-        printf("update_subscription: 'write_data' is null\n");
-        free(buffer); buffer = NULL;
-        cJSON_Delete(root); root = NULL;
-        return;
+    if (create_file_from_json(root, SUBSCRIPTIONS_FILE) == false) {
+        printf("update_subscriptions: failed to write to %s\n", SUBSCRIPTIONS_FILE);
     }
 
-    FILE* fp = fopen(SUBSCRIPTIONS_FILE, "w");
-    if (fp == NULL) {
-        printf("update_subscription: 'fp' is null\n");
-        free(write_data); write_data = NULL;
-        free(buffer); buffer = NULL;
-        cJSON_Delete(root); root = NULL;
-        return;
-    }
-    
-    const size_t size = strlen(write_data);
-    const size_t written = fwrite(write_data, sizeof(char), size, fp);
-    if (written != size) {
-        printf("update_subscription: %zu of %zu chars written to %s", written, size, SUBSCRIPTIONS_FILE);
-    }
-
-    fclose(fp);
-    free(buffer); buffer = NULL;
-    free(write_data); write_data = NULL;
     cJSON_Delete(root); root = NULL;    
+}
+
+void load_results_from_json_array_file(const char* filename, List* dest, const QueryType query_type, const QueryAttribute query_attr)
+{
+    if ((filename == NULL) || (dest == NULL)) {
+        printf("load_results_from_json_array_file: invalid input(s)\n");
+        return;
+    }
+
+    cJSON* json = cjson_parse_file(filename);
+    if (json == NULL) {
+        printf("load_results_from_json_array_file: 'json' is null\n");
+        return;
+    }
+
+    // dont know what to put here
+    // only times this funct is invoked (as of now) is loading history and subbed channels
+    const bool allow_youtube_shorts = true;
+
+    pthread_mutex_lock(&dest->mutex);
+
+    create_results_from_json(json, dest, query_type, query_attr, allow_youtube_shorts);
+    
+    pthread_mutex_unlock(&dest->mutex);
+
+    cJSON_Delete(json); json = NULL;
 }
 
 void draw_highlighted_channel(const Rectangle container, const Ui* ui, const HighlightedChannel* highlighted_channel, bool* subbed_to_channel)
@@ -3421,7 +3350,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, const Hig
     const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
 
     if (highlighted_channel->cached && IsTextureReady(highlighted_channel->cached->thumbnail)) {
-        start_timer(&highlighted_channel->cached->timer, THUMBNAIL_LIFETIME);
+        start_timer(&highlighted_channel->cached->timer, CACHED_TEXTURE_LIFETIME);
         DrawTextureEx(highlighted_channel->cached->thumbnail, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
     }
 
@@ -3526,7 +3455,9 @@ int main()
     bool clicked_video = false;
     Vector2 video_desc_scrollbar_pos = { 10, 10 };
 
-    bool load_watch_history = false;
+    bool watch_history_button_pressed = false;
+
+    bool subscription_button_pressed = false;
 
     HighlightedVideo highlighted_video = {0};
     
@@ -3575,20 +3506,28 @@ int main()
             }
         }
 
-        if (load_watch_history) {
-            load_watch_history = false;
+        if (watch_history_button_pressed) {
+            watch_history_button_pressed = false;
 
             if (continuation_token) {
                 free(continuation_token); continuation_token = NULL;
             }
 
-            pthread_mutex_lock(&results.mutex);
-
-            load_watch_history_results(&results);
-
-            pthread_mutex_unlock(&results.mutex);
+            load_results_from_json_array_file(WATCH_HISTORY_FILE, &results, QUERY_TYPE_WATCH_HISTORY, QUERY_ATTR_REPLACE);
 
             SetWindowTitle("[History] - metube");
+        }
+
+        if (subscription_button_pressed) {
+            subscription_button_pressed = false;
+
+            if (continuation_token) {
+                free(continuation_token); continuation_token = NULL;
+            }
+
+            load_results_from_json_array_file(SUBSCRIPTIONS_FILE, &results, QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS, QUERY_ATTR_REPLACE);
+
+            SetWindowTitle("[Subscriptions] - metube");
         }
 
         BeginDrawing();
@@ -3692,9 +3631,22 @@ int main()
             };
 
             if (GuiButton(watch_history_button, "Watch History")) {
-                load_watch_history = true;
+                watch_history_button_pressed = true;
                 query.attr = QUERY_ATTR_REPLACE;
                 query.type = QUERY_TYPE_WATCH_HISTORY;
+            }
+
+            const Rectangle view_subscriptions_button = {
+                .x = watch_history_button.x + watch_history_button.width + ui.padding,
+                .y = ui.padding,
+                .width = 80,
+                .height = 25,
+            };
+
+            if (GuiButton(view_subscriptions_button, "Subscriptions")) {
+                subscription_button_pressed = true;
+                query.attr = QUERY_ATTR_REPLACE;
+                query.type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
             }
 
             const Rectangle filter_window_bounds = {
@@ -3783,7 +3735,7 @@ int main()
                 TextureCacheEntry *cached = find_cached_thumbnail(search_result->id, &cached_thumbnails);
                 if (cached_texture_is_ready(cached)) {
                     thumbnail = cached->thumbnail;
-                    start_timer(&cached->timer, THUMBNAIL_LIFETIME); // refresh lifetime
+                    start_timer(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
                 }
 
                 else if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
@@ -3920,12 +3872,9 @@ int main()
 }
 
 // stuff to do:
-    // unsub from channels
-    // make array find index based on id (compatible for both watch history and subscriptions)
+    // channel should show up when you press view user videos
     // load highlighted channel at the same time as the channel's videos
     // hashing for subscribed channels and watched videos? 
-    // pressing sub button gives a list of all channels that the user is subbed to
-    // channel should show up when you press view user videos
     
     // like/fav video list
     // able to add videos to created playlist
