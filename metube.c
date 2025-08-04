@@ -1902,7 +1902,7 @@ void parse_watched_video(cJSON* root, SearchResult* watched_video)
     } 
 }
 
-void parse_channel(cJSON* channelRenderer, SearchResult* channel)
+void parse_channel_result(cJSON* channelRenderer, SearchResult* channel)
 {
     if ((channelRenderer == NULL) || (channel == NULL)) return;
 
@@ -2213,7 +2213,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
         else if (richItemRenderer)          parse_video(richItemRenderer, author_id, allow_youtube_shorts,search_result);
         else if (playlistVideoRenderer)     parse_playlist_video(playlistVideoRenderer, search_result);
         else if (watchedVideoRenderer)      parse_watched_video(watchedVideoRenderer, search_result);
-        else if (channelRenderer)           parse_channel(channelRenderer, search_result);
+        else if (channelRenderer)           parse_channel_result(channelRenderer, search_result);
         else if (subscribedChannelRenderer) parse_subscribed_channel(subscribedChannelRenderer, search_result);
         else if (lockupViewModel) {
             if (search_type == QUERY_TYPE_RELATED) parse_related_video(lockupViewModel, search_result);
@@ -2749,21 +2749,36 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
     }
 }
 
+void process_raw_thumbnail(RawThumbnail* raw_thumbnail, TextureCacheEntry** hashtable)
+{   
+    if ((raw_thumbnail == NULL) || (buffer_ready(&raw_thumbnail->data) == false)) return;
+    
+    const Vector2 dimension = media_type_to_thumbnail_dim(raw_thumbnail->media_type);
+
+    const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, dimension.x, dimension.y);
+    if (IsTextureReady(thumbnail) == false) {
+        printf("process_raw_thumbnail: 'thumbnail' is invalid\n");
+        return;
+    }
+
+    TextureCacheEntry* cached_entry = cached_texture_init(thumbnail, raw_thumbnail->search_result_id);
+    if (cached_entry == NULL) {
+        printf("process_raw_thumbnail: 'cached_entry' is null\n");
+        return;
+    }
+    
+    cache_texture(hashtable, cached_entry);
+}
+
 void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)
 {
     if (thumbnail_queue == NULL) return;
 
     while (thumbnail_queue->head != NULL) {
         Node* node = list_dequeue(thumbnail_queue);
-        RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
 
-        const Vector2 dim = media_type_to_thumbnail_dim(raw_thumbnail->media_type);
-        const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, dim.x, dim.y);
-        if (IsTextureReady(thumbnail)) {
-            TextureCacheEntry *cached_entry = cached_texture_init(thumbnail, raw_thumbnail->search_result_id);
-            if (cached_entry) {
-                cache_texture(hashtable, cached_entry);
-            }
+        if (node->type == NODE_TYPE_RAW_THUMBNAIL) {
+            process_raw_thumbnail(node->content, hashtable);
         }
 
         node_free(node);
@@ -3234,6 +3249,7 @@ typedef struct
     char id[64];
     char subscriber_count[32];
     TextureCacheEntry* cached;
+    bool thumbnail_loaded;
 } HighlightedChannel;
 
 bool is_subbed_to_channel(const char* id)
@@ -3345,7 +3361,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, const Hig
 {
     DrawRectangleLinesEx(container, 1, GRAY);
     
-    if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->id[0] == '\0')) return;
+    if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->cached == NULL) || (highlighted_channel->id[0] == '\0')) return;
 
     const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
 
@@ -3387,6 +3403,158 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, const Hig
         (*subbed_to_channel) = !(*subbed_to_channel);
     }
 }
+
+typedef struct
+{
+    Query query;
+    TextureCacheEntry** texture_cache;
+    const char* internal_api_key;
+    HighlightedChannel* channel;
+    List* raw_thumbnail_queue;
+    bool* subbed_to_channel;
+    List* results;
+} ParseChannelArgs;
+
+void* parse_channel(void* args)
+{
+    ParseChannelArgs* targs = (ParseChannelArgs*) args;
+    if ((targs == NULL) ||
+        (targs->texture_cache == NULL) || 
+        (targs->internal_api_key == NULL) ||
+        (targs->channel == NULL) ||
+        (targs->raw_thumbnail_queue == NULL) ||
+        (targs->subbed_to_channel == NULL) ||
+        (targs->results == NULL)) {
+        printf("parse_channel: invalid input(s)\n");
+        return NULL;
+    }
+    
+    Connection* conn = &youtube_pool.connections[youtube_pool.current_conn]; 
+
+    HttpsRequest req = configure_post_request(targs->query, targs->internal_api_key, conn->host);
+    if (valid_post_request(req) == false) {
+        printf("parse_channel: invalid post request\n");
+        if (req.payload) {
+            free(req.payload); req.payload = NULL;
+        }
+        free(targs); targs = NULL;
+        return NULL;
+    }
+
+    cJSON* json = get_json_response(&req, ssl_ctx, conn);
+    if (json == NULL) {
+        printf("parse_channel: 'targs' is null\n");
+        if (req.payload) {
+            free(req.payload); req.payload = NULL;
+        }
+        free(targs); targs = NULL;
+        return NULL;
+    }
+
+    if (req.payload) {
+        free(req.payload); req.payload = NULL;
+    }
+
+    const MediaType media_type = MEDIA_TYPE_CHANNEL;
+    const QueryType query_type = targs->query.type;
+    const QueryAttribute query_attr = targs->query.attr;
+    
+    pthread_mutex_lock(&targs->results->mutex);
+    create_results_from_json(json, targs->results, query_type, query_attr, false);
+    pthread_mutex_unlock(&targs->results->mutex);
+
+    get_continuation_token(json, query_type, query_attr);
+
+    if (query_attr == QUERTY_ATTR_APPEND) {
+        goto clean;
+    }
+
+    strncpy(targs->channel->id, targs->query.focused_id, sizeof(targs->channel->id) - 1);
+    targs->channel->id[sizeof(targs->channel->id) - 1] = '\0';
+    
+    const char* title_path = ".header.pageHeaderRenderer.pageTitle";
+    
+    if (assign_string_from_path(json, title_path, targs->channel->name, sizeof(targs->channel->name)) == false) {
+        printf("parse_channel: failed to assign channel title\n");
+    }
+
+    const char* subscriber_count_path = ".header.pageHeaderRenderer.content.pageHeaderViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[0].text.content";
+    
+    if (assign_string_from_path(json, subscriber_count_path, targs->channel->subscriber_count, sizeof(targs->channel->subscriber_count)) == false) {
+        printf("parse_channel: failed to assign sub count\n");
+    }
+    
+    const char* thumbnail_path = ".header.pageHeaderRenderer.content.pageHeaderViewModel.image.decoratedAvatarViewModel.avatar.avatarViewModel.image.sources[0].url";
+    
+    const cJSON* thumbnail_url_item = cjson_pointer_get(json, thumbnail_path);
+    if (valid_cjson_string(thumbnail_url_item) == false) {
+        printf("parse_channel: failed to assign thumbnail path\n");
+        targs->channel->thumbnail_loaded = false;
+        targs->channel->thumbnail_path[0] = '\0';
+        targs->channel->cached = NULL;
+        goto clean;
+    }
+
+    // channels have two potential path prefixes
+    const char* path1 = strstr(thumbnail_url_item->valuestring, "/ytc");
+    const char* path2 = strrchr(thumbnail_url_item->valuestring, '/');
+
+    if ((path1 == NULL) && (path2 == NULL)) {
+        printf("parse_channel: channel thumbnail path does not start with '/' or '/ytc'\n");
+        goto clean;
+    }
+
+    strncpy(targs->channel->thumbnail_path, path1 ? path1 : path2, sizeof(targs->channel->thumbnail_path) - 1);
+    targs->channel->thumbnail_path[sizeof(targs->channel->thumbnail_path) - 1] = '\0';
+    
+    (*targs->subbed_to_channel) = is_subbed_to_channel(targs->channel->id);
+    
+    TextureCacheEntry* cached = find_cached_thumbnail(targs->channel->id, targs->texture_cache);
+    if (cached) {
+        targs->channel->thumbnail_loaded = true;
+        targs->channel->cached = cached;
+    }
+
+    else {
+        conn = &channel_thumbnail_pool.connections[channel_thumbnail_pool.current_conn];
+        
+        req = (HttpsRequest){0};
+
+        if (configure_get_header(req.header, sizeof(req.header), conn->host, targs->channel->thumbnail_path) == false) {
+            printf("parse_channel: req header truncated\n");
+            goto clean;
+        }
+
+        LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
+        if (thumb_args) {
+            thumb_args->request = req;
+            thumb_args->media_type = MEDIA_TYPE_CHANNEL;
+            thumb_args->thumbnail_queue = targs->raw_thumbnail_queue;
+            thumb_args->connection = &channel_thumbnail_pool.connections[channel_thumbnail_pool.current_conn];
+            
+            strncpy(thumb_args->search_result_id, targs->channel->id, sizeof(thumb_args->search_result_id) - 1);
+            thumb_args->search_result_id[sizeof(thumb_args->search_result_id) - 1] = '\0';
+
+            load_thumbnail(thumb_args);
+        }
+
+        else {
+            printf("parse_channel: 'thumb_args' is null\n");
+            targs->channel->cached = NULL;
+            targs->channel->thumbnail_path[0] = '\0';
+        }
+
+        targs->channel->thumbnail_loaded = false;
+    }
+
+    clean: 
+        cJSON_Delete(json); json = NULL;
+        free(targs); targs = NULL;
+        return NULL;
+}
+
+// change config post request to not use the query struct but just the mininal elements
+// thumbnail path in highlighted channel useless?
 
 int main()
 {
@@ -3536,77 +3704,19 @@ int main()
             load_channel_information = false;
             last_search_type = query.type;
 
-            // get request of infomration
-            ConnectionPool* pool = &youtube_pool;
-            if (pool) {
-                Connection* conn = &pool->connections[pool->current_conn];
-                HttpsRequest req = configure_post_request(query, internal_api_key, conn->host);
-                if (valid_post_request(req)) {
-                    cJSON* json = get_json_response(&req, ssl_ctx, conn);
-                    if (json) {
-                        pthread_mutex_lock(&results.mutex);
-                        create_results_from_json(json, &results, query.type, query.attr, false);
-                        pthread_mutex_unlock(&results.mutex);
-                        
-                        // get continaution token
-                        get_continuation_token(json, query.type, query.attr);
-                        
-                        // need channel data
-                        strncpy(highlighted_channel.id, query.focused_id, sizeof(highlighted_channel.id) - 1);
-                        highlighted_channel.id[sizeof(highlighted_channel.id) - 1] = '\0';
-                        
-                        // title
-                        if (assign_string_from_path(json, ".header.pageHeaderRenderer.pageTitle", highlighted_channel.name, sizeof(highlighted_channel.name))) {
-                            // printf("%s\n", highlighted_channel.name);
-                        }
-                        
-                        // subcount
-                        if (assign_string_from_path(json, ".header.pageHeaderRenderer.content.pageHeaderViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[0].text.content", highlighted_channel.subscriber_count, sizeof(highlighted_channel.subscriber_count))) {
-                            // printf("%s\n", highlighted_channel.subscriber_count);
-                        }
-                        
-                        // thubmnail path
-                        const cJSON* thumbnail_url_item = cjson_pointer_get(json, ".header.pageHeaderRenderer.content.pageHeaderViewModel.image.decoratedAvatarViewModel.avatar.avatarViewModel.image.sources[0].url");
-                        if (valid_cjson_string(thumbnail_url_item)) {
-                            const char* path1 = strstr(thumbnail_url_item->valuestring, "/ytc");
-                            const char* path2 = strrchr(thumbnail_url_item->valuestring, '/');
-                            strncpy(highlighted_channel.thumbnail_path, path1 ? path1 : path2, sizeof(highlighted_channel.thumbnail_path) - 1);
-                            highlighted_channel.thumbnail_path[sizeof(highlighted_channel.thumbnail_path) - 1] = '\0';
-                        }
+            ParseChannelArgs* targs = malloc(sizeof(ParseChannelArgs));
+            if (targs) {
+                targs->query = query;
+                targs->results = &results;
+                targs->channel = &highlighted_channel;
+                targs->texture_cache = &cached_thumbnails;
+                targs->internal_api_key = internal_api_key;
+                targs->subbed_to_channel = &subbed_to_channel;
+                targs->raw_thumbnail_queue = &thumbnail_queue;
 
-                        TextureCacheEntry* cached = find_cached_thumbnail(highlighted_channel.id, &cached_thumbnails);
-                        if (cached) {
-                            printf("alr have thumbnail\n");
-                            highlighted_channel.cached = cached;
-                        }
-
-                        else {
-                            ConnectionPool* pool = &channel_thumbnail_pool;
-                            if (pool) {
-                                Connection* conn = &pool->connections[pool->current_conn];
-                                HttpsRequest req = {0};
-                                if (configure_get_header(req.header, sizeof(req.header), conn->host, highlighted_channel.thumbnail_path)) {
-                                    HttpsResponse res = send_https_request(req, ssl_ctx, conn);
-                                    if (https_response_ready(&res)) {
-                                        const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
-                                        
-                                        const Texture thumbnail = load_texture_from_memory(res.body, dim.x, dim.y);
-                                        TextureCacheEntry* cached = cached_texture_init(thumbnail, highlighted_channel.id);
-                                        if (cached) {
-                                            highlighted_channel.cached = cached;
-                                            cache_texture(&cached_thumbnails, cached);
-                                        }
-                                        
-                                        https_response_free(&res);
-                                    }
-                                }
-                            }
-                        }
-                    
-                        subbed_to_channel = is_subbed_to_channel(highlighted_channel.id);
-
-                        cJSON_Delete(json); json = NULL;
-                    }
+                if (launch_task(&task_queue, targs, parse_channel) == false) {
+                    printf("failed to launch parse_channel task\n");
+                    free(targs); targs = NULL;
                 }
             }
         }
@@ -3693,12 +3803,14 @@ int main()
                 .height = 25,
             };
 
-            if (GuiButton(users_videos_button_bounds, "User Videos")) {
+            if (GuiButton(users_videos_button_bounds, "User's Videos")) {
                 load_channel_information = true;
                 query.attr = QUERY_ATTR_REPLACE;
                 query.type = QUERY_TYPE_VIEW_CHANNEL;
+
                 strncpy(query.focused_id, highlighted_video.author_id, sizeof(query.focused_id) - 1);
                 query.focused_id[sizeof(query.focused_id) - 1] = '\0';
+                
                 SetWindowTitle(TextFormat("[User %s Videos(loading)] - metube", query.focused_id));
             }
 
@@ -3748,6 +3860,11 @@ int main()
                 .height = focused_channel_height,
                 .width = 350,
             };
+
+            if ((highlighted_channel.thumbnail_loaded == false) && (highlighted_channel.thumbnail_path[0] != '\0')) { 
+                highlighted_channel.thumbnail_loaded = true;
+                highlighted_channel.cached = find_cached_thumbnail(highlighted_channel.id, &cached_thumbnails);
+            }
 
             draw_highlighted_channel(focused_channel_bounds, &ui, &highlighted_channel, &subbed_to_channel);
 
@@ -3937,9 +4054,6 @@ int main()
 }
 
 // stuff to do:
-    // check if current code has any mem leaks
-    // clean this function up (load_channel_information)
-    // add cached textures immediatley after getting the response data
     // hashing for subscribed channels and watched videos? 
     // like/fav video list
     // able to add videos to created playlist
