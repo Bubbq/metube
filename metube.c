@@ -3349,7 +3349,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, const Hig
 
     const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
 
-    if (highlighted_channel->cached && IsTextureReady(highlighted_channel->cached->thumbnail)) {
+    if (cached_texture_is_ready(highlighted_channel->cached)) {
         start_timer(&highlighted_channel->cached->timer, CACHED_TEXTURE_LIFETIME);
         DrawTextureEx(highlighted_channel->cached->thumbnail, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
     }
@@ -3459,6 +3459,8 @@ int main()
 
     bool subscription_button_pressed = false;
 
+    bool load_channel_information = false;
+
     HighlightedVideo highlighted_video = {0};
     
     bool subbed_to_channel = false;
@@ -3528,6 +3530,85 @@ int main()
             load_results_from_json_array_file(SUBSCRIPTIONS_FILE, &results, QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS, QUERY_ATTR_REPLACE);
 
             SetWindowTitle("[Subscriptions] - metube");
+        }
+
+        if (load_channel_information) {
+            load_channel_information = false;
+            last_search_type = query.type;
+
+            // get request of infomration
+            ConnectionPool* pool = &youtube_pool;
+            if (pool) {
+                Connection* conn = &pool->connections[pool->current_conn];
+                HttpsRequest req = configure_post_request(query, internal_api_key, conn->host);
+                if (valid_post_request(req)) {
+                    cJSON* json = get_json_response(&req, ssl_ctx, conn);
+                    if (json) {
+                        pthread_mutex_lock(&results.mutex);
+                        create_results_from_json(json, &results, query.type, query.attr, false);
+                        pthread_mutex_unlock(&results.mutex);
+                        
+                        // get continaution token
+                        get_continuation_token(json, query.type, query.attr);
+                        
+                        // need channel data
+                        strncpy(highlighted_channel.id, query.focused_id, sizeof(highlighted_channel.id) - 1);
+                        highlighted_channel.id[sizeof(highlighted_channel.id) - 1] = '\0';
+                        
+                        // title
+                        if (assign_string_from_path(json, ".header.pageHeaderRenderer.pageTitle", highlighted_channel.name, sizeof(highlighted_channel.name))) {
+                            // printf("%s\n", highlighted_channel.name);
+                        }
+                        
+                        // subcount
+                        if (assign_string_from_path(json, ".header.pageHeaderRenderer.content.pageHeaderViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[0].text.content", highlighted_channel.subscriber_count, sizeof(highlighted_channel.subscriber_count))) {
+                            // printf("%s\n", highlighted_channel.subscriber_count);
+                        }
+                        
+                        // thubmnail path
+                        const cJSON* thumbnail_url_item = cjson_pointer_get(json, ".header.pageHeaderRenderer.content.pageHeaderViewModel.image.decoratedAvatarViewModel.avatar.avatarViewModel.image.sources[0].url");
+                        if (valid_cjson_string(thumbnail_url_item)) {
+                            const char* path1 = strstr(thumbnail_url_item->valuestring, "/ytc");
+                            const char* path2 = strrchr(thumbnail_url_item->valuestring, '/');
+                            strncpy(highlighted_channel.thumbnail_path, path1 ? path1 : path2, sizeof(highlighted_channel.thumbnail_path) - 1);
+                            highlighted_channel.thumbnail_path[sizeof(highlighted_channel.thumbnail_path) - 1] = '\0';
+                        }
+
+                        TextureCacheEntry* cached = find_cached_thumbnail(highlighted_channel.id, &cached_thumbnails);
+                        if (cached) {
+                            printf("alr have thumbnail\n");
+                            highlighted_channel.cached = cached;
+                        }
+
+                        else {
+                            ConnectionPool* pool = &channel_thumbnail_pool;
+                            if (pool) {
+                                Connection* conn = &pool->connections[pool->current_conn];
+                                HttpsRequest req = {0};
+                                if (configure_get_header(req.header, sizeof(req.header), conn->host, highlighted_channel.thumbnail_path)) {
+                                    HttpsResponse res = send_https_request(req, ssl_ctx, conn);
+                                    if (https_response_ready(&res)) {
+                                        const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
+                                        
+                                        const Texture thumbnail = load_texture_from_memory(res.body, dim.x, dim.y);
+                                        TextureCacheEntry* cached = cached_texture_init(thumbnail, highlighted_channel.id);
+                                        if (cached) {
+                                            highlighted_channel.cached = cached;
+                                            cache_texture(&cached_thumbnails, cached);
+                                        }
+                                        
+                                        https_response_free(&res);
+                                    }
+                                }
+                            }
+                        }
+                    
+                        subbed_to_channel = is_subbed_to_channel(highlighted_channel.id);
+
+                        cJSON_Delete(json); json = NULL;
+                    }
+                }
+            }
         }
 
         BeginDrawing();
@@ -3613,7 +3694,7 @@ int main()
             };
 
             if (GuiButton(users_videos_button_bounds, "User Videos")) {
-                search = true;
+                load_channel_information = true;
                 query.attr = QUERY_ATTR_REPLACE;
                 query.type = QUERY_TYPE_VIEW_CHANNEL;
                 strncpy(query.focused_id, highlighted_video.author_id, sizeof(query.focused_id) - 1);
@@ -3676,7 +3757,6 @@ int main()
                 .width = search_bar_bounds.width, 
                 .height = GetScreenHeight() - scroll_window_bounds.y - focused_channel_height - (ui.padding * 2), 
             };
-
 
             pthread_mutex_lock(&results.mutex); 
 
@@ -3786,25 +3866,9 @@ int main()
                             SetWindowTitle(TextFormat("[Playlist:%s(loading)] - metube", query.focused_id));
                             break;
                         case MEDIA_TYPE_CHANNEL:
-                            search = true;
+                            load_channel_information = true;
                             query.type = QUERY_TYPE_VIEW_CHANNEL;
                             SetWindowTitle(TextFormat("[Channel:%s(loading)] - metube", query.focused_id));
-
-                            strncpy(highlighted_channel.id, search_result->id, sizeof(highlighted_channel.id) - 1);
-                            highlighted_channel.id[sizeof(highlighted_channel.id) - 1] = '\0';
-
-                            strncpy(highlighted_channel.name, search_result->title, sizeof(highlighted_channel.name) - 1);
-                            highlighted_channel.name[sizeof(highlighted_channel.name) - 1] = '\0';
-
-                            strncpy(highlighted_channel.subscriber_count, search_result->subscriber_count, sizeof(highlighted_channel.subscriber_count) - 1);
-                            highlighted_channel.subscriber_count[sizeof(highlighted_channel.subscriber_count) - 1] = '\0';
-                            
-                            strncpy(highlighted_channel.thumbnail_path, search_result->thumbnail_path, sizeof(highlighted_channel.thumbnail_path) - 1);
-                            highlighted_channel.thumbnail_path[sizeof(highlighted_channel.thumbnail_path) - 1] = '\0';
-
-                            highlighted_channel.cached = cached;
-
-                            subbed_to_channel = is_subbed_to_channel(highlighted_channel.id);
                             break;
                         default:
                             printf("CRITICAL: invalid media type pressed\n");
@@ -3823,7 +3887,8 @@ int main()
             };
 
             if (load_more_button_visible && GuiButton(load_more_button_bounds, "LOAD MORE")) {
-                search = true;
+                if (last_search_type == QUERY_TYPE_VIEW_CHANNEL) load_channel_information = true;
+                else search = true;
                 query.type = last_search_type;
                 query.attr = QUERTY_ATTR_APPEND;
             }
@@ -3872,10 +3937,10 @@ int main()
 }
 
 // stuff to do:
-    // channel should show up when you press view user videos
-    // load highlighted channel at the same time as the channel's videos
+    // check if current code has any mem leaks
+    // clean this function up (load_channel_information)
+    // add cached textures immediatley after getting the response data
     // hashing for subscribed channels and watched videos? 
-    
     // like/fav video list
     // able to add videos to created playlist
     // fonts for L.O.T.E.
