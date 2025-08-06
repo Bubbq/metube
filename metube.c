@@ -1009,16 +1009,13 @@ cJSON* configure_payload(const Query* query)
     return root;
 }
 
-HttpsRequest configure_post_request(const Query query, const char* internal_api_key, const char* host)
+HttpsRequest configure_post_request(const Query query, const char* host)
 {
     HttpsRequest req = (HttpsRequest) {0};
 
-    if ((internal_api_key == NULL) || (host == NULL)) {
-        printf("configure_post_request: invalid input\n");
-        return (HttpsRequest) {0};
-    }
+    if (host == NULL) return req;
 
-    if (configure_api_path(req.path, sizeof(req.path), query.type, internal_api_key) == false) {
+    if (configure_api_path(req.path, sizeof(req.path), query.type, "") == false) {
         printf("configure_post_request: failed to resolve path\n");
         return (HttpsRequest) {0};
     }
@@ -2614,64 +2611,6 @@ void draw_filter_window(Query *query, const Rectangle container, const Font font
     }
 }
 
-void get_internal_api_key(const char* response_body, const size_t n, char* internal_api_key)
-{
-    if (response_body == NULL) return;
-
-    const char* tag = "\"INNERTUBE_API_KEY\"";
-    const size_t tag_len = strlen(tag);
-
-    char* location = strstr(response_body, tag);
-    if (location == NULL) {
-        printf("get_internal_api_key: \"%s\" not found\n", tag);
-        return;
-    }
-
-    int i = 0;
-    bool in_quotes = false;
-
-    for (char* current = location + tag_len; (current && (i < n - 1)); current++) {
-        const char c = *current;
-
-        if (!in_quotes) {
-            if (c == '\"') 
-                in_quotes = true;
-        }
-        
-        else if (in_quotes) {
-            if (c == '\"') {
-                break;
-            }
-
-            internal_api_key[i++] = c;
-        }
-    }
-
-    internal_api_key[i] = '\0';
-}
-
-void parse_youtube_page(Connection *youtube_connection, const size_t n, char* internal_api_key)
-{
-    HttpsRequest req = {0};
-
-    if (configure_get_header(req.header, sizeof(req.header), youtube_connection->host, "/") == false) {
-        printf("parse_youtube_page: request header truncated\n");
-        memset(internal_api_key, 0, n);
-        return;
-    }
-
-    Buffer res = send_https_request(req, ssl_ctx, youtube_connection);
-    if (buffer_ready(&res) == false) {
-        memset(internal_api_key, 0, n);
-        printf("parse_youtube_page: page response is invalid\n");
-        return;
-    }
-
-    get_internal_api_key(res.data, n, internal_api_key);
-
-    buffer_free(&res);
-}
-
 void draw_search_result(SearchResult *search_result, const Texture thumbnail, const Rectangle container,  const Color color, const Ui ui)
 {
     DrawRectangleRec(container, color);
@@ -2859,18 +2798,20 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
     return launch_task(task_queue, targs, load_thumbnail);
 }
 
-bool queue_search_task(Query* query, Connection* conn, List* task_queue, List* results, List* thumbnail_queue, const char* internal_api_key)
+bool queue_search_task(Query* query, Connection* conn, List* task_queue, List* results, List* thumbnail_queue)
 {
-    if ((conn == NULL) || (task_queue == NULL) || (results == NULL) || (thumbnail_queue == NULL) || (internal_api_key == NULL)) {
+    if ((conn == NULL) || (task_queue == NULL) || (results == NULL) || (thumbnail_queue == NULL)) {
         printf("queue_search_task: invalid input\n");
         return false;
     }
 
-    HttpsRequest post = configure_post_request((*query), internal_api_key, conn->host);
+    HttpsRequest post = configure_post_request((*query),conn->host);
     if (valid_post_request(post) == false) {
         printf("queue_search_task: invalid post req\n");
         return false;
     }
+
+    printf("%s\n", post.header);
 
     SearchThreadArgs* targs = malloc(sizeof(SearchThreadArgs));
     if (targs == NULL) {
@@ -2987,8 +2928,6 @@ void* get_video_description(void* args)
         goto cleanup;
     }
 
-    create_file("load_video_information.json", res.data);
-
     if (targs->highlighted_video->description) {
         free(targs->highlighted_video->description); targs->highlighted_video->description = NULL;
     }
@@ -3012,14 +2951,14 @@ void* get_video_description(void* args)
         return NULL;
 }
 
-bool queue_focused_video_task(const Query query, List* task_queue, Connection* conn, HighlightedVideo* highlighted_video, const char* internal_api_key)
+bool queue_focused_video_task(const Query query, List* task_queue, Connection* conn, HighlightedVideo* highlighted_video)
 {
-    if ((task_queue == NULL) || (conn == NULL) || (highlighted_video == NULL) || (internal_api_key == NULL)) {
+    if ((task_queue == NULL) || (conn == NULL) || (highlighted_video == NULL)) {
         printf("queue_focused_video_task: invalid input\n");
         return false;
     }
 
-    HttpsRequest post = configure_post_request(query, internal_api_key, conn->host);
+    HttpsRequest post = configure_post_request(query, conn->host);
     if (valid_post_request(post) == false) {
         printf("queue_focused_video_task: 'post' is invalid\n");
         return false;
@@ -3271,7 +3210,6 @@ typedef struct
     Query query;
     TextureCacheEntry** texture_cache;
     cJSON* subscribed_channels_json;
-    const char* internal_api_key;
     HighlightedChannel* channel;
     List* raw_thumbnail_queue;
     bool* subbed_to_channel;
@@ -3283,7 +3221,6 @@ void* parse_channel(void* args)
     ParseChannelArgs* targs = (ParseChannelArgs*) args;
     if ((targs == NULL) ||
         (targs->texture_cache == NULL) || 
-        (targs->internal_api_key == NULL) ||
         (targs->channel == NULL) ||
         (targs->raw_thumbnail_queue == NULL) ||
         (targs->subbed_to_channel == NULL) ||
@@ -3294,7 +3231,7 @@ void* parse_channel(void* args)
     
     Connection* conn = &youtube_pool.connections[youtube_pool.current_conn]; 
 
-    HttpsRequest req = configure_post_request(targs->query, targs->internal_api_key, conn->host);
+    HttpsRequest req = configure_post_request(targs->query, conn->host);
     if (valid_post_request(req) == false) {
         printf("parse_channel: invalid post request\n");
         if (req.payload) {
@@ -3433,6 +3370,11 @@ bool like_video(cJSON* liked_videos_json, const SearchResult* liked_video)
     return true;
 }
 
+// press 'r' to update connection status rather than checking every time
+// update the title
+// disable all query elements if the internet is down
+// need to have some sort of timeout if they decide to turn wifi off before checking 
+
 int main()
 {
     TextureCacheEntry* cached_thumbnails = NULL;
@@ -3453,10 +3395,6 @@ int main()
 
     Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-    char internal_api_key[64];
-    parse_youtube_page(conn, sizeof(internal_api_key), internal_api_key);
-    printf("INTERNAL KEY: \"%s\"\n", internal_api_key);
-    
     cJSON* watch_history_json = file_exists(WATCH_HISTORY_FILE) ? 
                                 parse_json_file(WATCH_HISTORY_FILE) : 
                                 create_empty_array_object(WATCH_HISTORY_ARRAY);
@@ -3540,7 +3478,7 @@ int main()
 
             Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-            if (queue_focused_video_task(query, &task_queue, conn, &highlighted_video, internal_api_key) == false) {
+            if (queue_focused_video_task(query, &task_queue, conn, &highlighted_video) == false) {
                 printf("failed to queue focused video task\n");
             }
         }
@@ -3560,7 +3498,7 @@ int main()
 
             Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
 
-            if (queue_search_task(&query, conn, &task_queue, &results, &thumbnail_queue, internal_api_key) == false) {
+            if (queue_search_task(&query, conn, &task_queue, &results, &thumbnail_queue) == false) {
                 printf("failed to queue search task\n");
             }
         }
@@ -3617,7 +3555,6 @@ int main()
                 targs->results = &results;
                 targs->channel = &highlighted_channel;
                 targs->texture_cache = &cached_thumbnails;
-                targs->internal_api_key = internal_api_key;
                 targs->subbed_to_channel = &subbed_to_channel;
                 targs->raw_thumbnail_queue = &thumbnail_queue;
                 targs->subscribed_channels_json = subscribed_channels_json;
@@ -3660,7 +3597,6 @@ int main()
                     search = true;
                     query.attr = QUERY_ATTR_REPLACE;
                     query.type = QUERY_TYPE_USER_INPUT;
-                    SetWindowTitle(TextFormat("[%s(loading)] - metube", query.string));
                 }
             }
 
@@ -3675,7 +3611,6 @@ int main()
                 search = true;
                 query.attr = QUERY_ATTR_REPLACE;
                 query.type = QUERY_TYPE_TRENDING;
-                SetWindowTitle("[Trending(loading)] - metube");
             }
 
             const Rectangle related_videos_button_bounds = {
