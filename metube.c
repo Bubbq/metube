@@ -547,7 +547,7 @@ void print_search_result(const SearchResult *search_result)
 
 typedef struct RawThumbnail
 {
-    char search_result_id[256];     
+    char id[256];     
     Buffer data;              
     struct RawThumbnail *next;
     MediaType media_type;
@@ -561,7 +561,7 @@ RawThumbnail* raw_thumbnail_init()
     raw_thumbnail->next = NULL;
     raw_thumbnail->data = buffer_init();
     raw_thumbnail->media_type = MEDIA_TYPE_UNDF;
-    memset(raw_thumbnail->search_result_id, 0, sizeof(raw_thumbnail->search_result_id));
+    memset(raw_thumbnail->id, 0, sizeof(raw_thumbnail->id));
 
     return raw_thumbnail;
 }
@@ -2077,14 +2077,13 @@ void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
 
 typedef struct 
 {
-    HttpsRequest request;
-    char search_result_id[64];
-    Connection *connection;
+    char thumbnail_path[256];
+    char id[64];
     List* thumbnail_queue;
     MediaType media_type;
 } LoadThumbnailArgs;
 
-void* load_thumbnail(void *args)
+void* load_thumbnail(void* args)
 {
     LoadThumbnailArgs* targs = (LoadThumbnailArgs*) args;
     if (targs == NULL) {
@@ -2092,33 +2091,49 @@ void* load_thumbnail(void *args)
         return NULL;
     }
 
-    HttpsResponse thumbnail_response = send_https_request(targs->request, ssl_ctx, targs->connection);
-    if (https_response_ready(&thumbnail_response) == false) {
-        printf("load_thumbnail: send_http_request returned invalid buffer\n");
-        free(targs);
-        return NULL;
+    ConnectionPool* pool = media_type_to_pool(targs->media_type);
+    if (pool == NULL) {
+        printf("load_thumbnail: 'pool' is null\n");
+        goto clean;
+    }
+
+    Connection* conn = &pool->connections[pool->current_conn];
+
+    HttpsRequest req = {0};
+    if (configure_get_header(req.header, sizeof(req.header), conn->host, targs->thumbnail_path) == false) {
+        printf("load_thumbnail: req header was truncated\n");
+        goto clean;
+    }
+
+    HttpsResponse res = send_https_request(req, ssl_ctx, conn);
+    if (https_response_ready(&res) == false) {
+        printf("load_thumbnail: thumbnail response is invalid\n");
+        goto clean;
     }
 
     Node* node = node_init(NODE_TYPE_RAW_THUMBNAIL);
     if ((node == NULL) || (node->content == NULL)) {
-        printf("load_thumbnail: node init failed\n");
-        free(targs);
-        https_response_free(&thumbnail_response);
-        return NULL;
+        printf("load_thumbnail: invalid node created\n");
+        https_response_free(&res);
+        goto clean;
     }
 
-    RawThumbnail* raw_thumbnail = (RawThumbnail*) node->content;
-    raw_thumbnail->data = thumbnail_response.body;
-    raw_thumbnail->media_type = targs->media_type;
-    strcpy(raw_thumbnail->search_result_id, targs->search_result_id);
+    RawThumbnail* raw = (RawThumbnail*) node->content;
+
+    raw->next = NULL;
+    raw->data = res.body;
+    raw->media_type = targs->media_type;
+    snprintf(raw->id, sizeof(raw->id), "%s", targs->id);
 
     pthread_mutex_lock(&targs->thumbnail_queue->mutex);
     list_append(targs->thumbnail_queue, node);
     pthread_mutex_unlock(&targs->thumbnail_queue->mutex);
 
-    buffer_free(&thumbnail_response.header);
-    free(targs);
-    return NULL;
+    buffer_free(&res.header);
+
+    clean:
+        free(targs); targs = NULL;
+        return NULL;
 }
 
 typedef struct
@@ -2753,7 +2768,7 @@ void process_raw_thumbnail(RawThumbnail* raw_thumbnail, TextureCacheEntry** hash
         return;
     }
 
-    TextureCacheEntry* cached_entry = cached_texture_init(thumbnail, raw_thumbnail->search_result_id);
+    TextureCacheEntry* cached_entry = cached_texture_init(thumbnail, raw_thumbnail->id);
     if (cached_entry == NULL) {
         printf("process_raw_thumbnail: 'cached_entry' is null\n");
         return;
@@ -2849,16 +2864,10 @@ int get_level_string(const int level, const char* spec_link, const size_t n, cha
     return i;
 }
 
-bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, Connection* conn, MediaType media_type)
+bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, MediaType media_type)
 {
-    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (task_queue == NULL) || (thumbnail_queue == NULL) || (conn == NULL)) {
+    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (task_queue == NULL) || (thumbnail_queue == NULL)) {
         printf("queue_thumbnail_load: invalid args\n");
-        return false;
-    }
-
-    HttpsRequest req = {0};
-    if (configure_get_header(req.header, sizeof(req.header), conn->host, thumbnail_path) == false) {
-        printf("queue_thumbnail_load: req header truncated\n");
         return false;
     }
 
@@ -2868,12 +2877,10 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
         return false;
     }
 
-    targs->request = req;
-    targs->connection = conn;
     targs->media_type = media_type;
     targs->thumbnail_queue = thumbnail_queue;
-    strncpy(targs->search_result_id, search_result_id, sizeof(targs->search_result_id) - 1);
-    targs->search_result_id[sizeof(targs->search_result_id) - 1] = '\0';
+    snprintf(targs->id, sizeof(targs->id), "%s", search_result_id);
+    snprintf(targs->thumbnail_path, sizeof(targs->thumbnail_path), "%s", thumbnail_path);
 
     return launch_task(task_queue, targs, load_thumbnail);
 }
@@ -3397,18 +3404,6 @@ void* parse_channel(void* args)
     }
 
     else {
-        conn = &channel_thumbnail_pool.connections[channel_thumbnail_pool.current_conn];
-        
-        req = (HttpsRequest){0};
-
-         if (configure_get_header(req.header, sizeof(req.header), conn->host, targs->channel->thumbnail_path) == false) {
-            printf("parse_channel: req header truncated\n");
-            targs->channel->thumbnail_loaded = false;
-            targs->channel->thumbnail_path[0] = '\0';
-            targs->channel->cached = NULL;
-            goto clean;
-        }
-
         LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
         if (thumb_args == NULL) {
             printf("parse_channel: 'thumb_args' is null\n");
@@ -3418,13 +3413,10 @@ void* parse_channel(void* args)
             goto clean;
         }
 
-        thumb_args->request = req;
         thumb_args->media_type = MEDIA_TYPE_CHANNEL;
         thumb_args->thumbnail_queue = targs->raw_thumbnail_queue;
-        thumb_args->connection = &channel_thumbnail_pool.connections[channel_thumbnail_pool.current_conn];
-        
-        strncpy(thumb_args->search_result_id, targs->channel->id, sizeof(thumb_args->search_result_id) - 1);
-        thumb_args->search_result_id[sizeof(thumb_args->search_result_id) - 1] = '\0';
+        snprintf(thumb_args->id, sizeof(thumb_args->id), "%s", targs->channel->id);
+        snprintf(thumb_args->thumbnail_path, sizeof(thumb_args->thumbnail_path), "%s", targs->channel->thumbnail_path);
 
         load_thumbnail(thumb_args);
 
@@ -3552,8 +3544,6 @@ int main()
     bool view_watch_history = false;
     bool view_subscribed_channels = false;
     bool view_liked_videos = false;
-    
-    bool like_video_button_pressed = false;
     
     bool subbed_to_channel = false;
     bool load_channel_information = false;
@@ -3908,15 +3898,9 @@ int main()
 
                 else if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
                     search_result->thumbnail_loaded = true;
-                    
-                    ConnectionPool* pool = media_type_to_pool(search_result->media_type);
-                    if (pool == NULL) {
-                        printf("CRITICAL: media_type_to_pool returned NULL\n");
-                        goto cleanup;
-                    }
 
-                    Connection* conn = &pool->connections[pool->current_conn];
-                    if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, conn, search_result->media_type)) {
+                    if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, search_result->media_type)) {
+                        ConnectionPool* pool = media_type_to_pool(search_result->media_type);
                         cycle_connection(pool);
                     }
                 }
@@ -4041,7 +4025,6 @@ int main()
 }
 
 // stuff to do:
-    // hashing for subscribed channels and watched videos? 
     // able to add videos to created playlist
     // fonts for L.O.T.E.
     // handle connecticity issues (no wifi on startup, changing connections, etc.)
@@ -4049,7 +4032,6 @@ int main()
     // goto's for redundant cleanups
     // set all ptrs to NULL after freeing them
     // thumbnail frames from video click
-    // limit the amout of results to 20 (specifically loading more playlist videos)
     // better create_results_from_json?
     // move ui stuff together
     // if Im not going to do cookies, dont need httpsresponse struct but just the body
