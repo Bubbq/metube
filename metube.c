@@ -2110,10 +2110,7 @@ void* load_thumbnail(void* args)
 typedef struct
 {
     Query query;
-    HttpsRequest request;
     List* search_results;
-    List* thumbnail_queue;
-    Connection *youtube_connection;
 } SearchThreadArgs;
 
 const char* get_results_list_path(const QueryType search_type, const QueryAttribute search_attr)
@@ -2303,8 +2300,6 @@ cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* 
     return ret;
 }
 
-static bool search_finished = true;
-
 void log_search(const QueryType query_type, const QueryAttribute query_attr, const float duration, const int nresults)
 {
     const char* type_text = query_type_to_text(query_type);
@@ -2317,15 +2312,27 @@ void* get_results_from_query(void* args)
     float start_time = GetTime(); // preformance check
     
     SearchThreadArgs* targs = (SearchThreadArgs*) args;
-    if ((targs == NULL) || (valid_post_request(targs->request) == false)) {
+    if (targs == NULL) {
         printf("get_results_from_query: invalid arguements passed\n");
         SetWindowTitle("[failed] - metube");
         return NULL;
     }
 
-    cJSON* json = get_json_response(&targs->request, ssl_ctx, targs->youtube_connection);
-    if (json == NULL) {
-        printf("get_results_from_query: 'json' is null\n");
+    Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
+
+    HttpsRequest req = configure_post_request(targs->query, conn->host);
+    if (valid_post_request(req) == false) {
+        printf("get_results_from_query: invalid post req configured\n");
+        free(targs); targs = NULL;
+        return NULL;
+    }
+
+    cJSON* json_res = get_json_response(&req, ssl_ctx, conn);
+
+    free(req.payload); req.payload = NULL;
+
+    if (json_res == NULL) {
+        printf("get_results_from_query: 'json_res' is null\n");
         free(targs); targs = NULL;
         return NULL;
     }
@@ -2335,21 +2342,18 @@ void* get_results_from_query(void* args)
     
     pthread_mutex_lock(&targs->search_results->mutex);
 
-    const int elements_added = create_results_from_json(json, targs->search_results, query_type, query_attr, targs->query.allow_youtube_shorts);
+    const int elements_added = create_results_from_json(json_res, targs->search_results, query_type, query_attr, targs->query.allow_youtube_shorts);
     
     pthread_mutex_unlock(&targs->search_results->mutex);
 
-    get_continuation_token(json, query_type, query_attr);
+    get_continuation_token(json_res, query_type, query_attr);
 
     SetWindowTitle(TextFormat("[search results(%zu)] - metube", targs->search_results->count));
     
-    search_finished = true;
-
     log_search(query_type, query_attr, GetTime() - start_time, elements_added);
 
-    free(targs->request.payload); targs->request.payload = NULL;
     free(targs); targs = NULL;
-    cJSON_Delete(json); json = NULL;
+    cJSON_Delete(json_res); json_res = NULL;
     return NULL;
 }
 
@@ -2796,36 +2800,6 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
     snprintf(targs->thumbnail_path, sizeof(targs->thumbnail_path), "%s", thumbnail_path);
 
     return launch_task(task_queue, targs, load_thumbnail);
-}
-
-bool queue_search_task(Query* query, Connection* conn, List* task_queue, List* results, List* thumbnail_queue)
-{
-    if ((conn == NULL) || (task_queue == NULL) || (results == NULL) || (thumbnail_queue == NULL)) {
-        printf("queue_search_task: invalid input\n");
-        return false;
-    }
-
-    HttpsRequest post = configure_post_request((*query),conn->host);
-    if (valid_post_request(post) == false) {
-        printf("queue_search_task: invalid post req\n");
-        return false;
-    }
-
-    printf("%s\n", post.header);
-
-    SearchThreadArgs* targs = malloc(sizeof(SearchThreadArgs));
-    if (targs == NULL) {
-        printf("queue_search_task: 'targs' is NULL\n");
-        return false;
-    }
-
-    targs->request = post;
-    targs->query = (*query);
-    targs->search_results = results;
-    targs->youtube_connection = conn;
-    targs->thumbnail_queue = thumbnail_queue;
-
-    return launch_task(task_queue, targs, get_results_from_query);
 }
 
 typedef struct
@@ -3393,8 +3367,6 @@ int main()
     video_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO)); // playlists, videos, shorts, and live videos all share the same host
     channel_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL));
 
-    Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
-
     cJSON* watch_history_json = file_exists(WATCH_HISTORY_FILE) ? 
                                 parse_json_file(WATCH_HISTORY_FILE) : 
                                 create_empty_array_object(WATCH_HISTORY_ARRAY);
@@ -3484,7 +3456,7 @@ int main()
         }
 
         if (search) {
-            search = search_finished = false;
+            search = false;
 
             list_free(&thumbnail_queue); thumbnail_queue = list_init();
 
@@ -3496,10 +3468,18 @@ int main()
             last_search_type = query.type;
             strncpy(last_search_query, query.string, sizeof(last_search_query) - 1);
 
-            Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
+            SearchThreadArgs* targs = malloc(sizeof(SearchThreadArgs));
+            if (targs == NULL) {
+                printf("'targs' is null\n");
+                goto cleanup;
+            }
 
-            if (queue_search_task(&query, conn, &task_queue, &results, &thumbnail_queue) == false) {
-                printf("failed to queue search task\n");
+            targs->query = query;
+            targs->search_results = &results;
+
+            if (launch_task(&task_queue, targs, get_results_from_query) == false) {
+                printf("failed to launch task: 'get_results_from_query'\n");
+                free(targs); targs = NULL;
             }
         }
 
