@@ -408,6 +408,8 @@ typedef struct
     Timer timer;
 } TextureCacheEntry;
 
+typedef TextureCacheEntry* TextureCache;
+
 TextureCacheEntry* cached_texture_init(const Texture2D texture, const char* id)
 {
     if ((id == NULL) || (id[0] == '\0') || (IsTextureReady(texture) == false)) {
@@ -1151,24 +1153,6 @@ typedef struct
     size_t current_conn;
     Connection connections[N_CONN];
 } ConnectionPool;
-
-static ConnectionPool youtube_pool;
-static ConnectionPool video_thumbnail_pool;
-static ConnectionPool channel_thumbnail_pool;
-
-ConnectionPool* media_type_to_pool(const MediaType media_type)
-{   
-    switch (media_type) {
-        case MEDIA_TYPE_LIVE:
-        case MEDIA_TYPE_SHORT:
-        case MEDIA_TYPE_VIDEO:
-        case MEDIA_TYPE_PLAYLIST: return &video_thumbnail_pool;
-        case MEDIA_TYPE_CHANNEL: return &channel_thumbnail_pool;
-        default:
-            printf("media_type_to_pool: invalid type passed %d\n", media_type);
-            return NULL;
-    }
-}
 
 ConnectionPool init_connection_pool(const char* host)
 {
@@ -2053,6 +2037,7 @@ typedef struct
     char thumbnail_path[256];
     char id[64];
     List* thumbnail_queue;
+    Connection* conn;
     MediaType media_type;
 } LoadThumbnailArgs;
 
@@ -2064,21 +2049,13 @@ void* load_thumbnail(void* args)
         return NULL;
     }
 
-    ConnectionPool* pool = media_type_to_pool(targs->media_type);
-    if (pool == NULL) {
-        printf("load_thumbnail: 'pool' is null\n");
-        goto clean;
-    }
-
-    Connection* conn = &pool->connections[pool->current_conn];
-
     HttpsRequest req = {0};
-    if (configure_get_header(req.header, sizeof(req.header), conn->host, targs->thumbnail_path) == false) {
+    if (configure_get_header(req.header, sizeof(req.header), targs->conn->host, targs->thumbnail_path) == false) {
         printf("load_thumbnail: req header was truncated\n");
         goto clean;
     }
 
-    Buffer res = send_https_request(req, ssl_ctx, conn);
+    Buffer res = send_https_request(req, ssl_ctx, targs->conn);
     if (buffer_ready(&res) == false) {
         printf("load_thumbnail: thumbnail response is invalid\n");
         goto clean;
@@ -2110,6 +2087,7 @@ void* load_thumbnail(void* args)
 typedef struct
 {
     Query query;
+    Connection* conn;
     List* search_results;
 } SearchThreadArgs;
 
@@ -2318,16 +2296,14 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
-
-    HttpsRequest req = configure_post_request(targs->query, conn->host);
+    HttpsRequest req = configure_post_request(targs->query, targs->conn->host);
     if (valid_post_request(req) == false) {
         printf("get_results_from_query: invalid post req configured\n");
         free(targs); targs = NULL;
         return NULL;
     }
 
-    cJSON* json_res = get_json_response(&req, ssl_ctx, conn);
+    cJSON* json_res = get_json_response(&req, ssl_ctx, targs->conn);
 
     free(req.payload); req.payload = NULL;
 
@@ -2564,53 +2540,87 @@ void draw_thumbnail_subtext(const Rectangle container, Ui ui, const Color text_c
     DrawTextEx(ui.font, text, (Vector2){length_area.x + ui.padding, length_area.y + ui.padding}, font_size, ui.spacing, text_color);
 }
 
-bool draw_filter_toggle(const Rectangle container, const Rectangle button_bounds, const char *label_text, const char *value_text, const char *button_text, const Font font, const int padding)
+bool draw_toggle_filter(const Rectangle container, const Ui ui, const char* label_text, const char* value_text)
 {
-    DrawTextEx(font, label_text, (Vector2){container.x + padding, button_bounds.y + padding}, 11, 2, BLACK);
-    DrawTextEx(font, value_text, (Vector2){((container.x + container.width) * 0.45f), button_bounds.y + padding}, 11, 2, BLACK);
+    const Color text_color = BLACK;
+    const int font_size = 12;
+
+    const char* button_text = "SWITCH";
+    const float button_width = 50;
+    const float button_height = container.height - (ui.padding * 2);
+
+    const float y_level = container.y + ui.padding;
+
+    const Vector2 label_pos = {
+        .x = container.x + ui.padding,
+        .y = y_level,
+    };
+
+    DrawTextEx(ui.font, label_text, label_pos,font_size, ui.spacing, text_color);
+    
+    const Vector2 value_pos = {
+        .x = ui.padding + (container.x + (container.width / 2.0f)) - (MeasureTextEx(ui.font, value_text, font_size, ui.spacing).x / 2.0f),
+        .y = y_level
+    };
+
+    DrawTextEx(ui.font, value_text, value_pos, font_size, ui.spacing, text_color);
+    
+    const Rectangle button_bounds = {
+        .x = container.x + container.width - button_width - ui.padding,
+        .y = y_level,
+        .width = button_width,
+        .height = button_height,
+    };
+
     return GuiButton(button_bounds, button_text);
 }
 
-void draw_filter_window(Query *query, const Rectangle container, const Font font, const int padding)
+void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
 {
     DrawRectangleLinesEx(container, 1, GRAY);
+                
+    const int font_size = 12;
 
-    // buttons to switch filter params (the type of content and how they will be sorted)
+    const float button_width = 50.0;
+    const float button_height = 17.5;
     const char* button_text = "Switch";
-    
-    // adjust query sort type
-    Rectangle sort_type_button_bounds = {
-        .x = container.x + container.width - 55, 
-        .y = container.y + padding,
-        .width = 50, 
-        .height = 17.5
+
+    const Rectangle sort_type_bounds = {
+        .x = container.x,
+        .y = container.y,
+        .width = container.width,
+        .height = container.height / 3.0f,
     };
 
-    if (draw_filter_toggle(container, sort_type_button_bounds, "Order:", sort_type_to_text(query->sort), button_text, font, padding)) {
-        query->sort = (SortType) bound_index_to_array((query->sort + 1), N_SORT_TYPES);
-    }
-    
-    // adjust query media type
-    Rectangle media_type_button_bounds = {
-        .x = sort_type_button_bounds.x,
-        .y = sort_type_button_bounds.y + sort_type_button_bounds.height + padding,
-        .width = 50,
-        .height = 17.5,
-    };
+    const char* sort_text = sort_type_to_text(query->sort);
 
-    if (draw_filter_toggle(container, media_type_button_bounds, "Type:", media_type_to_text(query->media), button_text, font, padding)) {
-        query->media = (MediaType) bound_index_to_array((query->media + 1), N_MEDIA_TYPES);
+    if (draw_toggle_filter(sort_type_bounds, ui, "ORDER", sort_text)) {
+        query->sort = bound_index_to_array((query->sort + 1), N_SORT_TYPES);
     }
 
-    // toggle wether to allow yt shorts or not 
-    Rectangle allow_yt_short_button_bounds = {
-        .x = sort_type_button_bounds.x,
-        .y = media_type_button_bounds.y + media_type_button_bounds.height + padding,
-        .width = 50,
-        .height = 17.5,
+    const Rectangle media_type_bounds = {
+        .x = container.x,
+        .y = sort_type_bounds.y + sort_type_bounds.height,
+        .width = container.width,
+        .height = container.height / 3.0f,
     };
 
-    if (draw_filter_toggle(container, allow_yt_short_button_bounds, "Allow Shorts:", (query->allow_youtube_shorts ? "Yes" : "No"), button_text, font, padding)) {
+    const char* media_text = media_type_to_text(query->media);
+
+    if (draw_toggle_filter(media_type_bounds, ui, "TYPE", media_text)) {
+        query->media = bound_index_to_array((query->media + 1), N_MEDIA_TYPES);
+    }
+
+    const Rectangle allow_shorts_bounds = {
+        .x = container.x,
+        .y = media_type_bounds.y + media_type_bounds.height,
+        .width = container.width,
+        .height = container.height / 3.0f,
+    };
+
+    const char* allow_shorts_text = query->allow_youtube_shorts ? "YES" : "NO";
+
+    if (draw_toggle_filter(allow_shorts_bounds, ui, "SHORTS", allow_shorts_text)) {
         query->allow_youtube_shorts = !query->allow_youtube_shorts;
     }
 }
@@ -2619,10 +2629,14 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
 {
     DrawRectangleRec(container, color);
 
+    const int font_size = 12;
+
+    const float thumbnail_width = media_type_to_thumbnail_dim(MEDIA_TYPE_VIDEO).x;
+
     const Rectangle thumbnail_area = { 
         .x = container.x, 
         .y = container.y, 
-        .width = container.width * 0.45f, 
+        .width = thumbnail_width, 
         .height = container.height 
     };
 
@@ -2634,7 +2648,7 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
     };
 
     if (search_result->title[0] != '\0') {
-        DrawTextBoxed(search_result->title, padded_rectangle(ui.padding, title_area), ui, 12, BLACK);                            
+        DrawTextBoxed(search_result->title, padded_rectangle(ui.padding, title_area), ui, font_size, BLACK);                            
     }
 
     const Rectangle subtext_area = {
@@ -2646,16 +2660,37 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
 
     switch (search_result->media_type) {
         case MEDIA_TYPE_SHORT:
-        case MEDIA_TYPE_VIDEO:
-            DrawTextBoxed(TextFormat("%s   %s", search_result->date_published, search_result->view_count), padded_rectangle(ui.padding, subtext_area), ui, 11.5, BLACK);
+        case MEDIA_TYPE_VIDEO: {
+            const Vector2 date_published_pos = {
+                .x = subtext_area.x + ui.padding,
+                .y = subtext_area.y + ui.padding,
+            };
+
+            DrawTextEx(ui.font, search_result->date_published, date_published_pos, font_size, ui.spacing, BLACK);
+            
+            const Vector2 view_count_pos = {
+                .x = subtext_area.x + subtext_area.width - MeasureTextEx(ui.font, search_result->view_count, font_size, ui.spacing).x - ui.padding,
+                .y = subtext_area.y + ui.padding,
+            };
+
+            DrawTextEx(ui.font, search_result->view_count, view_count_pos, font_size, ui.spacing, BLACK);
+            
             DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
-            draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, search_result->duration);
+            draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, font_size, search_result->duration);
             break;
-        case MEDIA_TYPE_LIVE:
-            DrawTextBoxed(TextFormat("%s watching", search_result->view_count), padded_rectangle(ui.padding, subtext_area), ui, 12, BLACK);
+        }
+        case MEDIA_TYPE_LIVE: {
+            const Vector2 view_count_pos = {
+                .x = subtext_area.x + ui.padding,
+                .y = subtext_area.y + ui.padding,
+            };
+
+            DrawTextEx(ui.font, TextFormat("%s watching", search_result->view_count), view_count_pos, font_size, ui.spacing, BLACK);
+            
             DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, "LIVE");
             break;
+        }
         case MEDIA_TYPE_CHANNEL: {
             const float x_padding = thumbnail.width / 2.0f;
             const float y_padding = (container.height - thumbnail.height) / 2.0f;
@@ -2781,9 +2816,10 @@ int get_level_string(const int level, const char* spec_link, const size_t n, cha
     return i;
 }
 
-bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_path, List* task_queue, List* thumbnail_queue, MediaType media_type)
+bool queue_thumbnail_load(List* task_queue, List* thumbnail_queue, Connection* conn, const char* search_result_id, const char* thumbnail_path,  MediaType media_type)
 {
-    if ((search_result_id == NULL) || (thumbnail_path == NULL) || (task_queue == NULL) || (thumbnail_queue == NULL)) {
+    
+    if ((task_queue == NULL) || (thumbnail_queue == NULL) || (conn == NULL) || (search_result_id == NULL) || (thumbnail_path == NULL)) {
         printf("queue_thumbnail_load: invalid args\n");
         return false;
     }
@@ -2794,6 +2830,7 @@ bool queue_thumbnail_load(const char* search_result_id, const char* thumbnail_pa
         return false;
     }
 
+    targs->conn = conn;
     targs->media_type = media_type;
     targs->thumbnail_queue = thumbnail_queue;
     snprintf(targs->id, sizeof(targs->id), "%s", search_result_id);
@@ -2923,24 +2960,6 @@ void* get_video_description(void* args)
         if (json) cJSON_Delete(json);
         if (targs) free(targs);
         return NULL;
-}
-
-bool queue_focused_video_task(const Query query, List* task_queue, Connection* conn, HighlightedVideo* highlighted_video)
-{
-    if ((task_queue == NULL) || (conn == NULL) || (highlighted_video == NULL)) {
-        printf("queue_focused_video_task: invalid input\n");
-        return false;
-    }
-
-    HttpsRequest post = configure_post_request(query, conn->host);
-    if (valid_post_request(post) == false) {
-        printf("queue_focused_video_task: 'post' is invalid\n");
-        return false;
-    }
-
-    FocusedInfoArgs* targs = init_focused_info_args(post, conn, highlighted_video);
-
-    return launch_task(task_queue, targs, get_video_description);
 }
 
 cJSON* create_empty_array_object(const char* array_name)
@@ -3136,6 +3155,9 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
 {
     DrawRectangleLinesEx(container, 1, GRAY);
     
+    const float font_size = 17;
+    const float title_size = 25;
+
     if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->cached == NULL) || (highlighted_channel->id[0] == '\0')) return;
 
     const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
@@ -3145,28 +3167,25 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
         DrawTextureEx(highlighted_channel->cached->thumbnail, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
     }
 
-    const Rectangle name_bounds = {
-        .x = container.x + dim.x + ui->padding,
-        .y = container.y,
-        .width = container.width - dim.x,
-        .height = container.height / 2.0f, 
+    const Vector2 title_pos = {
+        .x = container.x + dim.x + (ui->padding * 2),
+        .y = container.y + (container.height / 3.0f) - (title_size / 2.0f),
     };
 
-    DrawTextEx(ui->font, highlighted_channel->name, (Vector2){name_bounds.x + ui->padding, name_bounds.y + ui->padding}, 12, ui->spacing, BLACK);
+    DrawTextEx(ui->font, highlighted_channel->name, title_pos, title_size, ui->spacing, BLACK);
     
-    const Rectangle subtext_bounds = {
-        .x = container.x + dim.x + ui->padding,
-        .y = name_bounds.y + name_bounds.height,
-        .width = container.width - dim.x,
-        .height = container.height / 2.0f, 
+    const Vector2 sub_count_pos = {
+        .x = container.x + dim.x + (ui->padding * 2),
+        .y = container.y + container.height - MeasureTextEx(ui->font, highlighted_channel->subscriber_count, font_size, ui->spacing).y - ui->padding,
     };
 
-    DrawTextEx(ui->font, highlighted_channel->subscriber_count, (Vector2){subtext_bounds.x + ui->padding, subtext_bounds.y + ui->padding}, 12, ui->spacing, BLACK);
+    DrawTextEx(ui->font, highlighted_channel->subscriber_count, sub_count_pos, font_size, ui->spacing, BLACK);
 
     const float button_width = 75;
+    const float button_height = 25;
     const Rectangle subscribe_button_bounds = {
-        .x = container.x + dim.x + (container.width / 2.0f) - ui->padding,
-        .y = container.y + name_bounds.height,
+        .x = container.x + container.width - button_width - ui->padding,
+        .y = container.y + container.height - button_height - ui->padding,
         .width = button_width,
         .height = 25,
     };
@@ -3183,6 +3202,8 @@ typedef struct
 {
     Query query;
     TextureCacheEntry** texture_cache;
+    Connection* results_conn;
+    Connection* thumbnail_conn;
     cJSON* subscribed_channels_json;
     HighlightedChannel* channel;
     List* raw_thumbnail_queue;
@@ -3203,9 +3224,7 @@ void* parse_channel(void* args)
         return NULL;
     }
     
-    Connection* conn = &youtube_pool.connections[youtube_pool.current_conn]; 
-
-    HttpsRequest req = configure_post_request(targs->query, conn->host);
+    HttpsRequest req = configure_post_request(targs->query, targs->results_conn->host);
     if (valid_post_request(req) == false) {
         printf("parse_channel: invalid post request\n");
         if (req.payload) {
@@ -3215,7 +3234,7 @@ void* parse_channel(void* args)
         return NULL;
     }
 
-    cJSON* json = get_json_response(&req, ssl_ctx, conn);
+    cJSON* json = get_json_response(&req, ssl_ctx, targs->results_conn);
     if (json == NULL) {
         printf("parse_channel: 'targs' is null\n");
         if (req.payload) {
@@ -3298,6 +3317,7 @@ void* parse_channel(void* args)
             goto clean;
         }
 
+        thumb_args->conn = targs->thumbnail_conn;
         thumb_args->media_type = MEDIA_TYPE_CHANNEL;
         thumb_args->thumbnail_queue = targs->raw_thumbnail_queue;
         snprintf(thumb_args->id, sizeof(thumb_args->id), "%s", targs->channel->id);
@@ -3349,99 +3369,106 @@ bool like_video(cJSON* liked_videos_json, const SearchResult* liked_video)
 // disable all query elements if the internet is down
 // need to have some sort of timeout if they decide to turn wifi off before checking 
 
+void view_user_data(List* results, cJSON* user_data, char** continuation_token, const char* app_title, bool* load_flag, QueryType type)
+{
+    if ((results == NULL) || (user_data == NULL) || (continuation_token == NULL) || (app_title == NULL) || (load_flag == NULL)) return;
+
+    (*load_flag) = false;
+
+    if (*continuation_token) {
+        free(*continuation_token); (*continuation_token) = NULL;
+    }
+
+    pthread_mutex_lock(&results->mutex);
+    create_results_from_json(user_data, results, type, QUERY_ATTR_REPLACE, true);
+    pthread_mutex_unlock(&results->mutex);
+
+    SetWindowTitle(app_title);
+}
+
+// move top panel items together
+// move side panel items together
 int main()
 {
-    TextureCacheEntry* cached_thumbnails = NULL;
     List thumbnail_queue = list_init();
     List task_queue = list_init();
     List results = list_init();
-    pthread_t thread_pool[MAX_THREADS]; init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
+
+    TextureCache texture_cache = NULL;
+
+    pthread_t thread_pool[MAX_THREADS]; 
+    init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
     
-    ssl_ctx = SSL_CTX_new(TLS_client_method());
-    if (ssl_ctx == NULL) {
-        printf("error initalizing SSL_CTX object\n");
-        return 1;
-    } 
+    ConnectionPool youtube_pool = init_connection_pool("www.youtube.com");
+    ConnectionPool video_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO)); // playlists, videos, shorts, and live videos all share the same host
+    ConnectionPool channel_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL));
 
-    youtube_pool = init_connection_pool("www.youtube.com");
-    video_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO)); // playlists, videos, shorts, and live videos all share the same host
-    channel_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL));
-
-    cJSON* watch_history_json = file_exists(WATCH_HISTORY_FILE) ? 
-                                parse_json_file(WATCH_HISTORY_FILE) : 
-                                create_empty_array_object(WATCH_HISTORY_ARRAY);
-    
-    if (watch_history_json == NULL) {
-        printf("failed to create watched history json object\n");
-        goto cleanup;
-    }
-
-    cJSON* subscribed_channels_json = file_exists(SUBSCRIPTIONS_FILE) ?
-                                      parse_json_file(SUBSCRIPTIONS_FILE) : 
-                                      create_empty_array_object(SUBSCRIBED_CHANNELS_ARRAY);
-    
-    if (subscribed_channels_json == NULL) {
-        printf("failed to create subscribed channels json obj\n");
-        goto cleanup;
-    }
-
-    cJSON* liked_videos_json = file_exists(LIKED_VIDEOS_FILE) ? 
-                               parse_json_file(LIKED_VIDEOS_FILE) : 
-                               create_empty_array_object(LIKED_VIDEOS_ARRAY);
-
-    if (liked_videos_json == NULL) {
-        printf("failed to create liked videos json object\n");
-        goto cleanup;
-    }
-
-    // when true, the application starts the search process
-    bool search = false;
-    bool edit_mode = false;
-    QueryType last_search_type = -1;
-    char last_search_query[512] = {0};
-
-    Vector2 search_result_scrollbar_pos = { 10, 10 };
-
-    // the current_query that the user has constructed
-    Query query = {
-        .allow_youtube_shorts = true,
-        .string = "",
-        .media = MEDIA_TYPE_ANY,
-        .sort = SORT_TYPE_RELEVANCE,
-        .type = QUERY_TYPE_USER_INPUT,
-        .attr = QUERY_ATTR_REPLACE,
-    };
-
-    init_app();
-
-    Ui ui;
-    ui.font = GetFontDefault();
-    ui.padding = 5;
-    ui.spacing = 2;
-    ui.word_wrap = true;
-
-    Vector2 video_desc_scrollbar_pos = { 10, 10 };
-    
     bool load_video_information = false;
+    Vector2 description_scrollbar = {0};
     HighlightedVideo highlighted_video = {0};
-    
-    bool view_watch_history = false;
-    bool view_subscribed_channels = false;
-    bool view_liked_videos = false;
     
     bool subbed_to_channel = false;
     bool load_channel_information = false;
     HighlightedChannel highlighted_channel = {0};
+
+    Query query = {
+        .string = "",
+        .media = MEDIA_TYPE_ANY,
+        .sort = SORT_TYPE_RELEVANCE,
+        .attr = QUERY_ATTR_REPLACE,
+        .type = QUERY_TYPE_USER_INPUT,
+        .allow_youtube_shorts = true,
+    };
+
+    cJSON* liked_videos_json = file_exists(LIKED_VIDEOS_FILE) ? parse_json_file(LIKED_VIDEOS_FILE) : create_empty_array_object(LIKED_VIDEOS_ARRAY);
+    bool view_liked_videos = false;
+    
+    cJSON* watch_history_json = file_exists(WATCH_HISTORY_FILE) ? parse_json_file(WATCH_HISTORY_FILE) : create_empty_array_object(WATCH_HISTORY_ARRAY);
+    bool view_watch_history = false;
+    
+    cJSON* subscribed_channels_json = file_exists(SUBSCRIPTIONS_FILE) ? parse_json_file(SUBSCRIPTIONS_FILE) : create_empty_array_object(SUBSCRIBED_CHANNELS_ARRAY);
+    bool view_subscribed_channels = false;
+
+    if ((liked_videos_json == NULL) || (watch_history_json == NULL) || (subscribed_channels_json == NULL)) {
+        printf("CRITICAL: failed to create json object(s)\n");
+        goto cleanup;
+    }
+
+    ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if (ssl_ctx == NULL) {
+        printf("CRITICAL: 'ssl_ctx' is null'\n");
+        goto cleanup;
+    } 
+
+    bool show_filter_window = false;
+
+    bool text_box_focused = false;
+
+    bool launch_search = false;
+
+    QueryType last_search_type = -1;
+    char last_search_query[512] = {0};
+
+    Vector2 result_scrollbar = {0};
+
+    init_app();
+
+    Ui ui = {
+        .font = GetFontDefault(),
+        .padding = 5,
+        .spacing = 2,
+        .word_wrap = true,
+    };
     
     while (!WindowShouldClose())
     {
-        if (HASH_COUNT(cached_thumbnails) > 0) {
-            remove_expired_thumbnails(&cached_thumbnails);
+        if (HASH_COUNT(texture_cache) > 0) {
+            remove_expired_thumbnails(&texture_cache);
         }
 
         if (thumbnail_queue.count > 0) {
             pthread_mutex_lock(&thumbnail_queue.mutex);
-            process_thumbnail_queue(&thumbnail_queue, &cached_thumbnails);
+            process_thumbnail_queue(&thumbnail_queue, &texture_cache);
             pthread_mutex_unlock(&thumbnail_queue.mutex);
         }
 
@@ -3449,14 +3476,20 @@ int main()
             load_video_information = false;
 
             Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
-
-            if (queue_focused_video_task(query, &task_queue, conn, &highlighted_video) == false) {
-                printf("failed to queue focused video task\n");
+            HttpsRequest req = configure_post_request(query, conn->host);
+            if (valid_post_request(req)) {
+                FocusedInfoArgs* targs = init_focused_info_args(req, conn, &highlighted_video);
+                if (targs) {
+                    if (launch_task(&task_queue, targs, get_video_description) == false) {
+                        printf("failed to launch task: 'get_video_description'\n");
+                        free(targs); targs = NULL;
+                    }
+                }
             }
         }
 
-        if (search) {
-            search = false;
+        if (launch_search) {
+            launch_search = false;
 
             list_free(&thumbnail_queue); thumbnail_queue = list_init();
 
@@ -3476,6 +3509,7 @@ int main()
 
             targs->query = query;
             targs->search_results = &results;
+            targs->conn = &youtube_pool.connections[youtube_pool.current_conn];
 
             if (launch_task(&task_queue, targs, get_results_from_query) == false) {
                 printf("failed to launch task: 'get_results_from_query'\n");
@@ -3483,46 +3517,16 @@ int main()
             }
         }
 
+        if (view_liked_videos) {
+            view_user_data(&results, liked_videos_json, &continuation_token, "[Liked Videos] - metube", &view_liked_videos, QUERY_TYPE_VIEW_LIKED_VIDEOS);
+        }
+
         if (view_watch_history) {
-            view_watch_history = false;
-
-            if (continuation_token) {
-                free(continuation_token); continuation_token = NULL;
-            }
-
-            pthread_mutex_lock(&results.mutex);
-            create_results_from_json(watch_history_json, &results, QUERY_TYPE_WATCH_HISTORY, QUERY_ATTR_REPLACE, true);
-            pthread_mutex_unlock(&results.mutex);
-       
-            SetWindowTitle("[History] - metube");
+            view_user_data(&results, watch_history_json, &continuation_token, "[History] - metube", &view_watch_history, QUERY_TYPE_WATCH_HISTORY);
         }
 
         if (view_subscribed_channels) {
-            view_subscribed_channels = false;
-
-            if (continuation_token) {
-                free(continuation_token); continuation_token = NULL;
-            }
-
-            pthread_mutex_lock(&results.mutex);
-            create_results_from_json(subscribed_channels_json, &results, QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS, QUERY_ATTR_REPLACE, false);
-            pthread_mutex_unlock(&results.mutex);
-
-            SetWindowTitle("[Subscriptions] - metube");
-        }
-
-        if (view_liked_videos) {
-            view_liked_videos = false;
-
-            if (continuation_token) {
-                free(continuation_token); continuation_token = NULL;
-            }
-
-            pthread_mutex_lock(&results.mutex);
-            create_results_from_json(liked_videos_json, &results, QUERY_TYPE_VIEW_LIKED_VIDEOS, QUERY_ATTR_REPLACE, true);
-            pthread_mutex_unlock(&results.mutex);
-
-            SetWindowTitle("[Liked Videos] - metube");
+            view_user_data(&results, subscribed_channels_json, &continuation_token, "[Subscriptions] - metube", &view_subscribed_channels, QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS);
         }
 
         if (load_channel_information) {
@@ -3534,10 +3538,12 @@ int main()
                 targs->query = query;
                 targs->results = &results;
                 targs->channel = &highlighted_channel;
-                targs->texture_cache = &cached_thumbnails;
+                targs->texture_cache = &texture_cache;
                 targs->subbed_to_channel = &subbed_to_channel;
                 targs->raw_thumbnail_queue = &thumbnail_queue;
                 targs->subscribed_channels_json = subscribed_channels_json;
+                targs->results_conn = &youtube_pool.connections[youtube_pool.current_conn];
+                targs->thumbnail_conn = &channel_thumbnail_pool.connections[channel_thumbnail_pool.current_conn];
                 
                 if (launch_task(&task_queue, targs, parse_channel) == false) {
                     printf("failed to launch parse_channel task\n");
@@ -3550,80 +3556,120 @@ int main()
 
             ClearBackground(RAYWHITE);
 
-            const Rectangle search_bar_bounds = {
-                .x = ui.padding, 
-                .y = ui.padding, 
-                .width = 350, 
-                .height = 25 
-            };
-
-            const Rectangle search_button_bounds = {
-                .x = (search_bar_bounds.x + search_bar_bounds.width + ui.padding), 
-                .y = search_bar_bounds.y, 
-                .width = 50, 
-                .height = 25
-            };
-
-            // edit_mode toggles when search box is focused (T) or not (F)
-            int text_box_status;
-            if ((text_box_status = GuiTextBox(search_bar_bounds, query.string, sizeof(query.string), edit_mode))) {
-                edit_mode = !edit_mode;
-            }
-
-            bool enter_key_pressed = text_box_status == 2;
-
-            if (GuiButton(search_button_bounds, "Search") || enter_key_pressed) {
-                if (trim_whitespace(query.string) > 0) {
-                    search = true;
-                    query.attr = QUERY_ATTR_REPLACE;
-                    query.type = QUERY_TYPE_USER_INPUT;
-                }
-            }
-
-            const Rectangle trending_button_bounds = {
-                .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
+            const Rectangle SIDE_PANEL = {
+                .x = ui.padding,
                 .y = ui.padding,
-                .width = 50,
+                .width = 375,
+                .height = GetScreenHeight() - (ui.padding * 2),
+            };
+
+            const Rectangle subscriptions_button_bounds = {
+                .x = SIDE_PANEL.x,
+                .y = SIDE_PANEL.y,
+                .width = 20,
                 .height = 25,
             };
 
-            if (GuiButton(trending_button_bounds, "Trending")) {
-                search = true;
+            if (GuiButton(subscriptions_button_bounds, "F")) {
+                view_subscribed_channels = true;
                 query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_TRENDING;
+                query.type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
             }
 
-            const Rectangle related_videos_button_bounds = {
-                .x = trending_button_bounds.x + trending_button_bounds.width + ui.padding,
-                .y = ui.padding,
-                .width = 85,
+            const Rectangle search_bar_bounds = {
+                .x = subscriptions_button_bounds.x + subscriptions_button_bounds.width + ui.padding, 
+                .y = SIDE_PANEL.y, 
+                .width = 325, 
+                .height = 25 
+            };
+
+            if (GuiTextBox(search_bar_bounds, query.string, sizeof(query.string), text_box_focused)) {
+                text_box_focused = !text_box_focused;
+            }
+
+            const Rectangle search_button_bounds = {
+                .x = search_bar_bounds.x + search_bar_bounds.width + ui.padding, 
+                .y = SIDE_PANEL.y, 
+                .width = 25, 
                 .height = 25
             };
 
+            if (GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) {
+                if (trim_whitespace(query.string) > 0) {
+                    launch_search = true;
+                    query.attr = QUERY_ATTR_REPLACE;
+                    query.type = QUERY_TYPE_USER_INPUT;
+                    SetWindowTitle(TextFormat("[%s(loading)] - metube", query.string));
+                }
+            }
+
+            const Rectangle filter_button_bounds = {
+                .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
+                .y = SIDE_PANEL.y,
+                .width = 25,
+                .height = 25,
+            };
+
+            if (GuiButton(filter_button_bounds, "Fil")) {
+                show_filter_window = !show_filter_window;
+            }
+
+            const Rectangle filter_window_bounds = {
+                    .x = SIDE_PANEL.x, 
+                    .y = search_bar_bounds.y + search_bar_bounds.height + ui.padding, 
+                    .width = subscriptions_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
+                    .height = 75
+            };
+
+            if (show_filter_window) {
+                draw_filter_window(filter_window_bounds, ui, &query);
+            }
+
+            const Rectangle TOP_PANEL = {
+                .x = filter_button_bounds.x + filter_button_bounds.width + ui.padding,
+                .y = ui.padding,
+                .width = GetScreenWidth() - TOP_PANEL.x - ui.padding,
+                .height = 25, 
+            };
+
+            const float button_width = TOP_PANEL.width / 3.0f;
+
+            const Rectangle play_video_bounds = {
+                .x = TOP_PANEL.x,
+                .y = TOP_PANEL.y,
+                .width = button_width,
+                .height = TOP_PANEL.height,
+            };
+
+            if (GuiButton(play_video_bounds, "Play Video")) {
+                // TODO
+            } 
+
+            const Rectangle related_videos_button_bounds = {
+                .x = play_video_bounds.x + play_video_bounds.width + ui.padding,
+                .y = TOP_PANEL.y,
+                .width = button_width,
+                .height = TOP_PANEL.height,
+            };
+            
             if (highlighted_video.info.id[0] == '\0') {
                 GuiSetState(STATE_DISABLED);
             }
-            
+
             if (GuiButton(related_videos_button_bounds, "Related Videos")) {
-                search = true;
+                launch_search = true;
                 query.attr = QUERY_ATTR_REPLACE;
                 query.type = QUERY_TYPE_RELATED;
                 strncpy(query.focused_id, highlighted_video.info.id, sizeof(query.focused_id) - 1);
                 query.focused_id[sizeof(query.focused_id) - 1] = '\0';
                 SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", query.focused_id));                
             }
-
-            GuiSetState(STATE_NORMAL);
-
-            if (highlighted_video.info.id[0] == '\0') {
-                GuiSetState(STATE_DISABLED);
-            }
-
+            
             const Rectangle users_videos_button_bounds = {
                 .x = related_videos_button_bounds.x + related_videos_button_bounds.width + ui.padding,
-                .y = ui.padding,
-                .width = 85,
-                .height = 25,
+                .y = TOP_PANEL.y,
+                .width = button_width - ui.padding,
+                .height = TOP_PANEL.height,
             };
 
             if (GuiButton(users_videos_button_bounds, "User's Videos")) {
@@ -3639,102 +3685,92 @@ int main()
 
             GuiSetState(STATE_NORMAL);
 
-            const Rectangle watch_history_button = {
-                .x = users_videos_button_bounds.x + users_videos_button_bounds.width + ui.padding,
-                .y = ui.padding,
-                .width = 80,
-                .height = 25,
-            };
+            // if (GuiButton(trending_button_bounds, "Trending")) {
+            //     launch_search = true;
+            //     query.attr = QUERY_ATTR_REPLACE;
+            //     query.type = QUERY_TYPE_TRENDING;
+            //     SetWindowTitle("[Trending] - metube");
+            // }
 
-            if (GuiButton(watch_history_button, "Watch History")) {
-                view_watch_history = true;
-                query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_WATCH_HISTORY;
-            }
+           
+            // GuiSetState(STATE_NORMAL);
 
-            const Rectangle view_subscriptions_button = {
-                .x = watch_history_button.x + watch_history_button.width + ui.padding,
-                .y = ui.padding,
-                .width = 80,
-                .height = 25,
-            };
+            // const Rectangle watch_history_button = {
+            //     .x = users_videos_button_bounds.x + users_videos_button_bounds.width + ui.padding,
+            //     .y = ui.padding,
+            //     .width = 80,
+            //     .height = 25,
+            // };
 
-            if (GuiButton(view_subscriptions_button, "Subscriptions")) {
-                view_subscribed_channels = true;
-                query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
-            }
+            // if (GuiButton(watch_history_button, "Watch History")) {
+            //     view_watch_history = true;
+            //     query.attr = QUERY_ATTR_REPLACE;
+            //     query.type = QUERY_TYPE_WATCH_HISTORY;
+            // }
 
-            const Rectangle like_video_button_bounds = {
-                .x = view_subscriptions_button.x + view_subscriptions_button.width + ui.padding,
-                .y = ui.padding,
-                .width = 30,
-                .height = 25,
-            };
+            // const Rectangle view_subscriptions_button = {
+            //     .x = watch_history_button.x + watch_history_button.width + ui.padding,
+            //     .y = ui.padding,
+            //     .width = 80,
+            //     .height = 25,
+            // };
 
-            if (highlighted_video.info.id[0] == '\0') GuiSetState(STATE_DISABLED);
+            // const Rectangle like_video_button_bounds = {
+            //     .x = view_subscriptions_button.x + view_subscriptions_button.width + ui.padding,
+            //     .y = ui.padding,
+            //     .width = 30,
+            //     .height = 25,
+            // };
 
-            if (GuiButton(like_video_button_bounds, "Like")) {
-                if (like_video(liked_videos_json, &highlighted_video.info) == false) {
-                    printf("failed to like %s\n", highlighted_video.info.title);
-                }
-            }
+            // if (highlighted_video.info.id[0] == '\0') GuiSetState(STATE_DISABLED);
 
-            GuiSetState(STATE_NORMAL);
+            // if (GuiButton(like_video_button_bounds, "Like")) {
+            //     if (like_video(liked_videos_json, &highlighted_video.info) == false) {
+            //         printf("failed to like %s\n", highlighted_video.info.title);
+            //     }
+            // }
 
-            const Rectangle view_liked_videos_button_bounds = {
-                .x = like_video_button_bounds.x + like_video_button_bounds.width + ui.padding,
-                .y = ui.padding,
-                .width = 70,
-                .height = 25
-            };
+            // GuiSetState(STATE_NORMAL);
 
-            if (GuiButton(view_liked_videos_button_bounds, "Liked Videos")) {
-                view_liked_videos = true;
-            }
+            // const Rectangle view_liked_videos_button_bounds = {
+            //     .x = like_video_button_bounds.x + like_video_button_bounds.width + ui.padding,
+            //     .y = ui.padding,
+            //     .width = 70,
+            //     .height = 25
+            // };
 
-            const Rectangle filter_window_bounds = {
-                .x = ui.padding, 
-                .y = search_button_bounds.y + search_button_bounds.height + ui.padding, 
-                .width = search_bar_bounds.width, 
-                .height = 75
-            };
-
-            draw_filter_window(&query, filter_window_bounds, ui.font, ui.padding);
+            // if (GuiButton(view_liked_videos_button_bounds, "Liked Videos")) {
+            //     view_liked_videos = true;
+            // }
 
             const float focused_channel_min_y = 170;
+            
             const float focused_channel_height = 80;
             const Rectangle focused_channel_bounds = {
-                .x = ui.padding,
+                .x = SIDE_PANEL.x,
                 .y = fmax(focused_channel_min_y, GetScreenHeight() - focused_channel_height - ui.padding),
+                .width = subscriptions_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
                 .height = focused_channel_height,
-                .width = 350,
             };
 
             if ((highlighted_channel.thumbnail_loaded == false) && (highlighted_channel.thumbnail_path[0] != '\0')) { 
                 highlighted_channel.thumbnail_loaded = true;
-                highlighted_channel.cached = find_cached_thumbnail(highlighted_channel.id, &cached_thumbnails);
+                highlighted_channel.cached = find_cached_thumbnail(highlighted_channel.id, &texture_cache);
             }
 
             draw_highlighted_channel(focused_channel_bounds, &ui, subscribed_channels_json, &highlighted_channel, &subbed_to_channel);
 
             const Rectangle scroll_window_bounds = { 
-                .x = ui.padding, 
-                .y = search_bar_bounds.y + search_bar_bounds.height + filter_window_bounds.height + (ui.padding * 2), 
-                .width = search_bar_bounds.width, 
+                .x = SIDE_PANEL.x, 
+                .y = search_bar_bounds.y + search_bar_bounds.height + (show_filter_window ? (filter_window_bounds.height + ui.padding) : 0) + ui.padding, 
+                .width = focused_channel_bounds.width, 
                 .height = GetScreenHeight() - scroll_window_bounds.y - focused_channel_height - (ui.padding * 2), 
             };
 
-            pthread_mutex_lock(&results.mutex); 
-
             const bool load_more_button_visible = (continuation_token) && (continuation_token[0] != '\0');
-            
             const size_t results_len = results.count + load_more_button_visible;
 
-            pthread_mutex_unlock(&results.mutex); 
-
             const int container_height = 80;
-
             const Rectangle content_area = {
                 .x = scroll_window_bounds.x,
                 .y = scroll_window_bounds.y,
@@ -3745,7 +3781,7 @@ int main()
             const int SCROLLBAR_WIDTH = 13;
             const bool vertical_scrollbar_visible = content_area.height > scroll_window_bounds.height;
 
-            GuiScrollPanel(scroll_window_bounds, NULL, content_area, &search_result_scrollbar_pos, NULL, true);
+            GuiScrollPanel(scroll_window_bounds, NULL, content_area, &result_scrollbar, NULL, true);
 
             const Rectangle scissor_rect = padded_rectangle(1, scroll_window_bounds);
 
@@ -3754,9 +3790,9 @@ int main()
             int i = 0;
             float container_y = scroll_window_bounds.y;
             Rectangle container = { 
-                .x = ui.padding, 
+                .x = scroll_window_bounds.x, 
                 .y = container_y, 
-                .width = scroll_window_bounds.width - (vertical_scrollbar_visible ? SCROLLBAR_WIDTH : 0),
+                .width = scroll_window_bounds.width - (vertical_scrollbar_visible ? SCROLLBAR_WIDTH: 0),
                 .height = container_height 
             };
 
@@ -3765,21 +3801,18 @@ int main()
             for (Node* node = results.head; node; node = node->next, i++, container_y += container_height) {
                 SearchResult* search_result = (SearchResult*) node->content;
 
-                container.y = container_y + search_result_scrollbar_pos.y;
+                container.y = container_y + result_scrollbar.y;
 
                 if (CheckCollisionRecs(scissor_rect, container) == false) {
                     continue;
                 }
 
                 const bool result_is_highlighted = strcmp(search_result->id, highlighted_video.info.id) == 0;
-
-                const Color container_color = result_is_highlighted ? 
-                                              BLUE :
-                                              ((i % 2) ? WHITE : RAYWHITE);
+                const Color container_color = result_is_highlighted ? BLUE : ((i % 2) ? WHITE : RAYWHITE);
 
                 Texture2D thumbnail = (Texture2D){0};
 
-                TextureCacheEntry *cached = find_cached_thumbnail(search_result->id, &cached_thumbnails);
+                TextureCacheEntry* cached = find_cached_thumbnail(search_result->id, &texture_cache);
                 if (cached_texture_is_ready(cached)) {
                     thumbnail = cached->thumbnail;
                     start_timer(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
@@ -3788,9 +3821,13 @@ int main()
                 else if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
                     search_result->thumbnail_loaded = true;
 
-                    if (queue_thumbnail_load(search_result->id, search_result->thumbnail_path, &task_queue, &thumbnail_queue, search_result->media_type)) {
-                        ConnectionPool* pool = media_type_to_pool(search_result->media_type);
-                        cycle_connection(pool);
+                    ConnectionPool* pool = search_result->media_type == MEDIA_TYPE_CHANNEL ? &channel_thumbnail_pool : &video_thumbnail_pool;
+                    if (pool) {
+                        Connection* conn = &pool->connections[pool->current_conn];
+                        
+                        if (queue_thumbnail_load(&task_queue, &thumbnail_queue, conn, search_result->id, search_result->thumbnail_path, search_result->media_type) == false) {
+                            cycle_connection(pool);
+                        }
                     }
                 }
 
@@ -3818,7 +3855,7 @@ int main()
                             }
                             break;
                         case MEDIA_TYPE_PLAYLIST:
-                            search = true;
+                            launch_search = true;
                             query.type = QUERY_TYPE_VIEW_PLAYLIST;
                             SetWindowTitle(TextFormat("[Playlist:%s(loading)] - metube", query.focused_id));
                             break;
@@ -3836,32 +3873,30 @@ int main()
 
             pthread_mutex_unlock(&results.mutex);
 
-            const Rectangle load_more_button_bounds = {
-                .x = container.x,
-                .y = container.y + container_height,
-                .width = container.width,
-                .height = container_height,
-            };
+            // const Rectangle load_more_button_bounds = {
+            //     .x = container.x,
+            //     .y = container.y + container_height,
+            //     .width = container.width,
+            //     .height = container_height,
+            // };
 
-            if (load_more_button_visible && GuiButton(load_more_button_bounds, "LOAD MORE")) {
-                if (last_search_type == QUERY_TYPE_VIEW_CHANNEL) load_channel_information = true;
-                else search = true;
-                query.type = last_search_type;
-                query.attr = QUERTY_ATTR_APPEND;
-            }
+            // if (load_more_button_visible && GuiButton(load_more_button_bounds, "LOAD MORE")) {
+            //     if (last_search_type == QUERY_TYPE_VIEW_CHANNEL) load_channel_information = true;
+            //     else launch_search = true;
+            //     query.type = last_search_type;
+            //     query.attr = QUERTY_ATTR_APPEND;
+            // }
             
             EndScissorMode();
 
-            const Rectangle focused_video_bounds = {
-                .x = scroll_window_bounds.x + scroll_window_bounds.width + ui.padding,
-                .y = filter_window_bounds.y,
-                .width = GetScreenWidth() - focused_video_bounds.x,
-                .height = GetScreenHeight() - focused_video_bounds.y - ui.padding,
-            };
+            // const Rectangle focused_video_bounds = {
+            //     .x = scroll_window_bounds.x + scroll_window_bounds.width + ui.padding,
+            //     .y = filter_window_bounds.y,
+            //     .width = GetScreenWidth() - focused_video_bounds.x,
+            //     .height = GetScreenHeight() - focused_video_bounds.y - ui.padding,
+            // };
             
-            draw_highlighted_video(focused_video_bounds, ui, &video_desc_scrollbar_pos, &highlighted_video);
-
-            DrawFPS(GetScreenWidth() - 75, ui.padding);
+            // draw_highlighted_video(focused_video_bounds, ui, &description_scrollbar, &highlighted_video);
 
         EndDrawing();
     }
@@ -3877,7 +3912,7 @@ int main()
         UnloadFont(ui.font);
         list_free(&results);
         list_free(&thumbnail_queue);
-        free_cached_textures(&cached_thumbnails);
+        free_cached_textures(&texture_cache);
         
         if (watch_history_json) {
             write_json_file(watch_history_json, WATCH_HISTORY_FILE);

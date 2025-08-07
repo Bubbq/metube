@@ -2615,7 +2615,7 @@ int GuiTextBox(Rectangle bounds, char *text, int bufferSize, bool editMode)
             if (!multiline && IsKeyPressed(KEY_ENTER))
             {
                 textBoxCursorIndex = 0;     // GLOBAL: Reset the shared cursor index
-                result = 2;
+                result = 1  ;
             }
 
             else if (!CheckCollisionPointRec(mousePosition, bounds) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
