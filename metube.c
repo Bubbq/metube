@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "buffer.h"
+
 #include "uthash.h"
 #include "raylib.h"
 #include "arpa/inet.h"
@@ -249,54 +251,6 @@ bool timer_done(Timer timer)
     const double elapsed = GetTime() - timer.start_time;
 	return elapsed >= timer.duration; 
 } 
-
-typedef struct
-{
-    size_t size;
-    char* data;
-} Buffer;
-
-Buffer buffer_init()
-{
-    Buffer buffer;
-    buffer.data = NULL;
-    buffer.size = 0;
-    return buffer;
-}
-
-void buffer_write_data(Buffer *buffer, const char* data, const size_t data_size)
-{
-    const size_t new_size = buffer->size + data_size + 1;
-    
-    char *new_data = realloc(buffer->data, new_size);
-    if (!new_data) {
-        printf("buffer_write_data: failed to reallocate %zu bytes\n", new_size);
-        return;
-    }
-
-    buffer->data = new_data;
-    memcpy(&buffer->data[buffer->size], data, data_size);
-    buffer->size += data_size;
-    buffer->data[buffer->size] = '\0';
-}
-
-bool buffer_ready(const Buffer *buffer)
-{
-    if (!buffer){
-        printf("buffer_ready: 'buffer' arg is NULL\n");
-        return false;
-    }
-    
-    return (buffer->size > 0) && (buffer->data != NULL);
-}
-
-void buffer_free(Buffer *buffer)
-{
-    if (buffer == NULL) return;
-    if (buffer->data) free(buffer->data);
-    buffer->data = NULL;
-    buffer->size = 0;
-}
 
 typedef enum
 {
@@ -576,7 +530,7 @@ RawThumbnail* raw_thumbnail_init()
 void raw_thumbnail_free(RawThumbnail* raw_thumbnail)
 {
     if (raw_thumbnail == NULL) return;
-    if (buffer_ready(&raw_thumbnail->data)) buffer_free(&raw_thumbnail->data);
+    if (buffer_is_ready(&raw_thumbnail->data)) buffer_free(&raw_thumbnail->data);
     free(raw_thumbnail); raw_thumbnail = NULL;
 }
 
@@ -1996,7 +1950,7 @@ void* load_thumbnail(void* args)
     }
 
     Buffer res = send_https_request(req, ssl_ctx, targs->conn);
-    if (buffer_ready(&res) == false) {
+    if (buffer_is_ready(&res) == false) {
         printf("load_thumbnail: thumbnail response is invalid\n");
         goto clean;
     }
@@ -2238,7 +2192,7 @@ cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* 
     }
 
     Buffer res = send_https_request((*req), ssl_ctx, conn);
-    if (buffer_ready(&res) == false) {
+    if (buffer_is_ready(&res) == false) {
         printf("get_json_response: invalid response recived\n");
         return NULL;
     }
@@ -2316,7 +2270,7 @@ void init_app()
 
 Texture2D load_texture_from_memory(const Buffer buffer, const float width, const float height)
 {
-    if (!buffer_ready(&buffer)) {
+    if (!buffer_is_ready(&buffer)) {
         printf("load_texture_from_memory: buffer obj passed is invalid\n");
         return (Texture2D){0};
     }
@@ -2676,7 +2630,7 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
 
 void process_raw_thumbnail(RawThumbnail* raw_thumbnail, TextureCacheEntry** hashtable)
 {   
-    if ((raw_thumbnail == NULL) || (buffer_ready(&raw_thumbnail->data) == false)) return;
+    if ((raw_thumbnail == NULL) || (buffer_is_ready(&raw_thumbnail->data) == false)) return;
     
     const Vector2 dimension = media_type_to_thumbnail_dim(raw_thumbnail->media_type);
 
@@ -2894,7 +2848,7 @@ void* get_video_description(void* args)
     }
 
     res = send_https_request(targs->req, ssl_ctx, targs->conn); 
-    if (buffer_ready(&res) == false) {
+    if (buffer_is_ready(&res) == false) {
         printf("get_video_description: invaild https response\n");
         goto cleanup;
     }
@@ -2922,7 +2876,7 @@ void* get_video_description(void* args)
 
     cleanup:
         if (targs->req.payload) free(targs->req.payload);
-        if (buffer_ready(&res)) buffer_free(&res);
+        if (buffer_is_ready(&res)) buffer_free(&res);
         if (json) cJSON_Delete(json);
         if (targs) free(targs);
         return NULL;
@@ -3386,9 +3340,8 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-// goals for today
-    // dont search for cached textures every frame, just assign it once!
-
+// no views bug 
+ 
 int main()
 {
     List thumbnail_queue = list_init();
