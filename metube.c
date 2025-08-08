@@ -390,10 +390,10 @@ char* sort_type_to_search_param(const SortType sort_type)
 char* sort_type_to_text(const SortType sort_type)
 {
     switch (sort_type) {
-        case SORT_TYPE_RELEVANCE: return "Relevence";
-        case SORT_TYPE_UPLOAD_DATE: return "Upload Date";
-        case SORT_TYPE_VIEW_COUNT: return "Views"; 
-        case SORT_TYPE_RATING: return "Rating";
+        case SORT_TYPE_RELEVANCE: return "RELEVENCE";
+        case SORT_TYPE_UPLOAD_DATE: return "UPLOAD DATE";
+        case SORT_TYPE_VIEW_COUNT: return "VIEWS"; 
+        case SORT_TYPE_RATING: return "RATING";
         default:
             printf("sort_type_to_text: passed SortType is invalid\n");
             return NULL;
@@ -2543,7 +2543,7 @@ void draw_thumbnail_subtext(const Rectangle container, Ui ui, const Color text_c
 bool draw_toggle_filter(const Rectangle container, const Ui ui, const char* label_text, const char* value_text)
 {
     const Color text_color = BLACK;
-    const int font_size = 12;
+    const int font_size = 10;
 
     const char* button_text = "SWITCH";
     const float button_width = 50;
@@ -2579,12 +2579,6 @@ void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
 {
     DrawRectangleLinesEx(container, 1, GRAY);
                 
-    const int font_size = 12;
-
-    const float button_width = 50.0;
-    const float button_height = 17.5;
-    const char* button_text = "Switch";
-
     const Rectangle sort_type_bounds = {
         .x = container.x,
         .y = container.y,
@@ -3364,11 +3358,6 @@ bool like_video(cJSON* liked_videos_json, const SearchResult* liked_video)
     return true;
 }
 
-// press 'r' to update connection status rather than checking every time
-// update the title
-// disable all query elements if the internet is down
-// need to have some sort of timeout if they decide to turn wifi off before checking 
-
 void view_user_data(List* results, cJSON* user_data, char** continuation_token, const char* app_title, bool* load_flag, QueryType type)
 {
     if ((results == NULL) || (user_data == NULL) || (continuation_token == NULL) || (app_title == NULL) || (load_flag == NULL)) return;
@@ -3386,8 +3375,145 @@ void view_user_data(List* results, cJSON* user_data, char** continuation_token, 
     SetWindowTitle(app_title);
 }
 
-// move top panel items together
-// move side panel items together
+void draw_top_right_panel(const Rectangle container, Query* query, HighlightedVideo* selected_video, cJSON* liked_video_data, bool* launch_search, bool* load_channel_info)
+{
+    const int padding = 5;
+
+    const int nbuttons = 4;
+    const int min_button_width = 5;
+    const float button_width = (container.width - (padding * (nbuttons - 1))) / nbuttons; 
+
+    const Rectangle play_video_button_bounds = {
+        .x = container.x,
+        .y = container.y,
+        .width = fmax(min_button_width, button_width),
+        .height = container.height,
+    };
+
+    if (selected_video->info.id[0] == '\0') GuiSetState(STATE_DISABLED);
+
+    if (GuiButton(play_video_button_bounds, "Play Video")) {
+        // TODO
+    } 
+    
+    const Rectangle like_video_button_bounds = {
+        .x = play_video_button_bounds.x + play_video_button_bounds.width + padding,
+        .y = padding,
+        .width = fmax(min_button_width, button_width),
+        .height = container.height,
+    };
+
+    if (GuiButton(like_video_button_bounds, "Like Video")) {
+        if (like_video(liked_video_data, &selected_video->info) == false) {
+            printf("failed to like %s\n", selected_video->info.title);
+        }
+    }
+    const Rectangle related_videos_button_bounds = {
+        .x = like_video_button_bounds.x + like_video_button_bounds.width + padding,
+        .y = container.y,
+        .width = fmax(min_button_width, button_width),
+        .height = container.height,
+    };
+
+    if (GuiButton(related_videos_button_bounds, "Related Videos")) {
+        *launch_search = true;
+        query->attr = QUERY_ATTR_REPLACE;
+        query->type = QUERY_TYPE_RELATED;
+        strncpy(query->focused_id, selected_video->info.id, sizeof(query->focused_id) - 1);
+        query->focused_id[sizeof(query->focused_id) - 1] = '\0';
+        SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", query->focused_id));                
+    }
+    
+    const Rectangle users_videos_button_bounds = {
+        .x = related_videos_button_bounds.x + related_videos_button_bounds.width + padding,
+        .y = container.y,
+        .width = fmax(min_button_width, button_width),
+        .height = container.height,
+    };
+
+    if (GuiButton(users_videos_button_bounds, "User's Videos")) {
+        *load_channel_info = true;
+        query->attr = QUERY_ATTR_REPLACE;
+        query->type = QUERY_TYPE_VIEW_CHANNEL;
+
+        strncpy(query->focused_id, selected_video->info.authorId, sizeof(query->focused_id) - 1);
+        query->focused_id[sizeof(query->focused_id) - 1] = '\0';
+        
+        SetWindowTitle(TextFormat("[User %s Videos(loading)] - metube", query->focused_id));
+    }
+
+    GuiSetState(STATE_NORMAL);
+}
+
+void draw_bottom_right_panel(const Rectangle container, Query* query, bool* view_subscribed_channels, bool* view_liked_videos, bool* view_watch_history)
+{
+    const int padding = 5;
+    const int nbuttons = 3;
+    
+    const int min_button_width = 5;
+    const float button_width = (container.width - (padding * (nbuttons - 1))) / nbuttons;
+
+    const Rectangle subscriptions_button_bounds = {
+        .x = container.x,
+        .y = container.y,
+        .width = fmax(min_button_width, button_width),
+        .height = container.height,
+    };
+
+    if (GuiButton(subscriptions_button_bounds, "Subscribed Channels")) {
+        *view_subscribed_channels = true;
+        query->attr = QUERY_ATTR_REPLACE;
+        query->type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
+    }
+
+    const Rectangle liked_videos_button_bounds = {
+        .x = subscriptions_button_bounds.x + subscriptions_button_bounds.width + padding,
+        .y = container.y,
+        .width = fmax(min_button_width, button_width),
+        .height = container.height,
+    };
+
+    if (GuiButton(liked_videos_button_bounds, "Liked Videos")) {
+        *view_liked_videos = true;
+    }
+    
+    const Rectangle watch_history_button_bounds = {
+        .x = liked_videos_button_bounds.x + liked_videos_button_bounds.width + padding,
+        .y = container.y,
+        .width = fmax(min_button_width, button_width),
+        .height = container.height,
+    };
+
+    if (GuiButton(watch_history_button_bounds, "Watch History")) {
+        *view_watch_history = true;
+        query->attr = QUERY_ATTR_REPLACE;
+        query->type = QUERY_TYPE_WATCH_HISTORY;
+    }
+}
+
+void draw_load_more_button(const Rectangle container, const Font font, Query* query, QueryType last_query, bool* load_more)
+{
+    const int spacing = 2;
+    const int font_size = 50;
+    const Color text_color = BLACK;
+    const char* text = "<< LOAD MORE >>";
+    const Vector2 text_dimensions = MeasureTextEx(font, text, font_size, spacing);
+
+    const Vector2 text_pos = {
+        .x = container.x + ((container.width - text_dimensions.x) / 2.0f),
+        .y = container.y + (text_dimensions.y / 2.0f)
+    };
+
+    DrawTextEx(font, text, text_pos, font_size, spacing, text_color);
+    if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
+        (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
+        *load_more = true;
+        query->type = last_query;
+        query->attr = QUERTY_ATTR_APPEND;
+        SetWindowTitle("[Appending] - metube");
+    }
+}
+
 int main()
 {
     List thumbnail_queue = list_init();
@@ -3556,31 +3682,27 @@ int main()
 
             ClearBackground(RAYWHITE);
 
-            const Rectangle SIDE_PANEL = {
+            const float BAR_HEIGHT = 25.0;
+
+            const Rectangle trending_button_bounds = {
                 .x = ui.padding,
                 .y = ui.padding,
-                .width = 375,
-                .height = GetScreenHeight() - (ui.padding * 2),
-            };
-
-            const Rectangle subscriptions_button_bounds = {
-                .x = SIDE_PANEL.x,
-                .y = SIDE_PANEL.y,
                 .width = 20,
-                .height = 25,
+                .height = BAR_HEIGHT,
             };
 
-            if (GuiButton(subscriptions_button_bounds, "F")) {
-                view_subscribed_channels = true;
+            if (GuiButton(trending_button_bounds, "T")) {
+                launch_search = true;
                 query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
+                query.type = QUERY_TYPE_TRENDING;
+                SetWindowTitle("[Trending] - metube");
             }
 
             const Rectangle search_bar_bounds = {
-                .x = subscriptions_button_bounds.x + subscriptions_button_bounds.width + ui.padding, 
-                .y = SIDE_PANEL.y, 
+                .x = trending_button_bounds.x + trending_button_bounds.width + ui.padding, 
+                .y = ui.padding, 
                 .width = 325, 
-                .height = 25 
+                .height = BAR_HEIGHT 
             };
 
             if (GuiTextBox(search_bar_bounds, query.string, sizeof(query.string), text_box_focused)) {
@@ -3589,9 +3711,9 @@ int main()
 
             const Rectangle search_button_bounds = {
                 .x = search_bar_bounds.x + search_bar_bounds.width + ui.padding, 
-                .y = SIDE_PANEL.y, 
+                .y = ui.padding, 
                 .width = 25, 
-                .height = 25
+                .height = BAR_HEIGHT
             };
 
             if (GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) {
@@ -3605,9 +3727,9 @@ int main()
 
             const Rectangle filter_button_bounds = {
                 .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
-                .y = SIDE_PANEL.y,
+                .y = ui.padding,
                 .width = 25,
-                .height = 25,
+                .height = BAR_HEIGHT,
             };
 
             if (GuiButton(filter_button_bounds, "Fil")) {
@@ -3615,153 +3737,26 @@ int main()
             }
 
             const Rectangle filter_window_bounds = {
-                    .x = SIDE_PANEL.x, 
-                    .y = search_bar_bounds.y + search_bar_bounds.height + ui.padding, 
-                    .width = subscriptions_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
+                    .x = ui.padding,
+                    .y = BAR_HEIGHT + (ui.padding * 2), 
+                    .width = trending_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
                     .height = 75
             };
 
             if (show_filter_window) {
                 draw_filter_window(filter_window_bounds, ui, &query);
             }
-
-            const Rectangle TOP_PANEL = {
-                .x = filter_button_bounds.x + filter_button_bounds.width + ui.padding,
-                .y = ui.padding,
-                .width = GetScreenWidth() - TOP_PANEL.x - ui.padding,
-                .height = 25, 
-            };
-
-            const float button_width = TOP_PANEL.width / 3.0f;
-
-            const Rectangle play_video_bounds = {
-                .x = TOP_PANEL.x,
-                .y = TOP_PANEL.y,
-                .width = button_width,
-                .height = TOP_PANEL.height,
-            };
-
-            if (GuiButton(play_video_bounds, "Play Video")) {
-                // TODO
-            } 
-
-            const Rectangle related_videos_button_bounds = {
-                .x = play_video_bounds.x + play_video_bounds.width + ui.padding,
-                .y = TOP_PANEL.y,
-                .width = button_width,
-                .height = TOP_PANEL.height,
-            };
-            
-            if (highlighted_video.info.id[0] == '\0') {
-                GuiSetState(STATE_DISABLED);
-            }
-
-            if (GuiButton(related_videos_button_bounds, "Related Videos")) {
-                launch_search = true;
-                query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_RELATED;
-                strncpy(query.focused_id, highlighted_video.info.id, sizeof(query.focused_id) - 1);
-                query.focused_id[sizeof(query.focused_id) - 1] = '\0';
-                SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", query.focused_id));                
-            }
-            
-            const Rectangle users_videos_button_bounds = {
-                .x = related_videos_button_bounds.x + related_videos_button_bounds.width + ui.padding,
-                .y = TOP_PANEL.y,
-                .width = button_width - ui.padding,
-                .height = TOP_PANEL.height,
-            };
-
-            if (GuiButton(users_videos_button_bounds, "User's Videos")) {
-                load_channel_information = true;
-                query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_VIEW_CHANNEL;
-
-                strncpy(query.focused_id, highlighted_video.info.authorId, sizeof(query.focused_id) - 1);
-                query.focused_id[sizeof(query.focused_id) - 1] = '\0';
-                
-                SetWindowTitle(TextFormat("[User %s Videos(loading)] - metube", query.focused_id));
-            }
-
-            GuiSetState(STATE_NORMAL);
-
-            // if (GuiButton(trending_button_bounds, "Trending")) {
-            //     launch_search = true;
-            //     query.attr = QUERY_ATTR_REPLACE;
-            //     query.type = QUERY_TYPE_TRENDING;
-            //     SetWindowTitle("[Trending] - metube");
-            // }
-
-           
-            // GuiSetState(STATE_NORMAL);
-
-            // const Rectangle watch_history_button = {
-            //     .x = users_videos_button_bounds.x + users_videos_button_bounds.width + ui.padding,
-            //     .y = ui.padding,
-            //     .width = 80,
-            //     .height = 25,
-            // };
-
-            // if (GuiButton(watch_history_button, "Watch History")) {
-            //     view_watch_history = true;
-            //     query.attr = QUERY_ATTR_REPLACE;
-            //     query.type = QUERY_TYPE_WATCH_HISTORY;
-            // }
-
-            // const Rectangle view_subscriptions_button = {
-            //     .x = watch_history_button.x + watch_history_button.width + ui.padding,
-            //     .y = ui.padding,
-            //     .width = 80,
-            //     .height = 25,
-            // };
-
-            // const Rectangle like_video_button_bounds = {
-            //     .x = view_subscriptions_button.x + view_subscriptions_button.width + ui.padding,
-            //     .y = ui.padding,
-            //     .width = 30,
-            //     .height = 25,
-            // };
-
-            // if (highlighted_video.info.id[0] == '\0') GuiSetState(STATE_DISABLED);
-
-            // if (GuiButton(like_video_button_bounds, "Like")) {
-            //     if (like_video(liked_videos_json, &highlighted_video.info) == false) {
-            //         printf("failed to like %s\n", highlighted_video.info.title);
-            //     }
-            // }
-
-            // GuiSetState(STATE_NORMAL);
-
-            // const Rectangle view_liked_videos_button_bounds = {
-            //     .x = like_video_button_bounds.x + like_video_button_bounds.width + ui.padding,
-            //     .y = ui.padding,
-            //     .width = 70,
-            //     .height = 25
-            // };
-
-            // if (GuiButton(view_liked_videos_button_bounds, "Liked Videos")) {
-            //     view_liked_videos = true;
-            // }
-
-            const float focused_channel_min_y = 170;
             
             const float focused_channel_height = 80;
             const Rectangle focused_channel_bounds = {
-                .x = SIDE_PANEL.x,
-                .y = fmax(focused_channel_min_y, GetScreenHeight() - focused_channel_height - ui.padding),
-                .width = subscriptions_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
+                .x = ui.padding,
+                .y = GetScreenHeight() - focused_channel_height - ui.padding,
+                .width = trending_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
                 .height = focused_channel_height,
             };
-
-            if ((highlighted_channel.thumbnail_loaded == false) && (highlighted_channel.thumbnail_path[0] != '\0')) { 
-                highlighted_channel.thumbnail_loaded = true;
-                highlighted_channel.cached = find_cached_thumbnail(highlighted_channel.id, &texture_cache);
-            }
-
-            draw_highlighted_channel(focused_channel_bounds, &ui, subscribed_channels_json, &highlighted_channel, &subbed_to_channel);
-
+           
             const Rectangle scroll_window_bounds = { 
-                .x = SIDE_PANEL.x, 
+                .x = ui.padding, 
                 .y = search_bar_bounds.y + search_bar_bounds.height + (show_filter_window ? (filter_window_bounds.height + ui.padding) : 0) + ui.padding, 
                 .width = focused_channel_bounds.width, 
                 .height = GetScreenHeight() - scroll_window_bounds.y - focused_channel_height - (ui.padding * 2), 
@@ -3872,32 +3867,54 @@ int main()
             }
 
             pthread_mutex_unlock(&results.mutex);
+            
+            if (load_more_button_visible) {
+                const Rectangle load_more_button_bounds = {
+                    .x = container.x,
+                    .y = container.y + container_height,
+                    .width = container.width,
+                    .height = container_height,
+                };
 
-            // const Rectangle load_more_button_bounds = {
-            //     .x = container.x,
-            //     .y = container.y + container_height,
-            //     .width = container.width,
-            //     .height = container_height,
-            // };
-
-            // if (load_more_button_visible && GuiButton(load_more_button_bounds, "LOAD MORE")) {
-            //     if (last_search_type == QUERY_TYPE_VIEW_CHANNEL) load_channel_information = true;
-            //     else launch_search = true;
-            //     query.type = last_search_type;
-            //     query.attr = QUERTY_ATTR_APPEND;
-            // }
+                draw_load_more_button(load_more_button_bounds, ui.font, &query, last_search_type, &launch_search);
+            }
             
             EndScissorMode();
 
-            // const Rectangle focused_video_bounds = {
-            //     .x = scroll_window_bounds.x + scroll_window_bounds.width + ui.padding,
-            //     .y = filter_window_bounds.y,
-            //     .width = GetScreenWidth() - focused_video_bounds.x,
-            //     .height = GetScreenHeight() - focused_video_bounds.y - ui.padding,
-            // };
-            
-            // draw_highlighted_video(focused_video_bounds, ui, &description_scrollbar, &highlighted_video);
+            const Rectangle TOP_RIGHT_PANEL = {
+                .x = filter_button_bounds.x + filter_button_bounds.width + ui.padding,
+                .y = ui.padding,
+                .width = GetScreenWidth() - TOP_RIGHT_PANEL.x - ui.padding,
+                .height = BAR_HEIGHT, 
+            };
 
+            draw_top_right_panel(TOP_RIGHT_PANEL, &query, &highlighted_video, liked_videos_json, &launch_search, &load_channel_information);
+
+            if ((highlighted_channel.thumbnail_loaded == false) && (highlighted_channel.thumbnail_path[0] != '\0')) { 
+                highlighted_channel.thumbnail_loaded = true;
+                highlighted_channel.cached = find_cached_thumbnail(highlighted_channel.id, &texture_cache);
+            }
+
+            draw_highlighted_channel(focused_channel_bounds, &ui, subscribed_channels_json, &highlighted_channel, &subbed_to_channel);
+
+            const Rectangle BOTTOM_RIGHT_PANEL = {
+                .x = focused_channel_bounds.x + focused_channel_bounds.width + ui.padding,
+                .y = GetScreenHeight() - BAR_HEIGHT - ui.padding,
+                .width = TOP_RIGHT_PANEL.width,
+                .height = BAR_HEIGHT,
+            };
+
+            draw_bottom_right_panel(BOTTOM_RIGHT_PANEL, &query, &view_subscribed_channels, &view_liked_videos, &view_watch_history);
+            
+            const Rectangle focused_video_bounds = {
+                .x = scroll_window_bounds.x + scroll_window_bounds.width + ui.padding,
+                .y = filter_window_bounds.y,
+                .width = GetScreenWidth() - focused_video_bounds.x,
+                .height = GetScreenHeight() - focused_video_bounds.y - BAR_HEIGHT - (ui.padding * 2),
+            };
+            
+            draw_highlighted_video(focused_video_bounds, ui, &description_scrollbar, &highlighted_video);
+            
         EndDrawing();
     }
     
