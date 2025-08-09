@@ -1,3 +1,4 @@
+#include "utils.h"
 #include "texture_cache.h"
 
 #include <stdio.h>
@@ -5,7 +6,7 @@
 
 TextureCacheEntry* texture_cache_entry_init(const Texture texture, const char* id)
 {
-    if ((IsTextureReady(texture) == false) || (id == NULL) || (id[0] == '\0')) return NULL;
+    if ((IsTextureReady(texture) == false) || (valid_string(id) == false)) return NULL;
     
     TextureCacheEntry* entry = (TextureCacheEntry*) malloc(sizeof(TextureCacheEntry));
     if (entry == NULL) {
@@ -81,7 +82,7 @@ void texture_cache_remove_expried_entries(TextureCache* texture_cache)
 
 TextureCacheEntry* texture_cache_find_entry(TextureCache* texture_cache, const char* id)
 {
-    if ((HASH_COUNT(*texture_cache) == 0) || (id == NULL) || (id[0] == '\0')) return NULL;
+    if ((HASH_COUNT(*texture_cache) == 0) || (valid_string(id) == false)) return NULL;
 
     TextureCacheEntry *found = NULL;
     

@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "connection.h"
 #include "utils.h"
 #include "texture_cache.h"
 #include "timer.h"
@@ -723,133 +724,6 @@ HttpsRequest configure_post_request(const Query query, const char* host)
 }
 
 static SSL_CTX *ssl_ctx = NULL;
-
-typedef struct {
-    pthread_mutex_t mutex;
-    char host[64];
-    char port[16];
-    SSL *ssl;
-    int sockfd;
-    bool connected;
-    struct addrinfo *address_information;
-} Connection;
-
-void connection_init(Connection* connection, const char* host, const char* port)
-{
-    if ((host == NULL) || (port == NULL)) return;
-    pthread_mutex_init(&connection->mutex, NULL);
-    strncpy(connection->host, host, sizeof(connection->host) - 1);
-    connection->host[sizeof(connection->host) - 1] = '\0';
-    strncpy(connection->port, port, sizeof(connection->port) - 1);
-    connection->port[sizeof(connection->port) - 1] = '\0';
-    connection->ssl = NULL;
-    connection->sockfd = -1; 
-    connection->connected = false;
-    connection->address_information = NULL;
-}
-
-bool valid_fd(const int fd)
-{
-    return fd >= 0;
-}
-
-void disconnect(Connection* connection)
-{
-    if (connection == NULL) return;
-
-    if (connection->address_information) {
-        freeaddrinfo(connection->address_information);
-        connection->address_information = NULL;
-    }
-
-    if (connection->ssl) {
-        SSL_shutdown(connection->ssl);
-        SSL_free(connection->ssl);
-        connection->ssl = NULL;
-    }
-
-    if (valid_fd(connection->sockfd)) {
-        close(connection->sockfd);
-        connection->sockfd = -1;
-    }
-
-    connection->connected = false;
-}
-
-void connection_free(Connection* connection)
-{
-    if (connection == NULL) return;
-    disconnect(connection);
-    pthread_mutex_destroy(&connection->mutex);
-}
-
-bool connection_establish(Connection* connection, SSL_CTX* ssl_ctx)
-{
-    if ((connection == NULL) || (ssl_ctx == NULL) || (connection->host[0] == '\0') || (connection->port[0] == '\0')) return false;
-
-    disconnect(connection);
-
-    struct addrinfo desired_address_information = {0};
-    desired_address_information.ai_family = AF_INET;
-    desired_address_information.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(connection->host, connection->port, &desired_address_information, &connection->address_information) != 0) {
-        printf("establish_persistent_connection: getaddrinfo failed for %s:%s\n", connection->host, connection->port);
-        return false;
-    }
-
-    connection->sockfd = socket(connection->address_information->ai_family, connection->address_information->ai_socktype, connection->address_information->ai_protocol);
-    if (connection->sockfd < 0) {
-        printf("establish_persistent_connection: socket creation failed\n");
-        disconnect(connection);
-        return false;
-    }
-
-    if (connect(connection->sockfd, connection->address_information->ai_addr, connection->address_information->ai_addrlen) != 0) {
-        printf("establish_persistent_connection: connect failed for the host: \"%s\"\n", connection->host);
-        disconnect(connection);
-        return false;
-    }
-
-    connection->ssl = SSL_new(ssl_ctx);
-    if (connection->ssl == NULL) {
-        printf("establish_persistent_connection: SSL_new failed\n");
-        disconnect(connection);
-        return false;
-    }
-
-    SSL_set_fd(connection->ssl, connection->sockfd);
-    if (SSL_connect(connection->ssl) != 1) {
-        printf("establish_persistent_connection: SSL_connect failed for host %s\n", connection->host);
-        disconnect(connection);
-        return false;
-    }
-
-    return true;
-}
-
-typedef struct
-{
-    size_t current_conn;
-    Connection connections[N_CONN];
-} ConnectionPool;
-
-ConnectionPool init_connection_pool(const char* host)
-{
-    ConnectionPool pool = {0};
-    for (int c = 0; c < N_CONN; c++) connection_init(&pool.connections[c], host, HTTPS_PORT);
-    return pool;
-}
-
-void free_connection_pool(ConnectionPool* connection_pool)
-{
-    if (connection_pool == NULL) return;
-    for(int c = 0; c < N_CONN; c++) connection_free(&connection_pool->connections[c]);
-}
-
-void cycle_connection(ConnectionPool* connection_pool)
-{
-    connection_pool->current_conn = bound_index_to_array((connection_pool->current_conn + 1), N_CONN);
-}
 
 int ssl_read_line(SSL* ssl, char* buffer, const size_t buffer_size) 
 {
@@ -3069,9 +2943,9 @@ int main()
     pthread_t thread_pool[MAX_THREADS]; 
     init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
     
-    ConnectionPool youtube_pool = init_connection_pool("www.youtube.com");
-    ConnectionPool video_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO)); // playlists, videos, shorts, and live videos all share the same host
-    ConnectionPool channel_thumbnail_pool = init_connection_pool(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL));
+    ConnectionPool youtube_pool = connection_pool_init("www.youtube.com", HTTPS_PORT, N_CONN);
+    ConnectionPool video_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO), HTTPS_PORT, N_CONN); // playlists, videos, shorts, and live videos all share the same host
+    ConnectionPool channel_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL), HTTPS_PORT, N_CONN);
 
     bool load_video_information = false;
     Vector2 description_scrollbar = {0};
@@ -3496,9 +3370,9 @@ int main()
         
         // ssl stuff
         if (ssl_ctx) SSL_CTX_free(ssl_ctx);
-        free_connection_pool(&youtube_pool);
-        free_connection_pool(&video_thumbnail_pool);
-        free_connection_pool(&channel_thumbnail_pool);
+        connection_pool_free(&youtube_pool);
+        connection_pool_free(&video_thumbnail_pool);
+        connection_pool_free(&channel_thumbnail_pool);
         
         CloseWindow();
         

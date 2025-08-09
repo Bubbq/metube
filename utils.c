@@ -1,7 +1,6 @@
 #include "utils.h"
 
 #include <ctype.h>
-#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -12,7 +11,7 @@ int bound_index_to_array (const int pos, const int array_size)
 
 bool file_exists(const char* filename)
 {
-    if (filename == NULL) return false;
+    if (valid_string(filename) == false) return false;
 
     FILE* fp = fopen(filename, "r");
     if (fp) {
@@ -40,7 +39,7 @@ const long get_file_length(FILE* fp)
 
 char* get_file_content(const char* filepath)
 {
-    if (filepath == NULL) return NULL;
+    if (valid_string(filepath) == false) return NULL;
 
     FILE* fp = fopen(filepath, "r");
     if (fp == NULL) {
@@ -68,7 +67,7 @@ char* get_file_content(const char* filepath)
 
 void write_string_to_file(const char* filename, const char* string)
 {
-    if ((filename == NULL) || (string == NULL)) return;
+    if ((valid_string(filename) == false) || (valid_string(string) == false)) return;
 
     FILE* fp = fopen(filename, "w");
     if (fp == NULL) {
@@ -85,7 +84,7 @@ void write_string_to_file(const char* filename, const char* string)
 
 int filter_non_numeric_chars(char* string, const size_t string_size)
 {
-    if (string == NULL) return -1;
+    if (valid_string(string) == false) return -1;
 
     int i = 0;
     for (int j = 0; j < string_size; j++) {
@@ -102,7 +101,7 @@ int filter_non_numeric_chars(char* string, const size_t string_size)
 
 size_t trim_whitespace(char* string)
 {
-    if ((string == NULL) || (string[0] == '\0')) return 0;
+    if (valid_string(string) == false) return 0;
     
     char* start = string;
     while (isspace((unsigned char) *start)) {
@@ -120,4 +119,9 @@ size_t trim_whitespace(char* string)
     string[len] = '\0';
 
     return len;
+}
+
+bool valid_string(const char* string)
+{
+    return (string) && (string[0] != '\0');
 }

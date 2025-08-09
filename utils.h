@@ -11,5 +11,6 @@ char* get_file_content(const char* filepath);
 void write_string_to_file(const char* filename, const char* buffer);
 size_t trim_whitespace(char* string);
 int filter_non_numeric_chars(char* string, const size_t string_size);
+bool valid_string(const char* string);
 
 #endif
