@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "query.h"
 #include "connection.h"
 #include "utils.h"
 #include "texture_cache.h"
@@ -81,113 +82,6 @@ bool connected_to_internet()
     close(sock);
     
     return connected;
-}
-
-typedef enum
-{
-    MEDIA_TYPE_ANY,
-    MEDIA_TYPE_VIDEO,
-    MEDIA_TYPE_CHANNEL,
-    MEDIA_TYPE_PLAYLIST,
-    MEDIA_TYPE_LIVE,
-    MEDIA_TYPE_SHORT,
-    MEDIA_TYPE_UNDF,
-} MediaType;
-
-#define N_MEDIA_TYPES 5
-
-const char* media_type_to_search_param(MediaType media_type)
-{
-    switch (media_type) {
-        case MEDIA_TYPE_SHORT:
-        case MEDIA_TYPE_VIDEO: return "SAhAB";
-        case MEDIA_TYPE_CHANNEL: return "SAhAC";
-        case MEDIA_TYPE_PLAYLIST: return "SAhAD";
-        case MEDIA_TYPE_LIVE: return "SBBABQAE";
-        case MEDIA_TYPE_ANY: return "%253D";
-        default:
-            printf("media_type_to_search_param: invalid media_type passed\n");
-            return NULL;
-    }
-}
-
-char* media_type_to_thumbnail_host(const MediaType media_type)
-{
-    switch (media_type) {
-        case MEDIA_TYPE_LIVE:
-        case MEDIA_TYPE_SHORT:
-        case MEDIA_TYPE_VIDEO: 
-        case MEDIA_TYPE_PLAYLIST: return "i.ytimg.com";
-        case MEDIA_TYPE_CHANNEL: return "yt3.ggpht.com";
-        default:
-            printf("media_type_to_thumbnail_host: invalid media_type passed\n");
-            return NULL;
-    }
-}
-
-char* media_type_to_text(const MediaType media_type)
-{
-    switch (media_type) {
-        case MEDIA_TYPE_VIDEO: return "VIDEO";
-        case MEDIA_TYPE_CHANNEL: return "CHANNEL";
-        case MEDIA_TYPE_PLAYLIST: return "PLAYLIST";
-        case MEDIA_TYPE_LIVE: return "LIVE";
-        case MEDIA_TYPE_ANY: return "ANY";
-        case MEDIA_TYPE_UNDF: return "UNDF";
-        case MEDIA_TYPE_SHORT: return "SHORT";
-        default:
-            printf("media_type_to_text: invalid media_type passed\n");
-            return NULL;
-    }
-}
-
-const Vector2 media_type_to_thumbnail_dim(const MediaType media_type)
-{
-    switch (media_type) {
-        case MEDIA_TYPE_LIVE:
-        case MEDIA_TYPE_SHORT:
-        case MEDIA_TYPE_VIDEO:
-        case MEDIA_TYPE_PLAYLIST: return (Vector2) { 150, 80 };
-        case MEDIA_TYPE_CHANNEL:  return (Vector2) { 75, 70 };
-        case MEDIA_TYPE_UNDF:
-        case MEDIA_TYPE_ANY:      return (Vector2) { 0 }; 
-    }
-}
-
-// availible sorting types youtube provides 
-typedef enum 
-{
-    SORT_TYPE_RELEVANCE,
-    SORT_TYPE_UPLOAD_DATE,
-    SORT_TYPE_VIEW_COUNT,
-    SORT_TYPE_RATING,
-} SortType; 
-#define N_SORT_TYPES 4
-
-char* sort_type_to_search_param(const SortType sort_type)
-{
-    switch (sort_type) {
-        case SORT_TYPE_RELEVANCE: return "CAA";
-        case SORT_TYPE_UPLOAD_DATE: return "CAI";
-        case SORT_TYPE_VIEW_COUNT: return "CAM";
-        case SORT_TYPE_RATING: return "CAE";
-    }
-
-    printf("sort_type_to_search_param: invalid sort_type passed\n");
-    return NULL;
-}
-
-char* sort_type_to_text(const SortType sort_type)
-{
-    switch (sort_type) {
-        case SORT_TYPE_RELEVANCE: return "RELEVENCE";
-        case SORT_TYPE_UPLOAD_DATE: return "UPLOAD DATE";
-        case SORT_TYPE_VIEW_COUNT: return "VIEWS"; 
-        case SORT_TYPE_RATING: return "RATING";
-        default:
-            printf("sort_type_to_text: passed SortType is invalid\n");
-            return NULL;
-    }
 }
 
 typedef struct SearchResult
@@ -404,52 +298,6 @@ void list_print(List* list)
     }
 }
 
-typedef enum
-{
-    QUERY_TYPE_USER_INPUT,  
-    QUERY_TYPE_RELATED,  
-    QUERY_TYPE_TRENDING, 
-    QUERY_TYPE_VIDEO_FOCUS,
-    QUERY_TYPE_VIEW_PLAYLIST,
-    QUERY_TYPE_VIEW_CHANNEL,
-    QUERY_TYPE_WATCH_HISTORY,
-    QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS,
-    QUERY_TYPE_VIEW_LIKED_VIDEOS,
-} QueryType;
-
-typedef enum
-{
-    QUERY_ATTR_REPLACE,
-    QUERTY_ATTR_APPEND,
-} QueryAttribute;
-
-const char* query_type_to_endpoint(const QueryType search_type)
-{
-    switch (search_type) {
-        case QUERY_TYPE_USER_INPUT: return "search";
-        case QUERY_TYPE_VIEW_CHANNEL:
-        case QUERY_TYPE_VIEW_PLAYLIST:
-        case QUERY_TYPE_TRENDING: return "browse";
-        case QUERY_TYPE_VIDEO_FOCUS: return "player";
-        case QUERY_TYPE_RELATED: return "next";
-        default:    
-            printf("query_type_to_endpoint: invalid type passed\n");
-            return NULL;
-    }
-}
-
-// represents user-defined parameters for a YouTube search request
-typedef struct
-{
-    char string[256];        
-    char focused_id[64];     
-    QueryType type;
-    QueryAttribute attr;    
-    MediaType media;          
-    SortType sort;
-    bool allow_youtube_shorts; 
-} Query;
-
 typedef struct
 {
     char header[512];
@@ -457,7 +305,7 @@ typedef struct
     char* payload;
 } HttpsRequest;
 
-bool configure_api_path(char* dest, const size_t dest_size, QueryType query_type, const char* key)
+bool configure_youtube_internal_api_path(char* dest, const size_t dest_size, QueryType query_type, const char* key)
 {
     const char* endpoint = query_type_to_endpoint(query_type);
 
@@ -671,13 +519,13 @@ cJSON* configure_payload(const Query* query)
 
     else if (query->attr == QUERY_ATTR_REPLACE) {
         switch (query->type) {
-            case QUERY_TYPE_RELATED:    
-            case QUERY_TYPE_VIDEO_FOCUS:   payload_funct = add_view_related_videos_payload;  break;
+            case QUERY_TYPE_VIEW_RELATED:    
+            case QUERY_TYPE_VIEW_VIDEO:   payload_funct = add_view_related_videos_payload;  break;
             case QUERY_TYPE_USER_INPUT:    payload_funct = add_queried_search_payload;       break;
-            case QUERY_TYPE_TRENDING:      payload_funct = add_view_trending_videos_payload; break;
+            case QUERY_TYPE_VIEW_TRENDING:      payload_funct = add_view_trending_videos_payload; break;
             case QUERY_TYPE_VIEW_PLAYLIST: payload_funct = add_view_playlist_videos_payload; break;
             case QUERY_TYPE_VIEW_CHANNEL:  payload_funct = add_view_channel_videos_payload;  break;
-            case QUERY_TYPE_WATCH_HISTORY: return NULL;;
+            case QUERY_TYPE_VIEW_WATCH_HISTORY: return NULL;;
             case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS: return NULL;;
             case QUERY_TYPE_VIEW_LIKED_VIDEOS: return NULL;
         }
@@ -697,7 +545,7 @@ HttpsRequest configure_post_request(const Query query, const char* host)
 
     if (host == NULL) return req;
 
-    if (configure_api_path(req.path, sizeof(req.path), query.type, "") == false) {
+    if (configure_youtube_internal_api_path(req.path, sizeof(req.path), query.type, "") == false) {
         printf("configure_post_request: failed to resolve path\n");
         return (HttpsRequest) {0};
     }
@@ -1578,7 +1426,7 @@ const char* get_results_list_path(const QueryType search_type, const QueryAttrib
         case QUERY_TYPE_USER_INPUT: 
             if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents";
             if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[0].itemSectionRenderer.contents";
-        case QUERY_TYPE_RELATED: 
+        case QUERY_TYPE_VIEW_RELATED: 
             if (search_attr == QUERY_ATTR_REPLACE) return "contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results";
             if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems";
         case QUERY_TYPE_VIEW_PLAYLIST: 
@@ -1587,11 +1435,11 @@ const char* get_results_list_path(const QueryType search_type, const QueryAttrib
         case QUERY_TYPE_VIEW_CHANNEL: 
             if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents";
             if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
-        case QUERY_TYPE_TRENDING:                  return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[2].itemSectionRenderer.contents[0].shelfRenderer.content.expandedShelfContentsRenderer.items";
-        case QUERY_TYPE_WATCH_HISTORY:             
+        case QUERY_TYPE_VIEW_TRENDING:                  return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[2].itemSectionRenderer.contents[0].shelfRenderer.content.expandedShelfContentsRenderer.items";
+        case QUERY_TYPE_VIEW_WATCH_HISTORY:             
         case QUERY_TYPE_VIEW_LIKED_VIDEOS:         
         case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS:  return ARRAY_NAME;
-        case QUERY_TYPE_VIDEO_FOCUS:               return NULL;
+        case QUERY_TYPE_VIEW_VIDEO:               return NULL;
     }
 
     return NULL;
@@ -1680,7 +1528,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
         else if (playlistVideoRenderer)     parse_playlist_video(playlistVideoRenderer, search_result);
         else if (channelRenderer)           parse_channel_result(channelRenderer, search_result);
         else if (lockupViewModel) {
-            if (search_type == QUERY_TYPE_RELATED) 
+            if (search_type == QUERY_TYPE_VIEW_RELATED) 
                 parse_related_video(lockupViewModel, search_result);
             else 
                 parse_playlist_result(lockupViewModel, search_result);
@@ -1708,9 +1556,9 @@ const char* query_type_to_text(const QueryType query_type)
 {
     switch (query_type) {
         case QUERY_TYPE_USER_INPUT: return "QUERIED";
-        case QUERY_TYPE_RELATED: return "RELATED";
-        case QUERY_TYPE_TRENDING: return "TRENDING";
-        case QUERY_TYPE_VIDEO_FOCUS: return "VIDEO FOCUS";
+        case QUERY_TYPE_VIEW_RELATED: return "RELATED";
+        case QUERY_TYPE_VIEW_TRENDING: return "TRENDING";
+        case QUERY_TYPE_VIEW_VIDEO: return "VIDEO FOCUS";
         case QUERY_TYPE_VIEW_PLAYLIST: return "VIEW PLAYLIST";
         case QUERY_TYPE_VIEW_CHANNEL: return "VIEW CHANNEL";
         default:
@@ -1734,7 +1582,7 @@ const char* get_continuation_token_path(const QueryType search_type, const Query
         case QUERY_TYPE_USER_INPUT:
             if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
             if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
-        case QUERY_TYPE_RELATED:
+        case QUERY_TYPE_VIEW_RELATED:
             if (search_attr == QUERY_ATTR_REPLACE) return ".contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
             if (search_attr == QUERTY_ATTR_APPEND) return ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token";
         case QUERY_TYPE_VIEW_PLAYLIST:
@@ -2091,7 +1939,16 @@ bool draw_toggle_filter(const Rectangle container, const Ui ui, const char* labe
 void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
 {
     DrawRectangleLinesEx(container, 1, GRAY);
-                
+
+    const SortType filterable_sort_types [] = {
+        SORT_TYPE_RELEVANCE,
+        SORT_TYPE_UPLOAD_DATE,
+        SORT_TYPE_VIEW_COUNT,
+        SORT_TYPE_RATING,
+    };          
+
+    const size_t nsorts = sizeof(filterable_sort_types) / sizeof(filterable_sort_types[0]);
+
     const Rectangle sort_type_bounds = {
         .x = container.x,
         .y = container.y,
@@ -2102,8 +1959,18 @@ void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
     const char* sort_text = sort_type_to_text(query->sort);
 
     if (draw_toggle_filter(sort_type_bounds, ui, "ORDER", sort_text)) {
-        query->sort = bound_index_to_array((query->sort + 1), N_SORT_TYPES);
+        query->sort = bound_index_to_array((query->sort + 1), nsorts);
     }
+
+    const MediaType filterable_media_types [] = {
+        MEDIA_TYPE_ANY,
+        MEDIA_TYPE_VIDEO,
+        MEDIA_TYPE_CHANNEL,
+        MEDIA_TYPE_PLAYLIST,
+        MEDIA_TYPE_LIVE,
+    };
+
+    const size_t nmedias = sizeof(filterable_media_types) / sizeof(filterable_media_types[0]);
 
     const Rectangle media_type_bounds = {
         .x = container.x,
@@ -2115,7 +1982,7 @@ void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
     const char* media_text = media_type_to_text(query->media);
 
     if (draw_toggle_filter(media_type_bounds, ui, "TYPE", media_text)) {
-        query->media = bound_index_to_array((query->media + 1), N_MEDIA_TYPES);
+        query->media = bound_index_to_array((query->media + 1), nmedias);
     }
 
     const Rectangle allow_shorts_bounds = {
@@ -2831,7 +2698,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
     if (GuiButton(related_videos_button_bounds, "Related Videos")) {
         *launch_search = true;
         query->attr = QUERY_ATTR_REPLACE;
-        query->type = QUERY_TYPE_RELATED;
+        query->type = QUERY_TYPE_VIEW_RELATED;
         strncpy(query->focused_id, selected_video->info.id, sizeof(query->focused_id) - 1);
         query->focused_id[sizeof(query->focused_id) - 1] = '\0';
         SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", query->focused_id));                
@@ -2900,7 +2767,7 @@ void draw_user_data_buttons(const Rectangle container, Query* query, bool* view_
     if (GuiButton(watch_history_button_bounds, "Watch History")) {
         *view_watch_history = true;
         query->attr = QUERY_ATTR_REPLACE;
-        query->type = QUERY_TYPE_WATCH_HISTORY;
+        query->type = QUERY_TYPE_VIEW_WATCH_HISTORY;
     }
 }
 
@@ -3065,7 +2932,7 @@ int main()
         }
 
         if (view_watch_history) {
-            view_user_data(&results, watch_history_json, &continuation_token, "[History] - metube", &view_watch_history, QUERY_TYPE_WATCH_HISTORY);
+            view_user_data(&results, watch_history_json, &continuation_token, "[History] - metube", &view_watch_history, QUERY_TYPE_VIEW_WATCH_HISTORY);
         }
 
         if (view_subscribed_channels) {
@@ -3110,7 +2977,7 @@ int main()
             if (GuiButton(trending_button_bounds, "T")) {
                 launch_search = true;
                 query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_TRENDING;
+                query.type = QUERY_TYPE_VIEW_TRENDING;
                 SetWindowTitle("[Trending] - metube");
             }
 
@@ -3258,7 +3125,7 @@ int main()
                         case MEDIA_TYPE_VIDEO:
                             if (result_is_highlighted == false) {
                                 load_video_information = true;
-                                query.type = QUERY_TYPE_VIDEO_FOCUS;
+                                query.type = QUERY_TYPE_VIEW_VIDEO;
                                 memcpy(&highlighted_video.info, search_result, sizeof(SearchResult));
                                 update_user_data(watch_history_json, search_result);
                             }
