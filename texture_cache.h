@@ -1,4 +1,5 @@
-#pragma once
+#ifndef TEXTURE_CACHE_H
+#define TEXTURE_CACHE_H
 
 #include "uthash.h"
 #include "raylib.h"
@@ -25,3 +26,5 @@ void texture_cache_remove_entry(TextureCache* texture_cache, TextureCacheEntry* 
 void texture_cache_free(TextureCache* texture_cache);
 void texture_cache_remove_expried_entries(TextureCache* texture_cache);
 TextureCacheEntry* texture_cache_find_entry(TextureCache* texture_cache, const char* id);
+
+#endif

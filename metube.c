@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "utils.h"
 #include "texture_cache.h"
 #include "timer.h"
 #include "buffer.h"
@@ -63,11 +64,6 @@
 
 static char* continuation_token = NULL;
 
-int bound_index_to_array (const int pos, const int array_size)
-{
-    return (pos + array_size) % array_size;
-}
-
 bool connected_to_internet()
 {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -84,143 +80,6 @@ bool connected_to_internet()
     close(sock);
     
     return connected;
-}
-
-bool file_exists(const char* filename)
-{
-    FILE* fp = fopen(filename, "r+");
-    if (fp) {
-        fclose(fp);
-        return true;
-    }
-
-    else return false;
-}
-
-size_t file_len_from_current_pos(FILE* fp)
-{
-    const size_t original_position = ftell(fp);
-
-    fseek(fp, 0, SEEK_END);
-
-    const size_t file_len = ftell(fp) - original_position;    
-
-    fseek(fp, original_position, SEEK_SET);
-
-    return file_len;
-}
-
-char* get_file_content(const char* filepath)
-{
-    if (filepath == NULL) return NULL;
-
-    if (file_exists(filepath) == false) {
-        printf("get_file_content: %s does not exist\n", filepath);
-        return NULL;
-    }
-
-    FILE* fp = fopen(filepath, "r");
-
-    const long len = file_len_from_current_pos(fp);
-    if (len == 0) {
-        printf("get_file_content: file_len_from_current_pos returned 0\n");
-        fclose(fp); fp = NULL;
-        return NULL;
-    }
-
-    char* buffer = malloc((sizeof(char) * (len + 1)));
-    if (buffer == NULL) {
-        printf("get_file_content: malloc returned NULL\n");
-        fclose(fp); fp = NULL;
-        return NULL;
-    }
-
-    const unsigned long chars_read = fread(buffer, sizeof(char), len, fp);
-    
-    buffer[chars_read] = '\0';
-    
-    fclose(fp); fp = NULL;
-
-    return buffer;
-}
-
-bool create_file(const char* filename, const char* buffer)
-{
-    if ((filename == NULL) || (buffer == NULL)) return false;
-
-    FILE* fp = fopen(filename, "w");
-    if (fp == NULL) {
-        printf("create_file: 'fp' is null\n");
-        return false;
-    }
-
-    const size_t len = strlen(buffer);
-
-    const size_t written = fwrite(buffer, sizeof(char), len, fp);
-
-    fclose(fp); fp = NULL;
-
-    if (written != len) {
-        printf("create_file: (%zu/%zu) chars written\n", written, len);
-        return false;
-    }
-
-    return true;
-}
-
-bool string_is_integer(const char *s)
-{
-    if (s == NULL || *s == '\0') return false;
-
-    if (*s == '-' || *s == '+') s++;
-
-    if (*s == '\0') return false;
-
-    while (*s) {
-        if (!isdigit((unsigned char)*s)) return false;
-        s++;
-    }
-
-    return true;
-}
-
-int filter_non_numeric_chars(char* string, const size_t string_size)
-{
-    if (string == NULL) return -1;
-
-    int i = 0;
-    for (int j = 0; j < string_size; j++) {
-        const char c = string[j];
-        if (isdigit(c)) {
-            string[i++] = string[j];
-        }
-    }
-
-    string[i] = '\0';   
-
-    return i;
-}
-
-size_t trim_whitespace(char* string)
-{
-    if ((string == NULL) || (string[0] == '\0')) return 0;
-    
-    char* start = string;
-    while (isspace((unsigned char) *start)) {
-        start++;
-    }
-
-    char* end = string + strlen(string) - 1;
-    while (isspace((unsigned char) *end)) {
-        end--;
-    }
-
-    size_t len = end < start ? 0 : end - start + 1;
-    memmove(string, start, len);
-    
-    string[len] = '\0';
-
-    return len;
 }
 
 typedef enum
@@ -1175,7 +1034,7 @@ Buffer send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
 
     if (valid_request_code(header) == false) {
         printf("send_https_request: valid_request_code failed\n");
-        create_file("invalid_code_header.txt", header);
+        write_string_to_file("invalid_code_header.txt", header);
         connection->connected = false;
         pthread_mutex_unlock(&connection->mutex);
         return res;
@@ -1200,7 +1059,7 @@ Buffer send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
         int content_length = atoi(len_str);
         if (content_length == 0) {
             printf("send_https_request: invalid content length read\n");
-            create_file("invalid_content_len_header.txt", header);
+            write_string_to_file("invalid_content_len_header.txt", header);
             connection->connected = false;
             pthread_mutex_unlock(&connection->mutex);
             return res;
@@ -1296,21 +1155,19 @@ cJSON* parse_json_file(const char* filename)
     return json;
 }
 
-bool write_json_file(const cJSON* json, const char* filename)
+void write_json_file(const cJSON* json, const char* filename)
 {
-    if ((json == NULL) || (filename == NULL)) return false;
+    if ((json == NULL) || (filename == NULL)) return;
 
     char* buffer = cJSON_Print(json);
     if (buffer == NULL) {
         printf("write_json_file: 'buffer' is null\n");
-        return false; 
+        return; 
     }
 
-    const bool write_status = create_file(filename, buffer);
+    write_string_to_file(filename, buffer);
 
     free(buffer); buffer = NULL;
-
-    return write_status;
 }
 
 cJSON* cjson_pointer_get(cJSON* root, const char* path)
@@ -1360,11 +1217,6 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
             char index_buffer[len];
             strncpy(index_buffer, opening_brace_ptr + 1, len - 1);
             index_buffer[len - 1] = '\0';
-
-            if (string_is_integer(index_buffer) == false) {
-                printf("cjson_pointer_get: invalid array element: \"%s\"\n", index_buffer);
-                return NULL;
-            }
 
             const size_t arr_size = cJSON_GetArraySize(ret);
             
@@ -3204,6 +3056,7 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 // no views bug 
 // cant unsubscribe
     // need to implement removal of user data
+    // split programs up 
 
 int main()
 {
@@ -3656,8 +3509,6 @@ int main()
     // able to add videos to created playlist
     // fonts for L.O.T.E.
     // handle connecticity issues (no wifi on startup, changing connections, etc.)
-    // goto's for redundant cleanups
-    // set all ptrs to NULL after freeing them
     // thumbnail frames from video click
     // better create_results_from_json?
     // move ui stuff together
