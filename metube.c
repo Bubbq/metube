@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "timer.h"
 #include "buffer.h"
 
 #include "uthash.h"
@@ -22,7 +23,7 @@
 #include "raygui.h"
 
 #define MINUTE 60
-#define CACHED_TEXTURE_LIFETIME (MINUTE * 1)
+#define CACHED_TEXTURE_LIFETIME (3)
 
 #define MAX_THREADS 4
 #define N_CONN MAX_THREADS
@@ -224,34 +225,6 @@ size_t trim_whitespace(char* string)
     return len;
 }
 
-typedef struct
-{
-	double start_time;
-	double duration; // in seconds
-} Timer;
-
-void start_timer(Timer *timer, const double lifetime) 
-{
-    if (!timer) {
-        printf("start_timer: 'timer' arg is NULL\n");
-        return;
-    }
-
-    else if (lifetime < 0) {
-        printf("start_timer: lifetime is negative\n");
-        return;
-    }
-
-	timer->start_time = GetTime();
-	timer->duration = lifetime;
-}
-
-bool timer_done(Timer timer)
-{ 
-    const double elapsed = GetTime() - timer.start_time;
-	return elapsed >= timer.duration; 
-} 
-
 typedef enum
 {
     MEDIA_TYPE_ANY,
@@ -382,7 +355,7 @@ TextureCacheEntry* cached_texture_init(const Texture2D texture, const char* id)
         return NULL;
     }
 
-    start_timer(&cached_thumbnail->timer, CACHED_TEXTURE_LIFETIME);
+    timer_start(&cached_thumbnail->timer, CACHED_TEXTURE_LIFETIME);
 
     cached_thumbnail->thumbnail = texture;
     strncpy(cached_thumbnail->id, id, sizeof(cached_thumbnail->id) - 1);
@@ -463,7 +436,8 @@ void remove_expired_thumbnails(TextureCacheEntry **hashtable)
     TextureCacheEntry *current, *tmp;
 
     HASH_ITER(hh, *hashtable, current, tmp) {
-        if (current && timer_done(current->timer)) {
+        if (timer_is_done(current->timer)) {
+            printf("%s expired\n", current->id);
             delete_cached_texture(hashtable, current);
         }
     }
@@ -3012,7 +2986,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
     const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
 
     if (cached_texture_is_ready(highlighted_channel->cached)) {
-        start_timer(&highlighted_channel->cached->timer, CACHED_TEXTURE_LIFETIME);
+        timer_start(&highlighted_channel->cached->timer, CACHED_TEXTURE_LIFETIME);
         DrawTextureEx(highlighted_channel->cached->thumbnail, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
     }
 
@@ -3341,7 +3315,9 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 }
 
 // no views bug 
- 
+// cant unsubscribe
+    // need to implement removal of user data
+
 int main()
 {
     List thumbnail_queue = list_init();
@@ -3636,7 +3612,7 @@ int main()
                 TextureCacheEntry* cached = find_cached_thumbnail(search_result->id, &texture_cache);
                 if (cached_texture_is_ready(cached)) {
                     thumbnail = cached->thumbnail;
-                    start_timer(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
+                    timer_start(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
                 }
 
                 else if ((search_result->thumbnail_loaded == false) && (search_result->thumbnail_path[0] != '\0')) {
