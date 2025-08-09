@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "texture_cache.h"
 #include "timer.h"
 #include "buffer.h"
 
@@ -21,9 +22,6 @@
 
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
-
-#define MINUTE 60
-#define CACHED_TEXTURE_LIFETIME (3)
 
 #define MAX_THREADS 4
 #define N_CONN MAX_THREADS
@@ -329,117 +327,6 @@ char* sort_type_to_text(const SortType sort_type)
         default:
             printf("sort_type_to_text: passed SortType is invalid\n");
             return NULL;
-    }
-}
-
-typedef struct
-{
-    char id [64];
-    UT_hash_handle hh;
-    Texture2D thumbnail;
-    Timer timer;
-} TextureCacheEntry;
-
-typedef TextureCacheEntry* TextureCache;
-
-TextureCacheEntry* cached_texture_init(const Texture2D texture, const char* id)
-{
-    if ((id == NULL) || (id[0] == '\0') || (IsTextureReady(texture) == false)) {
-        printf("cached_texture_init: invalid args\n");
-        return NULL;
-    }
-    
-    TextureCacheEntry* cached_thumbnail = (TextureCacheEntry*) malloc(sizeof(TextureCacheEntry));
-    if (cached_thumbnail == NULL) {
-        printf("cached_texture_init: malloc returned NULL\n");
-        return NULL;
-    }
-
-    timer_start(&cached_thumbnail->timer, CACHED_TEXTURE_LIFETIME);
-
-    cached_thumbnail->thumbnail = texture;
-    strncpy(cached_thumbnail->id, id, sizeof(cached_thumbnail->id) - 1);
-    cached_thumbnail->id[sizeof(cached_thumbnail->id) - 1] = '\0';
-
-    return cached_thumbnail;
-}
-
-bool cached_texture_is_ready(TextureCacheEntry* cached_texture)
-{
-    return cached_texture && IsTextureReady(cached_texture->thumbnail);
-}
-
-void free_cached_thumbnail(TextureCacheEntry *cached_entry)
-{
-    if (cached_entry == NULL) return;
-    if (IsTextureReady(cached_entry->thumbnail)) UnloadTexture(cached_entry->thumbnail);
-    free(cached_entry);
-}
-
-void cache_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
-{
-    if (cached_entry == NULL) {
-        printf("cache_texture: thumbnail to cache is NULL\n");
-        return;
-    }
-
-    HASH_ADD_STR(*hashtable, id, cached_entry);
-}
-
-void delete_cached_texture(TextureCacheEntry **hashtable, TextureCacheEntry *cached_entry)
-{
-    if (HASH_COUNT(*hashtable) == 0) {
-        printf("delete_cached_texture: hashtable is empty");
-        return;
-    }
-
-    if (cached_entry == NULL) {
-        printf("delete_cached_texturel: cached_entry is NULL\n");
-        return;
-    }
-
-    HASH_DEL(*hashtable, cached_entry);
-
-    free_cached_thumbnail(cached_entry);
-}
-
-void free_cached_textures(TextureCacheEntry **hashtable)
-{
-    if (hashtable == NULL) return;
-
-    TextureCacheEntry *current, *tmp;
-    HASH_ITER(hh, *hashtable, current, tmp) {
-        delete_cached_texture(hashtable, current);
-    }
-}
-
-TextureCacheEntry* find_cached_thumbnail(const char *id, TextureCacheEntry **hashtable)
-{
-    if (hashtable == NULL) return NULL;
-
-    TextureCacheEntry *found = NULL;
-    
-    HASH_FIND_STR(*hashtable, id, found);
-    
-    return found;
-}
-
-bool cached_texture_exists(const char *id, TextureCacheEntry **hashtable)
-{
-    return find_cached_thumbnail(id, hashtable) != NULL;
-}
-
-void remove_expired_thumbnails(TextureCacheEntry **hashtable)
-{
-    if (hashtable == NULL) return;
-
-    TextureCacheEntry *current, *tmp;
-
-    HASH_ITER(hh, *hashtable, current, tmp) {
-        if (timer_is_done(current->timer)) {
-            printf("%s expired\n", current->id);
-            delete_cached_texture(hashtable, current);
-        }
     }
 }
 
@@ -2614,13 +2501,13 @@ void process_raw_thumbnail(RawThumbnail* raw_thumbnail, TextureCacheEntry** hash
         return;
     }
 
-    TextureCacheEntry* cached_entry = cached_texture_init(thumbnail, raw_thumbnail->id);
+    TextureCacheEntry* cached_entry = texture_cache_entry_init(thumbnail, raw_thumbnail->id);
     if (cached_entry == NULL) {
         printf("process_raw_thumbnail: 'cached_entry' is null\n");
         return;
     }
     
-    cache_texture(hashtable, cached_entry);
+    texture_cache_add_entry(hashtable, cached_entry);
 }
 
 void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)
@@ -2985,9 +2872,9 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
 
     const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
 
-    if (cached_texture_is_ready(highlighted_channel->cached)) {
+    if (texture_cache_entry_is_ready(highlighted_channel->cached)) {
         timer_start(&highlighted_channel->cached->timer, CACHED_TEXTURE_LIFETIME);
-        DrawTextureEx(highlighted_channel->cached->thumbnail, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
+        DrawTextureEx(highlighted_channel->cached->texture, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
     }
 
     const Vector2 title_pos = {
@@ -3124,7 +3011,7 @@ void* parse_channel(void* args)
     
     targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, targs->channel->info.id);
     
-    TextureCacheEntry* cached = find_cached_thumbnail(targs->channel->info.id, targs->texture_cache);
+    TextureCacheEntry* cached = texture_cache_find_entry(targs->texture_cache, targs->channel->info.id);
     if (cached) {
         targs->channel->info.thumbnail_loaded = true;
         targs->channel->cached = cached;
@@ -3392,7 +3279,7 @@ int main()
     while (!WindowShouldClose())
     {
         if (HASH_COUNT(texture_cache) > 0) {
-            remove_expired_thumbnails(&texture_cache);
+            texture_cache_remove_expried_entries(&texture_cache);
         }
 
         if (thumbnail_queue.count > 0) {
@@ -3609,9 +3496,9 @@ int main()
 
                 Texture2D thumbnail = (Texture2D){0};
 
-                TextureCacheEntry* cached = find_cached_thumbnail(search_result->id, &texture_cache);
-                if (cached_texture_is_ready(cached)) {
-                    thumbnail = cached->thumbnail;
+                TextureCacheEntry* cached = texture_cache_find_entry(&texture_cache, search_result->id);
+                if (texture_cache_entry_is_ready(cached)) {
+                    thumbnail = cached->texture;
                     timer_start(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
                 }
 
@@ -3692,7 +3579,7 @@ int main()
 
             if ((highlighted_channel.info.thumbnail_loaded == false) && (highlighted_channel.info.thumbnail_path[0] != '\0')) { 
                 highlighted_channel.info.thumbnail_loaded = true;
-                highlighted_channel.cached = find_cached_thumbnail(highlighted_channel.info.id, &texture_cache);
+                highlighted_channel.cached = texture_cache_find_entry(&texture_cache, highlighted_channel.info.id);
             }
 
             draw_highlighted_channel(focused_channel_bounds, &ui, subscribed_channels_json, &highlighted_channel);
@@ -3729,7 +3616,7 @@ int main()
         UnloadFont(ui.font);
         list_free(&results);
         list_free(&thumbnail_queue);
-        free_cached_textures(&texture_cache);
+        texture_cache_free(&texture_cache);
         
         if (watch_history_json) {
             write_json_file(watch_history_json, WATCH_HISTORY_FILE);
