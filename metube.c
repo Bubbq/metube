@@ -17,6 +17,7 @@
 #include "yt_client.h"
 #include "connection.h"
 #include "texture_cache.h"
+#include "https_utils.h"
 
 #include "uthash.h"
 #include "raylib.h"
@@ -808,12 +809,12 @@ void* load_thumbnail(void* args)
     }
 
     HttpsRequest req = {0};
-    if (configure_get_header(req.header, sizeof(req.header), targs->conn->host, targs->thumbnail_path) == false) {
+    if (configure_get_header(req.header, sizeof(req.header), targs->conn->host, targs->thumbnail_path, USER_AGENT, CONNECTION_STATUS, HTTP_PROTOCOL_VER) == false) {
         printf("load_thumbnail: req header was truncated\n");
         goto clean;
     }
 
-    Buffer res = get_https_response(req, ssl_ctx, targs->conn);
+    Buffer res = get_https_response(req, ssl_ctx, targs->conn, HTTP_PROTOCOL_VER);
     if (buffer_is_ready(&res) == false) {
         printf("load_thumbnail: thumbnail response is invalid\n");
         goto clean;
@@ -1055,7 +1056,7 @@ cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* 
         return NULL;
     }
 
-    Buffer res = get_https_response((*req), ssl_ctx, conn);
+    Buffer res = get_https_response((*req), ssl_ctx, conn, HTTP_PROTOCOL_VER);
     if (buffer_is_ready(&res) == false) {
         printf("get_json_response: invalid response recived\n");
         return NULL;
@@ -1730,7 +1731,7 @@ void* get_video_description(void* args)
         goto cleanup;
     }
 
-    res = get_https_response(targs->req, ssl_ctx, targs->conn); 
+    res = get_https_response(targs->req, ssl_ctx, targs->conn, HTTP_PROTOCOL_VER); 
     if (buffer_is_ready(&res) == false) {
         printf("get_video_description: invaild https response\n");
         goto cleanup;
@@ -2244,9 +2245,10 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-// no views bug 
-// cant unsubscribe
-    // split programs up 
+// split programs up 
+    // https stuff
+    // json stuff
+    // user data management
     // bug with getting user's videos, shows for half a second, then dissapears
 
 int main()
