@@ -10,12 +10,13 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
-#include "query.h"
-#include "connection.h"
 #include "utils.h"
-#include "texture_cache.h"
+#include "query.h"
 #include "timer.h"
 #include "buffer.h"
+#include "yt_client.h"
+#include "connection.h"
+#include "texture_cache.h"
 
 #include "uthash.h"
 #include "raylib.h"
@@ -51,38 +52,13 @@
 
 #define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION "mqdefault"
 
-#define VALID_HTTPS_RESPONSE_CODE "200"
-#define CONTENT_LENGTH_HEADER_TAG "Content-Length:"
-#define TRANSFER_ENCODING_HEADER_TAG "Transfer-Encoding:"
-#define CHUNKED_ENCODING "chunked"
-
 #define HTTPS_PORT "443"
-#define CLIENT_NAME "WEB"
-#define CLIENT_VER "2.20250730"
 #define YT_API_PLAYLIST_BROWSE_ID_PREFIX "VL"    
 #define YT_API_TRENDING_BROWSE_ID "FEtrending" 
-#define YT_API_CHANNEL_VIDEOS_PARAMS "EgZ2aWRlb3PyBgQKAjoA"  
-#define USER_AGENT "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
+static SSL_CTX* ssl_ctx = NULL;
 static char* continuation_token = NULL;
-
-bool connected_to_internet()
-{
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return false;
-    
-    struct sockaddr_in server = {
-        .sin_family = AF_INET,
-        .sin_port = htons(53), 
-        .sin_addr.s_addr = inet_addr("8.8.8.8") 
-    };
-    
-    bool connected = (connect(sock, (struct sockaddr*)&server, sizeof(server)) == 0);
-
-    close(sock);
-    
-    return connected;
-}
+static const char* api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
 typedef struct SearchResult
 {
@@ -297,553 +273,6 @@ void list_print(List* list)
         }
     }
 }
-
-typedef struct
-{
-    char header[512];
-    char path[256];
-    char* payload;
-} HttpsRequest;
-
-bool configure_youtube_internal_api_path(char* dest, const size_t dest_size, QueryType query_type, const char* key)
-{
-    const char* endpoint = query_type_to_endpoint(query_type);
-
-    if ((endpoint == NULL) || (key == NULL) || (dest == NULL)) return false;
-
-    const size_t written = snprintf(dest, dest_size, "/youtubei/v1/%s?key=%s", endpoint, key);
-
-    return (written > 0) && (written < dest_size);
-}
-
-bool configure_get_header(char* dest, const size_t dest_size, const char* host, const char* path)
-{
-    if ((dest == NULL) || (host == NULL) || (path == NULL)) return false;
-
-    const size_t len =  snprintf(dest, dest_size,
-                "GET %s HTTP/1.1\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0\r\n"
-                        "Connection: keep-alive\r\n"
-                        "\r\n",
-                        path, host);
-    
-    return (len > 0) && (len < dest_size);
-}
-
-bool configure_post_header(char* dest, const size_t dest_size, const char *host, const char *path, const size_t post_body_length)
-{
-    const size_t len = snprintf(dest, dest_size,
-                        "POST %s HTTP/1.1\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: " USER_AGENT "\r\n"
-                        "Content-Type: application/json\r\n"
-                        "Accept: application/json\r\n"
-                        "Content-Length: %zu\r\n"
-                        "Connection: keep-alive\r\n"
-                        "\r\n",
-                        path, host, post_body_length);
-    
-    return (len > 0) && (len < dest_size);
-}
-
-bool valid_post_request(const HttpsRequest post)
-{
-    return (post.path[0] != '\0') && (post.header[0] != '\0') && (post.payload) && (post.payload[0] != '\0');
-}
-
-bool add_queried_search_payload(cJSON* root, const Query* q)
-{
-    if ((root == NULL) || (q == NULL) || (q->string[0] == '\0')) {
-        printf("add_queried_search_payload: invalid input\n");
-        return false;
-    }
-
-    const char* sort_url = sort_type_to_search_param(q->sort);
-    const char* media_url = media_type_to_search_param(q->media);
-
-    char params[16];
-    const int len = snprintf(params, sizeof(params), "%s%s",  sort_url, media_url);
-    if (len < 0 || len >= sizeof(params)) {
-        printf("add_queried_search_payload: snprintf returned %d\n", len);
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "query", q->string) == NULL) {
-        printf("add_queried_search_payload: failed to add 'query'\n");
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "params", params) == NULL) {
-        printf("add_queried_search_payload: failed to add 'params'\n");
-        return false;
-    }
-
-    return true;
-}
-
-bool add_view_channel_videos_payload(cJSON* root, const Query* q)
-{
-    if ((root == NULL) || (q == NULL) || (q->focused_id[0] == '\0')) {
-        printf("add_view_channel_videos_payload: invalid input\n");
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "browseId", q->focused_id) == NULL) {
-        printf("add_view_channel_videos_payload: failed to add 'browseId\n");
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "params", YT_API_CHANNEL_VIDEOS_PARAMS) == NULL) {
-        printf("add_view_channel_videos_payload: failed to add 'browseId\n");
-        return false;
-    }
-
-    return true;
-}
-
-bool add_view_playlist_videos_payload(cJSON* root, const Query* q)
-{
-    if ((root == NULL) || (q == NULL) || (q->focused_id[0] == '\0')) {
-        printf("add_view_playlist_videos_payload: invalid input\n");
-        return false;
-    }
-
-    char playlist_browse_id[64];
-    const int len = snprintf(playlist_browse_id, sizeof(playlist_browse_id), YT_API_PLAYLIST_BROWSE_ID_PREFIX "%s", q->focused_id);
-    if ((len < 0) || (len >= sizeof(playlist_browse_id))) {
-        printf("add_view_playlist_videos_payload: snprintf returned %d\n", len);
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "browseId", playlist_browse_id) == NULL) {
-        printf("add_view_playlist_videos_payload: failed to add 'browseId'\n");
-        return false;
-    }
-
-    return true;
-}
-
-bool add_view_trending_videos_payload(cJSON* root, const Query* q)
-{
-    if ((root == NULL) || (q == NULL)) {
-        printf("add_view_trending_videos_payload: invalid input\n");
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "browseId", YT_API_TRENDING_BROWSE_ID) == NULL) {
-        printf("add_view_trending_videos_payload: failed to add 'browseId'\n");
-        return false;
-    }
-
-    return true;
-}
-
-bool add_view_related_videos_payload(cJSON* root, const Query* q)
-{
-    if ((root == NULL) || (q == NULL) || (q->focused_id[0] == '\0')) {
-        printf("add_view_related_videos_payload: invalid input\n");
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "videoId", q->focused_id) == NULL) {
-        printf("add_view_related_videos_payload: failed to add 'videoId'\n");
-        return false;
-    }
-
-    return true;
-}
-
-bool add_continuation_payload(cJSON* root, const char* continuation_token)
-{
-    if ((root == NULL) || (continuation_token == NULL)) {
-        printf("add_continuation_payload: invalid input\n");
-        return false;
-    }
-
-    if (cJSON_AddStringToObject(root, "continuation", continuation_token) == false) {
-        printf("add_continuation_token: failed to add 'continuation'\n");
-        return false;
-    }
-
-    return true;
-}
-
-cJSON* configure_base_request_payload()
-{
-    cJSON* client = cJSON_CreateObject();
-    cJSON* context = cJSON_CreateObject();
-    cJSON* root = cJSON_CreateObject();
-
-    if ((client == NULL) || (context == NULL) || (root == NULL)) {
-        cJSON_Delete(client);  
-        cJSON_Delete(context); 
-        cJSON_Delete(root);    
-        return NULL;
-    }
-
-    cJSON_AddStringToObject(client, "clientName", CLIENT_NAME);
-    cJSON_AddStringToObject(client, "clientVersion", CLIENT_VER);
-    cJSON_AddItemToObject(context, "client", client);  
-    cJSON_AddItemToObject(root, "context", context);  
-
-    return root; 
-}
-
-cJSON* configure_payload(const Query* query)
-{
-    if (query == NULL) return NULL;
-
-    cJSON* root = configure_base_request_payload();
-    if (root == NULL) {
-        printf("configure_payload: failed to create base payload\n");
-        return NULL;
-    }
-
-    bool (*payload_funct)(cJSON*,const Query*) = NULL;
-
-    if (query->attr == QUERTY_ATTR_APPEND)  {
-        if (continuation_token && continuation_token[0] != '\0') {
-            if (add_continuation_payload(root, continuation_token) == false) {
-                cJSON_Delete(root); root = NULL;
-            }
-        }
-
-        else {
-            printf("configure_payload: no continuation token for payload\n");
-            cJSON_Delete(root); root = NULL;
-        }
-
-        return root;
-    }
-
-    else if (query->attr == QUERY_ATTR_REPLACE) {
-        switch (query->type) {
-            case QUERY_TYPE_VIEW_RELATED:    
-            case QUERY_TYPE_VIEW_VIDEO:   payload_funct = add_view_related_videos_payload;  break;
-            case QUERY_TYPE_USER_INPUT:    payload_funct = add_queried_search_payload;       break;
-            case QUERY_TYPE_VIEW_TRENDING:      payload_funct = add_view_trending_videos_payload; break;
-            case QUERY_TYPE_VIEW_PLAYLIST: payload_funct = add_view_playlist_videos_payload; break;
-            case QUERY_TYPE_VIEW_CHANNEL:  payload_funct = add_view_channel_videos_payload;  break;
-            case QUERY_TYPE_VIEW_WATCH_HISTORY: return NULL;;
-            case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS: return NULL;;
-            case QUERY_TYPE_VIEW_LIKED_VIDEOS: return NULL;
-        }
-    }
-
-    if (payload_funct && (payload_funct(root, query) == false)) {
-        printf("configure_payload: failed to add payload\n");
-        cJSON_Delete(root); root = NULL;
-    }
-
-    return root;
-}
-
-HttpsRequest configure_post_request(const Query query, const char* host)
-{
-    HttpsRequest req = (HttpsRequest) {0};
-
-    if (host == NULL) return req;
-
-    if (configure_youtube_internal_api_path(req.path, sizeof(req.path), query.type, "") == false) {
-        printf("configure_post_request: failed to resolve path\n");
-        return (HttpsRequest) {0};
-    }
-
-    cJSON* payload = configure_payload(&query);
-
-    if (payload == NULL) {
-        printf("configure_post_request: 'payload' is NULL'\n");
-        return (HttpsRequest) {0};
-    }
-
-    req.payload = cJSON_Print(payload);
-
-    if (configure_post_header(req.header, sizeof(req.header), host, req.path, strlen(req.payload)) == false) {
-        printf("configure_post_request: failed to configure header\n");
-        free(req.payload); req.payload = NULL;
-        cJSON_Delete(payload); payload = NULL;
-        return (HttpsRequest) {0};
-    }
-    
-    cJSON_Delete(payload); payload = NULL;
-    
-    return req;
-}
-
-static SSL_CTX *ssl_ctx = NULL;
-
-int ssl_read_line(SSL* ssl, char* buffer, const size_t buffer_size) 
-{
-    if ((ssl == NULL) || (buffer == NULL)) return -1;
-
-    size_t pos = 0;
-    char c;
-
-    while (pos < buffer_size - 1) {
-        int byte = SSL_read(ssl, &c, 1);
-        if (byte <= 0) {
-            printf("ssl_read_line: SSL_read returned %d\n", byte);
-            return byte;
-        }
-
-        buffer[pos++] = c;
-
-        if (c == '\n') break;
-    }
-
-    buffer[pos] = '\0';
-
-    return pos;
-}
-
-int ssl_read_header(SSL* ssl, char* dest, const size_t dest_size)
-{
-    if ((ssl == NULL) || (dest == NULL)) return 0;
-
-    const char* last_line = "\r\n";
-
-    size_t total_len = 0;
-    char line[1024] = {0};
-    int line_len = 0;
-
-    while(strcmp(line, last_line) != 0) {
-        line_len = ssl_read_line(ssl, line, sizeof(line));
-        if (line_len <= 0) {
-            printf("ssl_read_header: 'line_len' is %d\n", line_len);
-            return line_len;
-        }
-
-        strncat(dest, line, dest_size - total_len);
-
-        total_len += line_len;
-    }
-
-    dest[total_len] = '\0';
-
-    return total_len;
-}
-
-int ssl_read_n(SSL* ssl, Buffer* buffer, const size_t n)
-{
-    if ((ssl == NULL) || (buffer == NULL)) return -1;
-
-    char data[4096];
-
-    size_t bytes_read = 0;
-    size_t bytes_remaining = n;
-    while (bytes_remaining > 0) {
-        size_t to_read = bytes_remaining < sizeof(data) ? bytes_remaining : sizeof(data);
-        
-        int read = SSL_read(ssl, data, to_read);
-        if (read <= 0) {
-            printf("ssl_read_n: SSL read returned %d\n", read);
-            return read;
-        }
-
-        bytes_read += read;
-        bytes_remaining -= read; 
-        buffer_write_data(buffer, data, read);
-    }      
-
-    return bytes_read;
-}
-
-bool ssl_write_request(SSL* ssl, const HttpsRequest req)
-{
-    if (ssl == NULL) return false;
-
-    if (SSL_write(ssl, req.header, strlen(req.header)) <= 0) {
-        printf("ssl_write_request: failed to write header\n");
-        return false;
-    }
-
-    if (req.payload && (req.payload[0] != '\0')) {
-        if (SSL_write(ssl, req.payload, strlen(req.payload)) <= 0) {
-            printf("ssl_write_request: failed to write body\n");
-            return false;
-        }
-    }
-
-    return true;
-}
-
-int get_https_request_code(const char* response_line, char* dest, const size_t dest_size)
-{
-    if (response_line == NULL) return -1;
-
-    bool in_request_code = false;
-    
-    int i = 0;
-
-    for (const char* current = response_line; (*current) && (i < dest_size); current++) {
-        const char c = (*current);
-
-        if (in_request_code == false) {
-            if (isdigit(c)) in_request_code = true;
-        }
-
-        if (in_request_code) {
-            if (isdigit(c) == false) break;
-
-            dest[i++] = c;
-        }
-    }
-
-    dest[i] = '\0';
-
-    return i;
-}
-
-bool valid_request_code(const char* response_header)
-{
-    if (response_header == NULL) return false;
-
-    char* response_line = strstr(response_header, "HTTP/1.1");
-    if (response_line == NULL) {
-        printf("valid_request_code: \"HTTP/1.1\" not found\n");
-        return false;
-    }
-
-    response_line += strlen("HTTP/1.1");
-
-    char request_code[8] = {0};
-    if (get_https_request_code(response_line, request_code, sizeof(request_code)) <= 0) {
-        printf("valid_request_code: get_https_request_code failed\n");
-        return false;
-    }
-
-    return (strcmp(request_code, VALID_HTTPS_RESPONSE_CODE) == 0);
-}
-
-Buffer send_https_request(const HttpsRequest request, SSL_CTX* ssl_ctx, Connection* connection)
-{
-    Buffer res = buffer_init();
-
-    if ((ssl_ctx == NULL) || (connection == NULL)) return res;
-
-    pthread_mutex_lock(&connection->mutex);
-
-    if (connected_to_internet() == false) {
-        printf("send_https_request: no internet connection\n");
-        connection->connected = false;
-        pthread_mutex_unlock(&connection->mutex);
-        return res;
-    }
-
-    if (connection->connected == false) {
-        if ((connection->connected = connection_establish(connection, ssl_ctx)) == false) {
-            printf("send_https_request: connection_established failed\n");
-            pthread_mutex_unlock(&connection->mutex);
-            return res;
-        }
-    }
-
-    if (ssl_write_request(connection->ssl, request) == false) {
-        printf("send_https_request: ssl_write_request failed\n");
-        connection->connected = false;
-        pthread_mutex_unlock(&connection->mutex);
-        return res;
-    }
-
-    char header[4096] = {0};
-    if (ssl_read_header(connection->ssl, header, sizeof(header)) <= 0) {
-        printf("send_https_request: ssl_read_header failed\n");
-        connection->connected = false;
-        pthread_mutex_unlock(&connection->mutex);
-        return res;
-    }
-
-    if (valid_request_code(header) == false) {
-        printf("send_https_request: valid_request_code failed\n");
-        write_string_to_file("invalid_code_header.txt", header);
-        connection->connected = false;
-        pthread_mutex_unlock(&connection->mutex);
-        return res;
-    }
-
-    char* content_length_line = strstr(header, CONTENT_LENGTH_HEADER_TAG);
-    if (content_length_line) {
-        char len_str[16] = {0};
-        int i = 0;
-
-        char* ptr = content_length_line + strlen(CONTENT_LENGTH_HEADER_TAG);
-        if (ptr) {
-            while (*ptr && isspace((unsigned char) *ptr)) ptr++;
-
-            for ( ; (*ptr) && (*ptr != '\n'); ptr++) {
-                if (isdigit(*ptr)) len_str[i++] = *ptr;
-            }
-        }
-
-        len_str[i] = '\0';
-
-        int content_length = atoi(len_str);
-        if (content_length == 0) {
-            printf("send_https_request: invalid content length read\n");
-            write_string_to_file("invalid_content_len_header.txt", header);
-            connection->connected = false;
-            pthread_mutex_unlock(&connection->mutex);
-            return res;
-        }
-
-        ssl_read_n(connection->ssl, &res, content_length);
-    }
-
-    char* transfer_encoding_line = strstr(header, TRANSFER_ENCODING_HEADER_TAG);
-    if (transfer_encoding_line) {
-        char encoding_type[16] = {0};
-        int i = 0;
-
-        char* ptr = transfer_encoding_line += strlen(TRANSFER_ENCODING_HEADER_TAG);
-        if (ptr) {
-            while (*ptr && isspace(*ptr)) ptr++;
-
-            for (; *ptr && (*ptr != '\n'); ptr++) {
-                if (isalpha(*ptr)) encoding_type[i++] = *ptr;
-            }
-        }
-        
-        encoding_type[i] = '\0';
-
-        if (strcmp(encoding_type, CHUNKED_ENCODING) == 0) {
-            const char *crlf = "\r\n";
-            const size_t crlf_len = strlen(crlf);
-            
-            int chunk_size = -1; 
-            while (chunk_size != 0) {
-                char hex[16] = {0};
-                int len = ssl_read_line(connection->ssl, hex, sizeof(hex));
-                if (len <= crlf_len) {
-                    printf("send_https_request: failed to read chunk size\n");
-                    buffer_free(&res);
-                    connection->connected = false;
-                    pthread_mutex_unlock(&connection->mutex);
-                    return res;
-                }
-
-                hex[len - crlf_len] = '\0';
-
-                chunk_size = strtol(hex, NULL, 16);
-                int read = ssl_read_n(connection->ssl, &res, chunk_size);
-                if (read != chunk_size) {
-                    printf("send_https_request: (%d/%d) bytes read\n", read, chunk_size);
-                    buffer_free(&res);
-                    connection->connected = false;
-                    pthread_mutex_unlock(&connection->mutex);
-                    return res;
-                }
-
-                char trailing_crlf[16];
-                ssl_read_line(connection->ssl, trailing_crlf, sizeof(trailing_crlf));
-            }
-        }
-    }
-
-    pthread_mutex_unlock(&connection->mutex);
-    return res;
-}
-
 
 bool valid_cjson_string(const cJSON* json_str)
 {
@@ -1384,7 +813,7 @@ void* load_thumbnail(void* args)
         goto clean;
     }
 
-    Buffer res = send_https_request(req, ssl_ctx, targs->conn);
+    Buffer res = get_https_response(req, ssl_ctx, targs->conn);
     if (buffer_is_ready(&res) == false) {
         printf("load_thumbnail: thumbnail response is invalid\n");
         goto clean;
@@ -1626,7 +1055,7 @@ cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* 
         return NULL;
     }
 
-    Buffer res = send_https_request((*req), ssl_ctx, conn);
+    Buffer res = get_https_response((*req), ssl_ctx, conn);
     if (buffer_is_ready(&res) == false) {
         printf("get_json_response: invalid response recived\n");
         return NULL;
@@ -1657,8 +1086,8 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    HttpsRequest req = configure_post_request(targs->query, targs->conn->host);
-    if (valid_post_request(req) == false) {
+    HttpsRequest req = configure_post_request(targs->query, targs->conn->host, api_key, continuation_token);
+    if (post_request_is_ready(req) == false) {
         printf("get_results_from_query: invalid post req configured\n");
         free(targs); targs = NULL;
         return NULL;
@@ -2301,7 +1730,7 @@ void* get_video_description(void* args)
         goto cleanup;
     }
 
-    res = send_https_request(targs->req, ssl_ctx, targs->conn); 
+    res = get_https_response(targs->req, ssl_ctx, targs->conn); 
     if (buffer_is_ready(&res) == false) {
         printf("get_video_description: invaild https response\n");
         goto cleanup;
@@ -2398,13 +1827,13 @@ cJSON* init_search_result_json(const SearchResult* result)
     return result_json;
 }
 
-void update_user_data(cJSON* user_data, const SearchResult* interacted_result)
+void add_user_data(cJSON* data, const SearchResult* interacted_result)
 {
-    if ((user_data == NULL) || (interacted_result == NULL)) return;
+    if ((data == NULL) || (interacted_result == NULL)) return;
 
-    cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
+    cJSON* array = cjson_pointer_get(data, ARRAY_NAME);
     if (valid_cjson_array(array) == false) {
-        printf("update_user_data: invalid array parsed\n");
+        printf("add_user_data: invalid array parsed\n");
         return;
     }
 
@@ -2432,6 +1861,23 @@ void update_user_data(cJSON* user_data, const SearchResult* interacted_result)
     }
 
     cJSON_InsertItemInArray(array, 0, to_add);
+}
+
+void delete_user_data(cJSON* data, const char* id)
+{
+    if ((data == NULL) || (valid_string(id) == false)) return;
+
+    cJSON* array = cjson_pointer_get(data, ARRAY_NAME);
+    if (valid_cjson_array(array) == false) {
+        fprintf(stderr, "delete_user_data: parsed json is invalid array\n");
+        return;
+    }
+
+    const int i = find_array_item(array, id, OBJ_ID_PATH);
+    if (i >= 0) {
+        cJSON* delete = cJSON_DetachItemFromArray(array, i);
+        cJSON_Delete(delete); delete = NULL;
+    }
 }
 
 typedef struct
@@ -2496,7 +1942,11 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
     const char* button_text = highlighted_channel->is_subscribed ? "Unsubscribe" : "Subscribe";
 
     if (GuiButton(subscribe_button_bounds, button_text)) {
-        update_user_data(subscribed_channels_json, &highlighted_channel->info);
+        if (highlighted_channel->is_subscribed)
+            delete_user_data(subscribed_channels_json, highlighted_channel->info.id);
+        else
+            add_user_data(subscribed_channels_json, &highlighted_channel->info);
+        
         highlighted_channel->is_subscribed = !highlighted_channel->is_subscribed;
     }
 }
@@ -2525,8 +1975,8 @@ void* parse_channel(void* args)
         return NULL;
     }
     
-    HttpsRequest req = configure_post_request(targs->query, targs->results_conn->host);
-    if (valid_post_request(req) == false) {
+    HttpsRequest req = configure_post_request(targs->query, targs->results_conn->host, api_key, continuation_token);
+    if (post_request_is_ready(req) == false) {
         printf("parse_channel: invalid post request\n");
         if (req.payload) {
             free(req.payload); req.payload = NULL;
@@ -2685,7 +2135,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
     };
 
     if (GuiButton(like_video_button_bounds, "Like Video")) {
-        update_user_data(liked_video_data, &selected_video->info);
+        add_user_data(liked_video_data, &selected_video->info);
     }
 
     const Rectangle related_videos_button_bounds = {
@@ -2796,8 +2246,8 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 
 // no views bug 
 // cant unsubscribe
-    // need to implement removal of user data
     // split programs up 
+    // bug with getting user's videos, shows for half a second, then dissapears
 
 int main()
 {
@@ -2811,7 +2261,7 @@ int main()
     init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
     
     ConnectionPool youtube_pool = connection_pool_init("www.youtube.com", HTTPS_PORT, N_CONN);
-    ConnectionPool video_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO), HTTPS_PORT, N_CONN); // playlists, videos, shorts, and live videos all share the same host
+    ConnectionPool video_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO), HTTPS_PORT, N_CONN);
     ConnectionPool channel_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL), HTTPS_PORT, N_CONN);
 
     bool load_video_information = false;
@@ -2886,8 +2336,8 @@ int main()
             load_video_information = false;
 
             Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
-            HttpsRequest req = configure_post_request(query, conn->host);
-            if (valid_post_request(req)) {
+            HttpsRequest req = configure_post_request(query, conn->host, api_key, continuation_token);
+            if (post_request_is_ready(req)) {
                 FocusedInfoArgs* targs = init_focused_info_args(req, conn, &highlighted_video);
                 if (targs) {
                     if (launch_task(&task_queue, targs, get_video_description) == false) {
@@ -3127,7 +2577,7 @@ int main()
                                 load_video_information = true;
                                 query.type = QUERY_TYPE_VIEW_VIDEO;
                                 memcpy(&highlighted_video.info, search_result, sizeof(SearchResult));
-                                update_user_data(watch_history_json, search_result);
+                                add_user_data(watch_history_json, search_result);
                             }
                             break;
                         case MEDIA_TYPE_PLAYLIST:

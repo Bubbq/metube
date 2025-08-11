@@ -1,8 +1,11 @@
 #include "utils.h"
 
 #include <ctype.h>
+#include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+ #include <arpa/inet.h>
+#include <sys/socket.h>
 
 int bound_index_to_array (const int pos, const int array_size)
 {
@@ -124,4 +127,22 @@ size_t trim_whitespace(char* string)
 bool valid_string(const char* string)
 {
     return (string) && (string[0] != '\0');
+}
+
+bool connected_to_internet()
+{
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+    
+    struct sockaddr_in server = {
+        .sin_family = AF_INET,
+        .sin_port = htons(53), 
+        .sin_addr.s_addr = inet_addr("8.8.8.8") 
+    };
+    
+    bool connected = (connect(sock, (struct sockaddr*)&server, sizeof(server)) == 0);
+
+    close(sock);
+    
+    return connected;
 }
