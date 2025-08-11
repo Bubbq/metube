@@ -16,8 +16,9 @@
 #include "buffer.h"
 #include "yt_client.h"
 #include "connection.h"
-#include "texture_cache.h"
+#include "json_utils.h"
 #include "https_utils.h"
+#include "texture_cache.h"
 
 #include "uthash.h"
 #include "raylib.h"
@@ -275,124 +276,11 @@ void list_print(List* list)
     }
 }
 
-bool valid_cjson_string(const cJSON* json_str)
-{
-    return (json_str) && (cJSON_IsString(json_str)) && (json_str->valuestring) && (json_str->valuestring[0] != '\0');
-}
-
-bool valid_cjson_array(const cJSON* json_arr)
-{
-    return json_arr && cJSON_IsArray(json_arr);
-}
-
-bool valid_cjson_number(const cJSON* json_num)
-{
-    return json_num && cJSON_IsNumber(json_num);
-}
-
-cJSON* parse_json_file(const char* filename)
-{
-    if ((filename == NULL) || (filename[0] == '\0')) return NULL;
-
-    char* buffer = get_file_content(filename);
-    if (buffer == NULL) {
-        printf("parse_json_file: 'buffer' is null\n");
-        return NULL;
-    }
-
-    cJSON* json = cJSON_Parse(buffer);
-
-    free(buffer); buffer = NULL;
-
-    return json;
-}
-
-void write_json_file(const cJSON* json, const char* filename)
-{
-    if ((json == NULL) || (filename == NULL)) return;
-
-    char* buffer = cJSON_Print(json);
-    if (buffer == NULL) {
-        printf("write_json_file: 'buffer' is null\n");
-        return; 
-    }
-
-    write_string_to_file(filename, buffer);
-
-    free(buffer); buffer = NULL;
-}
-
-cJSON* cjson_pointer_get(cJSON* root, const char* path)
-{
-    if (root == NULL) return NULL;
-    if (path == NULL) return root;
-
-    const int last_element_index = -1;
-
-    int n = 0;
-    const char** elements = TextSplit(path, '.', &n); 
-
-    cJSON* ret = root;
-
-    for(int i = 0; (i < n); i++) {
-        if (elements[i][0] == '\0') {
-            continue;
-        }
-
-        const char* opening_brace_ptr = strchr(elements[i], '[');
-        if (opening_brace_ptr) {
-            const size_t name_len = opening_brace_ptr - elements[i] + 1; 
-
-            char array_name[name_len];
-            strncpy(array_name, elements[i], name_len - 1);
-            array_name[name_len - 1] = '\0';
-
-            ret = cJSON_GetObjectItem(ret, array_name);
-            if (ret == NULL) {
-                // printf("cjson_pointer_get: failed to add array object \"%s\"\n", elements[i]);
-                return NULL;
-            }
-
-            if (cJSON_IsArray(ret) == false) {
-                printf("cjson_pointer_get: accessing element in non-array object (%s)\n", elements[i]);
-                return NULL;
-            }
-
-            const char* closing_brace_ptr = strchr(opening_brace_ptr, ']');
-            if (closing_brace_ptr == NULL) {
-                printf("cjson_pointer_get: \"%s\" is an unbalanced array\n", elements[i]);
-                return NULL;
-            }
-
-            const size_t len = closing_brace_ptr - opening_brace_ptr; 
-
-            char index_buffer[len];
-            strncpy(index_buffer, opening_brace_ptr + 1, len - 1);
-            index_buffer[len - 1] = '\0';
-
-            const size_t arr_size = cJSON_GetArraySize(ret);
-            
-            const int index_buffer_val = atoi(index_buffer);
-            const size_t index = (index_buffer_val == last_element_index) ? (arr_size - 1) : index_buffer_val;
-            if (index >= arr_size) {
-                printf("cjson_pointer_get: accessing element %zu in %zu size array (%s)\n", index, arr_size, elements[i]);
-                return NULL;
-            }
-
-            ret = cJSON_GetArrayItem(ret, index);
-        } 
-
-        else ret = cJSON_GetObjectItem(ret, elements[i]);
-    }
-
-    return ret;
-}
-
 bool video_is_youtube_short(cJSON *videoRenderer) 
 {
     const char* path = ".navigationEndpoint.commandMetadata.webCommandMetadata.url";
     const cJSON* url = cjson_pointer_get(videoRenderer, path); 
-    if (valid_cjson_string(url)) {
+    if (json_string_is_valid(url)) {
         return strstr(url->valuestring, "/shorts");
     }
 
@@ -403,7 +291,7 @@ bool video_is_live(cJSON* videoRenderer)
 {
     const char* path = ".badges[0].metadataBadgeRenderer.label";
     const cJSON* label = cjson_pointer_get(videoRenderer, path);
-    if (valid_cjson_string(label)) {
+    if (json_string_is_valid(label)) {
         return (strcmp("LIVE", label->valuestring) == 0);
     }
 
@@ -440,24 +328,6 @@ void format_view_count(char* dest, const size_t dest_size)
         printf("format_view_count: string truncated\n");
         return;
     }
-}
-
-bool assign_string_from_path(cJSON* root, const char* path, char* dest, const size_t dest_size)
-{
-    if ((root == NULL) || (path == NULL) || (dest == NULL)) {
-        printf("assign_string_from_path: invalid input\n");
-        return false;
-    }
-
-    const cJSON* json_str = cjson_pointer_get(root, path);
-
-    if (valid_cjson_string(json_str)) {
-        strncpy(dest, json_str->valuestring, dest_size - 1);
-        dest[dest_size - 1] = '\0';
-        return true;
-    }
-
-    else return false;
 }
 
 bool assign_video_thumbnail_path(const char* video_id, char* dest, const size_t dest_size)
@@ -679,7 +549,7 @@ void parse_channel_result(cJSON* channelRenderer, SearchResult* channel)
     }
 
     const cJSON* channelThumbnailLink = cjson_pointer_get(channelRenderer, ".thumbnail.thumbnails[0].url");
-    if (valid_cjson_string(channelThumbnailLink)) {
+    if (json_string_is_valid(channelThumbnailLink)) {
         // the path either starts with '/ytc', or just '/'
         const char* path1 = strstr(channelThumbnailLink->valuestring, "/ytc");
         const char* path2 = strrchr(channelThumbnailLink->valuestring, '/');
@@ -878,7 +748,7 @@ const char* get_results_list_path(const QueryType search_type, const QueryAttrib
 void parse_user_data(cJSON* user_data, SearchResult* dest) 
 {
     const cJSON* media_type = cjson_pointer_get(user_data, OBJ_MEDIA_TYPE_PATH);
-    if (valid_cjson_number(media_type) == false) {
+    if (cJSON_IsNumber(media_type) == false) {
         printf("parse_user_data: user_data element has invalid media type\n");
         dest->media_type = MEDIA_TYPE_UNDF;
         return;
@@ -918,7 +788,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
     const char* path = get_results_list_path(search_type, search_attr); 
 
     cJSON* results_array = cjson_pointer_get(json, path);
-    if (valid_cjson_array(results_array) == false) {
+    if (cJSON_IsArray(results_array) == false) {
         printf("create_results_from_json: invalid results array from path %s\n", path);
         return -1;
     }
@@ -982,30 +852,6 @@ int create_results_from_json(cJSON* json, List* results, const QueryType search_
     return elements_added;
 }
 
-const char* query_type_to_text(const QueryType query_type)
-{
-    switch (query_type) {
-        case QUERY_TYPE_USER_INPUT: return "QUERIED";
-        case QUERY_TYPE_VIEW_RELATED: return "RELATED";
-        case QUERY_TYPE_VIEW_TRENDING: return "TRENDING";
-        case QUERY_TYPE_VIEW_VIDEO: return "VIDEO FOCUS";
-        case QUERY_TYPE_VIEW_PLAYLIST: return "VIEW PLAYLIST";
-        case QUERY_TYPE_VIEW_CHANNEL: return "VIEW CHANNEL";
-        default:
-            return NULL;
-    }
-}
-
-const char* query_attr_to_text(const QueryAttribute query_attr)
-{
-    switch (query_attr) {
-        case QUERY_ATTR_REPLACE: return "NEW";
-        case QUERTY_ATTR_APPEND: return "APPENDING";
-        default:
-            return NULL;
-    }
-}
-
 const char* get_continuation_token_path(const QueryType search_type, const QueryAttribute search_attr)
 {
     switch (search_type) {
@@ -1039,7 +885,7 @@ void get_continuation_token(cJSON* json, const QueryType query_type, const Query
     }
 
     const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
-    if (valid_cjson_string(token_obj) == false) {
+    if (json_string_is_valid(token_obj) == false) {
         printf("get_continuation_token: 'token_obj' is invalid (path: %s)\n", continuation_path);
         return;
     }
@@ -1047,26 +893,6 @@ void get_continuation_token(cJSON* json, const QueryType query_type, const Query
     if ((continuation_token = strdup(token_obj->valuestring)) == NULL) {
         printf("get_continuation_token: strdup failed\n");
     }
-}
-
-cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* conn)
-{
-    if ((req == NULL) || (ssl_ctx == NULL) || (conn == NULL)) {
-        printf("get_json_response: invalid input(s)\n");
-        return NULL;
-    }
-
-    Buffer res = get_https_response((*req), ssl_ctx, conn, HTTP_PROTOCOL_VER);
-    if (buffer_is_ready(&res) == false) {
-        printf("get_json_response: invalid response recived\n");
-        return NULL;
-    }
-
-    cJSON* ret = cJSON_Parse(res.data);
-
-    buffer_free(&res);
-    
-    return ret;
 }
 
 void log_search(const QueryType query_type, const QueryAttribute query_attr, const float duration, const int nresults)
@@ -1094,7 +920,7 @@ void* get_results_from_query(void* args)
         return NULL;
     }
 
-    cJSON* json_res = get_json_response(&req, ssl_ctx, targs->conn);
+    cJSON* json_res = get_json_response(&req, ssl_ctx, targs->conn, HTTP_PROTOCOL_VER);
 
     free(req.payload); req.payload = NULL;
 
@@ -1750,7 +1576,7 @@ void* get_video_description(void* args)
     const char* desc_path = ".videoDetails.shortDescription";
 
     const cJSON* shortDescription = cjson_pointer_get(json, desc_path);
-    if (valid_cjson_string(shortDescription)) {
+    if (json_string_is_valid(shortDescription)) {
         if ((targs->highlighted_video->description = strdup(shortDescription->valuestring)) == NULL) {
             printf("get_video_description: strdup failed\n");
         }
@@ -1766,19 +1592,6 @@ void* get_video_description(void* args)
         return NULL;
 }
 
-cJSON* create_empty_array_object(const char* array_name)
-{
-    if ((array_name == NULL) || (array_name[0] == '\0')) return NULL;
-
-    cJSON* root = cJSON_CreateObject();
-
-    cJSON* array = cJSON_CreateArray();
-
-    cJSON_AddItemToObject(root, array_name, array);
-
-    return root;
-}
-
 int find_array_item(const cJSON* array, const char* id, const char* id_path)
 {
     if ((array == NULL) || (id == NULL) || (id_path == NULL)) return -1;
@@ -1787,7 +1600,7 @@ int find_array_item(const cJSON* array, const char* id, const char* id_path)
     cJSON* item;
     cJSON_ArrayForEach(item, array) {
         const cJSON* id_item = cjson_pointer_get(item, id_path);
-        if (valid_cjson_string(id_item) && (strcmp(id_item->valuestring, id) == 0)) {
+        if (json_string_is_valid(id_item) && (strcmp(id_item->valuestring, id) == 0)) {
             return i;
         }
 
@@ -1833,7 +1646,7 @@ void add_user_data(cJSON* data, const SearchResult* interacted_result)
     if ((data == NULL) || (interacted_result == NULL)) return;
 
     cJSON* array = cjson_pointer_get(data, ARRAY_NAME);
-    if (valid_cjson_array(array) == false) {
+    if (cJSON_IsArray(array) == false) {
         printf("add_user_data: invalid array parsed\n");
         return;
     }
@@ -1869,7 +1682,7 @@ void delete_user_data(cJSON* data, const char* id)
     if ((data == NULL) || (valid_string(id) == false)) return;
 
     cJSON* array = cjson_pointer_get(data, ARRAY_NAME);
-    if (valid_cjson_array(array) == false) {
+    if (cJSON_IsArray(array) == false) {
         fprintf(stderr, "delete_user_data: parsed json is invalid array\n");
         return;
     }
@@ -1894,7 +1707,7 @@ bool is_subbed_to_channel(cJSON* subscribed_channels_json, const char* id)
 
     cJSON* subbed_channels = cjson_pointer_get(subscribed_channels_json, ARRAY_NAME);
     
-    if (valid_cjson_array(subbed_channels) == false) return false;
+    if (cJSON_IsArray(subbed_channels) == false) return false;
 
     const int found = find_array_item(subbed_channels, id, OBJ_ID_PATH);
 
@@ -1986,7 +1799,7 @@ void* parse_channel(void* args)
         return NULL;
     }
 
-    cJSON* json = get_json_response(&req, ssl_ctx, targs->results_conn);
+    cJSON* json = get_json_response(&req, ssl_ctx, targs->results_conn, HTTP_PROTOCOL_VER);
     if (json == NULL) {
         printf("parse_channel: 'targs' is null\n");
         if (req.payload) {
@@ -2033,7 +1846,7 @@ void* parse_channel(void* args)
     const char* thumbnail_path = ".header.pageHeaderRenderer.content.pageHeaderViewModel.image.decoratedAvatarViewModel.avatar.avatarViewModel.image.sources[0].url";
     
     const cJSON* thumbnail_url_item = cjson_pointer_get(json, thumbnail_path);
-    if (valid_cjson_string(thumbnail_url_item) == false) {
+    if (json_string_is_valid(thumbnail_url_item) == false) {
         printf("parse_channel: failed to assign thumbnail path\n");
         targs->channel->info.thumbnail_loaded = false;
         targs->channel->info.thumbnail_path[0] = '\0';
@@ -2246,7 +2059,6 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 }
 
 // split programs up 
-    // https stuff
     // json stuff
     // user data management
     // bug with getting user's videos, shows for half a second, then dissapears
@@ -2665,17 +2477,17 @@ int main()
         texture_cache_free(&texture_cache);
         
         if (watch_history_json) {
-            write_json_file(watch_history_json, WATCH_HISTORY_FILE);
+            write_json_to_file(watch_history_json, WATCH_HISTORY_FILE);
             cJSON_Delete(watch_history_json); watch_history_json = NULL;
         }
 
         if (subscribed_channels_json) {
-            write_json_file(subscribed_channels_json, SUBSCRIPTIONS_FILE);
+            write_json_to_file(subscribed_channels_json, SUBSCRIPTIONS_FILE);
             cJSON_Delete(subscribed_channels_json); subscribed_channels_json = NULL;
         }
 
         if (liked_videos_json) {
-            write_json_file(liked_videos_json, LIKED_VIDEOS_FILE);
+            write_json_to_file(liked_videos_json, LIKED_VIDEOS_FILE);
             cJSON_Delete(liked_videos_json); liked_videos_json = NULL;
         }
 
@@ -2705,3 +2517,6 @@ int main()
     // thumbnail frames from video click
     // better create_results_from_json?
     // move ui stuff together
+    // update highlighted channel anytime you press a video
+    // create own TextSplit to remove raylib dependency in json_utils.h
+    // remove raylib dependency in query.h

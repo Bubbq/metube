@@ -36,6 +36,8 @@ typedef enum
     QUERTY_ATTR_APPEND,
 } QueryAttribute;
 
+const char* query_attr_to_text(const QueryAttribute query_attr);
+
 typedef enum
 {
     QUERY_TYPE_USER_INPUT,  
@@ -50,6 +52,7 @@ typedef enum
 } QueryType;
 
 const char* query_type_to_endpoint(const QueryType search_type);
+const char* query_type_to_text(const QueryType query_type);
 
 typedef struct
 {

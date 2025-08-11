@@ -6,6 +6,7 @@
 
 #include <stdlib.h>
 #include <stdbool.h>
+#include <cjson/cJSON.h>
 #include <openssl/types.h>
 
 #define CRLF "\r\n"
@@ -37,5 +38,6 @@ int ssl_read_chunk(SSL* ssl, Buffer* buffer);
 bool status_code_is_valid(const char* response_header, const char* http_protocol_ver);
 void get_http_header_tag_value(const char* header, const char* name, char* dest, const size_t dest_size);
 Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connection* connection, const char* http_protocol_ver);
+cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* conn, const char* protocol_ver);
 
 #endif
