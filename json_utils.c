@@ -1,5 +1,5 @@
-#include "utils.h"
-#include "json_utils.h"
+#include "include/utils.h"
+#include "include/json_utils.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -155,4 +155,22 @@ cJSON* create_empty_array_object(const char* array_name)
     }
 
     return root;
+}
+
+int find_array_item(const cJSON* array, const char* id, const char* id_path)
+{
+    if ((cJSON_IsArray(array) == false) || (valid_string(id) == false) || (valid_string(id_path) == false)) return -1;
+
+    int i = 0;
+    cJSON* item;
+    cJSON_ArrayForEach(item, array) {
+        const cJSON* id_item = cjson_pointer_get(item, id_path);
+        if (json_string_is_valid(id_item) && (strcmp(id_item->valuestring, id) == 0)) {
+            return i;
+        }
+
+        i++;
+    }
+
+    return -1;
 }

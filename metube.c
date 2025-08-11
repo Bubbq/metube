@@ -10,24 +10,24 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
-#include "utils.h"
-#include "query.h"
-#include "timer.h"
-#include "buffer.h"
-#include "yt_client.h"
-#include "connection.h"
-#include "json_utils.h"
-#include "https_utils.h"
-#include "texture_cache.h"
+#include "include/utils.h"
+#include "include/query.h"
+#include "include/timer.h"
+#include "include/buffer.h"
+#include "include/yt_client.h"
+#include "include/connection.h"
+#include "include/json_utils.h"
+#include "include/https_utils.h"
+#include "include/texture_cache.h"
 
-#include "uthash.h"
-#include "raylib.h"
+#include "include/uthash.h"
+#include "include/raylib.h"
 #include "arpa/inet.h"
 #include "cjson/cJSON.h"
 #include "openssl/ssl.h"
 
 #define RAYGUI_IMPLEMENTATION
-#include "raygui.h"
+#include "include/raygui.h"
 
 #define MAX_THREADS 4
 #define N_CONN MAX_THREADS
@@ -55,8 +55,6 @@
 #define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION "mqdefault"
 
 #define HTTPS_PORT "443"
-#define YT_API_PLAYLIST_BROWSE_ID_PREFIX "VL"    
-#define YT_API_TRENDING_BROWSE_ID "FEtrending" 
 
 static SSL_CTX* ssl_ctx = NULL;
 static char* continuation_token = NULL;
@@ -91,12 +89,6 @@ void search_result_free(SearchResult *search_result)
 {
     if (!search_result) return;
     free(search_result);
-}
-
-void print_search_result(const SearchResult *search_result) 
-{
-    printf("id) %s title) %s author) %s subs) %s views) %s date) %s length) %s video count) %s type) %d thumbnail) %s\n", 
-            search_result->id, search_result->title, search_result->authorId, search_result->subscriber_count, search_result->view_count, search_result->date_published, search_result->duration, search_result->video_count, search_result->media_type, search_result->thumbnail_path);
 }
 
 typedef struct RawThumbnail
@@ -259,21 +251,6 @@ void list_free(List* list)
     list->head = list->tail = NULL;
     pthread_cond_destroy(&list->cond);
     pthread_mutex_destroy(&list->mutex);
-}
-
-void list_print(List* list)
-{
-    if (list == NULL) return;
-    
-    for (Node* current = list->head; current; current = current->next) {
-        switch (current->type) {
-            case NODE_TYPE_SEACH_RESULT: print_search_result(current->content); break;
-            case NODE_TYPE_RAW_THUMBNAIL:
-            case NODE_TYPE_THREAD_TASK:
-            case NODE_TYPE_UNDF:
-                break;
-        }
-    }
 }
 
 bool video_is_youtube_short(cJSON *videoRenderer) 
@@ -1592,24 +1569,6 @@ void* get_video_description(void* args)
         return NULL;
 }
 
-int find_array_item(const cJSON* array, const char* id, const char* id_path)
-{
-    if ((array == NULL) || (id == NULL) || (id_path == NULL)) return -1;
-
-    int i = 0;
-    cJSON* item;
-    cJSON_ArrayForEach(item, array) {
-        const cJSON* id_item = cjson_pointer_get(item, id_path);
-        if (json_string_is_valid(id_item) && (strcmp(id_item->valuestring, id) == 0)) {
-            return i;
-        }
-
-        i++;
-    }
-
-    return -1;
-}
-
 cJSON* init_search_result_json(const SearchResult* result)
 {
     if ((result == NULL) || (result->media_type == MEDIA_TYPE_UNDF)) return NULL;
@@ -2059,10 +2018,10 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 }
 
 // split programs up 
+    // list/nodes 
     // user data management
     // youtube data json parsing
     // bug with getting user's videos, shows for half a second, then dissapears
-
 int main()
 {
     List thumbnail_queue = list_init();

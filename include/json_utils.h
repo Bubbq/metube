@@ -13,5 +13,6 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path);
 bool assign_string_from_path(cJSON* root, const char* path, char* dest, const size_t dest_size);
 
 cJSON* create_empty_array_object(const char* array_name);
+int find_array_item(const cJSON* array, const char* id, const char* id_path);
 
 #endif

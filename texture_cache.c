@@ -1,5 +1,5 @@
-#include "utils.h"
-#include "texture_cache.h"
+#include "include/utils.h"
+#include "include/texture_cache.h"
 
 #include <stdio.h>
 #include <stdlib.h>

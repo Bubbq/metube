@@ -1,5 +1,5 @@
-#include "utils.h"
-#include "connection.h"
+#include "include/utils.h"
+#include "include/connection.h"
 
 #include <stdio.h>
 #include <unistd.h>
