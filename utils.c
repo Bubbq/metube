@@ -1,6 +1,8 @@
 #include "utils.h"
 
 #include <ctype.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
@@ -145,4 +147,41 @@ bool connected_to_internet()
     close(sock);
     
     return connected;
+}
+
+char** text_split(const char* text, const char delim, int* count, char** copy_out)
+{
+    if ((valid_string(text) == false) || (delim == '\0') || (count == NULL)) return NULL;
+
+    (*copy_out) = strdup(text);
+    if ((*copy_out) == NULL) {
+        fprintf(stderr, "text_split: strdup returned null\n");
+        *count = 0;
+        return NULL;
+    }
+
+    char* copy = (*copy_out);
+
+    (*count) = 1;
+    for(const char* p = copy; *p; p++) {
+        if (*p == delim) (*count)++;
+    } 
+
+    char** tokens = malloc((*count) * sizeof(char*));
+    if (tokens == NULL) {
+        fprintf(stderr, "text_split: malloc returned null\n");
+        *count = 0;
+        return NULL;
+    }
+
+    memset(tokens, 0, (*count) * sizeof(char*));
+
+    int i = 0;
+    tokens[i++] = copy;
+    while ((copy = strchr(copy, delim))) {
+        *(copy++) = '\0';
+        if (i < (*count)) tokens[i++] = copy;
+    }
+
+    return tokens;
 }

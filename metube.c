@@ -2059,8 +2059,8 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 }
 
 // split programs up 
-    // json stuff
     // user data management
+    // youtube data json parsing
     // bug with getting user's videos, shows for half a second, then dissapears
 
 int main()
@@ -2518,5 +2518,5 @@ int main()
     // better create_results_from_json?
     // move ui stuff together
     // update highlighted channel anytime you press a video
-    // create own TextSplit to remove raylib dependency in json_utils.h
+    // issue with pressing user's videos button, sometimes channel shows for half second, then dissapears
     // remove raylib dependency in query.h

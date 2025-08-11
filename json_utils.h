@@ -1,9 +1,6 @@
 #ifndef JSON_UTILS_H
 #define JSON_UTILS_H
 
-#include "connection.h"
-#include "https_utils.h"
-
 #include <cjson/cJSON.h>
 
 // file I/O

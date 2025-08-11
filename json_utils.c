@@ -1,8 +1,9 @@
 #include "utils.h"
-#include "raylib.h"
 #include "json_utils.h"
 
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <stdbool.h>
 
 cJSON* parse_json_file(const char* filename)
@@ -44,58 +45,65 @@ bool json_string_is_valid(const cJSON* json_str)
 
 cJSON* cjson_pointer_get(cJSON* root, const char* path)
 {
-    if (root == NULL) return NULL;
-    else if (valid_string(path) == false) return root;
+    if ((root == NULL) || (valid_string(path) == false)) return root;
 
     const int last_element_index = -1;
 
     int n = 0;
-    const char** elements = TextSplit(path, '.', &n); 
+    char* copy_output = NULL;
+    char** elements = text_split(path, '.', &n,&copy_output);
+    if (elements == NULL) return NULL;
 
     cJSON* ret = root;
 
     for(int i = 0; (i < n); i++) {
-        if (elements[i][0] == '\0') {
-            continue;
-        }
+        if (elements[i][0] == '\0') continue;
 
-        const char* opening_brace_ptr = strchr(elements[i], '[');
-        if (opening_brace_ptr) {
-            const size_t name_len = opening_brace_ptr - elements[i] + 1; 
+        const char* opening_brace = strchr(elements[i], '[');
+        if (opening_brace) {
+            const size_t name_len = (size_t) (opening_brace - elements[i]); 
 
-            char array_name[name_len];
-            strncpy(array_name, elements[i], name_len - 1);
-            array_name[name_len - 1] = '\0';
+            char array_name[name_len + 1]; 
+            memcpy(array_name, elements[i], name_len);
+            array_name[name_len] = '\0';
 
             ret = cJSON_GetObjectItem(ret, array_name);
             if (ret == NULL) {
-                // printf("cjson_pointer_get: failed to add array object \"%s\"\n", elements[i]);
+                fprintf(stderr, "cjson_pointer_get: failed to add array object \"%s\"\n", elements[i]);
+                free(copy_output); copy_output = NULL;
+                free(elements); elements = NULL;
                 return NULL;
             }
 
             if (cJSON_IsArray(ret) == false) {
-                printf("cjson_pointer_get: accessing element in non-array object (%s)\n", elements[i]);
+                fprintf(stderr, "cjson_pointer_get: accessing element in non-array object (%s)\n", elements[i]);
+                free(copy_output); copy_output = NULL;
+                free(elements); elements = NULL;
                 return NULL;
             }
 
-            const char* closing_brace_ptr = strchr(opening_brace_ptr, ']');
-            if (closing_brace_ptr == NULL) {
+            const char* closing_brace = strchr(opening_brace, ']');
+            if (closing_brace == NULL) {
                 printf("cjson_pointer_get: \"%s\" is an unbalanced array\n", elements[i]);
+                free(copy_output); copy_output = NULL;
+                free(elements); elements = NULL;
                 return NULL;
             }
 
-            const size_t len = closing_brace_ptr - opening_brace_ptr; 
+            const size_t index_len = (size_t) (closing_brace - (opening_brace + 1)); 
 
-            char index_buffer[len];
-            strncpy(index_buffer, opening_brace_ptr + 1, len - 1);
-            index_buffer[len - 1] = '\0';
+            char index_buffer[index_len + 1];  
+            memcpy(index_buffer, (opening_brace + 1), index_len); 
+            index_buffer[index_len] = '\0';  
 
-            const size_t arr_size = cJSON_GetArraySize(ret);
+            const size_t array_size = cJSON_GetArraySize(ret);
             
             const int index_buffer_val = atoi(index_buffer);
-            const size_t index = (index_buffer_val == last_element_index) ? (arr_size - 1) : index_buffer_val;
-            if (index >= arr_size) {
-                printf("cjson_pointer_get: accessing element %zu in %zu size array (%s)\n", index, arr_size, elements[i]);
+            const int index = (index_buffer_val == last_element_index) ? (array_size - 1) : index_buffer_val;
+            if (index >= array_size) {
+                fprintf(stderr, "cjson_pointer_get: accessing element %d in %zu size array (%s)\n", index, array_size, elements[i]);
+                free(copy_output); copy_output = NULL;
+                free(elements); elements = NULL;
                 return NULL;
             }
 
@@ -104,6 +112,9 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
         else ret = cJSON_GetObjectItem(ret, elements[i]);
     }
+
+    free(copy_output); copy_output = NULL;
+    free(elements); elements = NULL;
 
     return ret;
 }

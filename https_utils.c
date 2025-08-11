@@ -280,7 +280,7 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
         goto cleanup;
     }
 
-    char len_str[16];
+    char len_str[16] = {0};
     get_http_header_tag_value(header, CONTENT_LENGTH_HEADER_TAG, len_str, sizeof(len_str));
 
     const int content_length = strtol(len_str, NULL, 10);
@@ -293,7 +293,7 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
     }
 
     else {
-        char encoding_type[16];
+        char encoding_type[16] = {0};
         get_http_header_tag_value(header, TRANSFER_ENCODING_HEADER_TAG, encoding_type, sizeof(encoding_type));
 
         if (strcmp(encoding_type, CHUNKED_ENCODING) == 0) {
