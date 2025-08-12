@@ -10,9 +10,7 @@ void write_json_to_file(const cJSON* json, const char* filename);
 // walking down and reading json obj
 bool json_string_is_valid(const cJSON* json_str);
 cJSON* cjson_pointer_get(cJSON* root, const char* path);
+bool assign_number_from_path(cJSON* root, const char* path, int* dest);
 bool assign_string_from_path(cJSON* root, const char* path, char* dest, const size_t dest_size);
-
-cJSON* create_empty_array_object(const char* array_name);
-int find_array_item(const cJSON* array, const char* id, const char* id_path);
 
 #endif

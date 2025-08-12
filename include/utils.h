@@ -2,10 +2,12 @@
 #define UTILS_H
 
 #include <stdio.h>
+#include <dirent.h> 
 #include <stdbool.h>
 
 int bound_index_to_array (const int pos, const int array_size);
 bool file_exists(const char* filename);
+bool directory_exists(const char* directory_name);
 const long get_file_length(FILE* fp);
 char* get_file_content(const char* filepath);
 void write_string_to_file(const char* filename, const char* buffer);

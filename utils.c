@@ -1,6 +1,7 @@
 #include "include/utils.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -21,6 +22,20 @@ bool file_exists(const char* filename)
     FILE* fp = fopen(filename, "r");
     if (fp) {
         fclose(fp);
+        return true;
+    }
+
+    return false;
+}
+
+bool directory_exists(const char* directory_name)
+{
+    if (valid_string(directory_name) == false) return false;
+
+    DIR* pdir = opendir(directory_name);
+
+    if (pdir) {
+        closedir(pdir); pdir = NULL;
         return true;
     }
 

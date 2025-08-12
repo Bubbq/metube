@@ -1,6 +1,7 @@
 #include "include/utils.h"
 #include "include/json_utils.h"
 
+#include <cjson/cJSON.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -119,6 +120,17 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
     return ret;
 }
 
+bool assign_number_from_path(cJSON* root, const char* path, int* dest)
+{
+    if ((root == NULL) || (valid_string(path) == false) || (dest == NULL)) return false;
+
+    const cJSON* json_num = cjson_pointer_get(root, path);
+    if (cJSON_IsNumber(json_num)) 
+        (*dest) = json_num->valueint;
+
+    return false;
+}
+
 bool assign_string_from_path(cJSON* root, const char* path, char* dest, const size_t dest_size)
 {
     if ((root == NULL) || (valid_string(path) == false) || (dest == NULL)) return false;
@@ -155,22 +167,4 @@ cJSON* create_empty_array_object(const char* array_name)
     }
 
     return root;
-}
-
-int find_array_item(const cJSON* array, const char* id, const char* id_path)
-{
-    if ((cJSON_IsArray(array) == false) || (valid_string(id) == false) || (valid_string(id_path) == false)) return -1;
-
-    int i = 0;
-    cJSON* item;
-    cJSON_ArrayForEach(item, array) {
-        const cJSON* id_item = cjson_pointer_get(item, id_path);
-        if (json_string_is_valid(id_item) && (strcmp(id_item->valuestring, id) == 0)) {
-            return i;
-        }
-
-        i++;
-    }
-
-    return -1;
 }
