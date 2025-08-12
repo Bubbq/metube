@@ -23,6 +23,17 @@
 
 #include <cjson/cJSON.h>
 
+typedef struct
+{
+    cJSON* subscribed_channels;
+    cJSON* liked_videos;
+    cJSON* watched_videos;
+} UserData;
+
+UserData user_data_init();
+void user_data_free(UserData* user_data);
+bool user_data_is_ready(UserData* user_data);
+
 cJSON* create_user_data_object();
 cJSON* init_search_result_json(const SearchResult* result);
 

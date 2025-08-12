@@ -8,6 +8,45 @@
 #include <stdio.h>
 #include <string.h>
 
+UserData user_data_init()
+{
+    UserData user_data = (UserData) {
+        .liked_videos        = file_exists(LIKED_VIDEOS_FILE)  ? parse_json_file(LIKED_VIDEOS_FILE)  : create_user_data_object(),
+        .watched_videos      = file_exists(WATCH_HISTORY_FILE) ? parse_json_file(WATCH_HISTORY_FILE) : create_user_data_object(),
+        .subscribed_channels = file_exists(SUBSCRIPTIONS_FILE) ? parse_json_file(SUBSCRIPTIONS_FILE) : create_user_data_object(),
+    };
+
+    return user_data;
+}
+
+void user_data_free(UserData* user_data)
+{
+    if (user_data == NULL) return;
+    
+    if (user_data->watched_videos) {
+        write_json_to_file(user_data->watched_videos, WATCH_HISTORY_FILE);
+        cJSON_Delete(user_data->watched_videos); user_data->watched_videos = NULL;
+    }
+
+    if (user_data->subscribed_channels) {
+        write_json_to_file(user_data->subscribed_channels, SUBSCRIPTIONS_FILE);
+        cJSON_Delete(user_data->subscribed_channels); user_data->subscribed_channels = NULL;
+    }
+
+    if (user_data->liked_videos) {
+        write_json_to_file(user_data->liked_videos, LIKED_VIDEOS_FILE);
+        cJSON_Delete(user_data->liked_videos); user_data->liked_videos = NULL;
+    }
+}
+
+bool user_data_is_ready(UserData* user_data)
+{
+    return (user_data) && 
+           (cJSON_IsObject(user_data->liked_videos)) && 
+           (cJSON_IsObject(user_data->watched_videos)) && 
+           (cJSON_IsObject(user_data->subscribed_channels));
+}
+
 cJSON* create_user_data_object()
 {
     cJSON* root = cJSON_CreateObject();

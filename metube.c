@@ -1,13 +1,10 @@
 #include <math.h>
-#include <time.h>
-#include <netdb.h>
+#include <sched.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <stdbool.h>
-#include <sys/socket.h>
+#include <time.h>
 
 #include "include/user_data.h"
 #include "include/threads.h"
@@ -1115,8 +1112,6 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 }
 
 // split programs up 
-    // user data management
-        // everything that has to do with maintaining the user's data in some persistent cJSON* object
     // bug with getting user's videos sometimes shows for half a second, then dissapears
 
 int main()
@@ -1157,28 +1152,18 @@ int main()
     bool view_watch_history = false;
     bool view_subscribed_channels = false;
 
-    cJSON* liked_videos_json = file_exists(LIKED_VIDEOS_FILE) ? 
-                               parse_json_file(LIKED_VIDEOS_FILE) : 
-                               create_user_data_object();
     
-    cJSON* watch_history_json = file_exists(WATCH_HISTORY_FILE) ? 
-                                parse_json_file(WATCH_HISTORY_FILE) : 
-                                create_user_data_object();
-    
-    cJSON* subscribed_channels_json = file_exists(SUBSCRIPTIONS_FILE) ? 
-                                      parse_json_file(SUBSCRIPTIONS_FILE) : 
-                                      create_user_data_object();
-
-    if ((liked_videos_json == NULL) || (watch_history_json == NULL) || (subscribed_channels_json == NULL)) {
-        printf("CRITICAL: failed to create json object(s)\n");
-        goto cleanup;
-    }
-
     ssl_ctx = SSL_CTX_new(TLS_client_method());
     if (ssl_ctx == NULL) {
         printf("CRITICAL: 'ssl_ctx' is null'\n");
         goto cleanup;
     } 
+    
+    UserData user_data = user_data_init();
+    if (user_data_is_ready(&user_data) == false) {
+        fprintf(stderr, "CRITICAL: failed to create UserData object\n");
+        goto cleanup;
+    }
 
     bool show_filter_window = false;
 
@@ -1264,7 +1249,7 @@ int main()
                 free(continuation_token); continuation_token = NULL;
             }
 
-            load_user_data(&results, liked_videos_json);
+            load_user_data(&results, user_data.liked_videos);
 
             SetWindowTitle("[Liked Videos] - metube");
         }
@@ -1276,7 +1261,7 @@ int main()
                 free(continuation_token); continuation_token = NULL;
             }
 
-            load_user_data(&results, watch_history_json);
+            load_user_data(&results, user_data.watched_videos);
 
             SetWindowTitle("[History] - metube");
         }
@@ -1288,7 +1273,7 @@ int main()
                 free(continuation_token); continuation_token = NULL;
             }
 
-            load_user_data(&results, subscribed_channels_json);
+            load_user_data(&results, user_data.subscribed_channels);
 
             SetWindowTitle("[Subscriptions] - metube");
         }
@@ -1304,7 +1289,7 @@ int main()
                 targs->channel = &highlighted_channel;
                 targs->texture_cache = &texture_cache;
                 targs->raw_thumbnail_queue = &thumbnail_queue;
-                targs->subscribed_channels_json = subscribed_channels_json;
+                targs->subscribed_channels_json = user_data.subscribed_channels;
                 targs->results_conn = &youtube_pool.connections[youtube_pool.current_conn];
                 targs->thumbnail_conn = &channel_thumbnail_pool.connections[channel_thumbnail_pool.current_conn];
                 
@@ -1481,7 +1466,8 @@ int main()
                                 load_video_information = true;
                                 query.type = QUERY_TYPE_VIEW_VIDEO;
                                 memcpy(&highlighted_video.info, search_result, sizeof(SearchResult));
-                                add_user_data(watch_history_json, search_result);
+                                add_user_data(user_data.watched_videos, search_result);
+
                             }
                             break;
                         case MEDIA_TYPE_PLAYLIST:
@@ -1523,14 +1509,14 @@ int main()
                 .height = BAR_HEIGHT, 
             };
 
-            draw_video_management_buttons(TOP_RIGHT_PANEL, &query, &highlighted_video, liked_videos_json, &launch_search, &load_channel_information);
+            draw_video_management_buttons(TOP_RIGHT_PANEL, &query, &highlighted_video, user_data.liked_videos, &launch_search, &load_channel_information);
 
             if ((highlighted_channel.info.thumbnail_loaded == false) && (highlighted_channel.info.thumbnail_path[0] != '\0')) { 
                 highlighted_channel.info.thumbnail_loaded = true;
                 highlighted_channel.cached = texture_cache_find_entry(&texture_cache, highlighted_channel.info.id);
             }
 
-            draw_highlighted_channel(focused_channel_bounds, &ui, subscribed_channels_json, &highlighted_channel);
+            draw_highlighted_channel(focused_channel_bounds, &ui, user_data.subscribed_channels, &highlighted_channel);
 
             const Rectangle BOTTOM_RIGHT_PANEL = {
                 .x = focused_channel_bounds.x + focused_channel_bounds.width + ui.padding,
@@ -1566,21 +1552,8 @@ int main()
         list_free(&thumbnail_queue);
         texture_cache_free(&texture_cache);
         
-        if (watch_history_json) {
-            write_json_to_file(watch_history_json, WATCH_HISTORY_FILE);
-            cJSON_Delete(watch_history_json); watch_history_json = NULL;
-        }
-
-        if (subscribed_channels_json) {
-            write_json_to_file(subscribed_channels_json, SUBSCRIPTIONS_FILE);
-            cJSON_Delete(subscribed_channels_json); subscribed_channels_json = NULL;
-        }
-
-        if (liked_videos_json) {
-            write_json_to_file(liked_videos_json, LIKED_VIDEOS_FILE);
-            cJSON_Delete(liked_videos_json); liked_videos_json = NULL;
-        }
-
+        user_data_free(&user_data);
+        
         if (continuation_token) {
             free(continuation_token); continuation_token = NULL;
         } 
