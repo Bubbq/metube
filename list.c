@@ -21,7 +21,9 @@ Node* node_init(const NodeType node_type)
         case NODE_TYPE_THREAD_TASK:   node->content = thread_task_init(); break;
         case NODE_TYPE_SEACH_RESULT:  node->content = search_result_init(); break;
         case NODE_TYPE_RAW_THUMBNAIL: node->content = raw_thumbnail_init(); break;
-        case NODE_TYPE_UNDF:          node->content = NULL; break;
+        case NODE_TYPE_UNDF: 
+            node->content = NULL;         
+            free(node); node = NULL;
     }
 
     return node;

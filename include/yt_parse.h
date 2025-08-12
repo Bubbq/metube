@@ -24,6 +24,6 @@ void parse_playlist_result(cJSON *lockupViewModel, SearchResult *playlist);
 
 const char* get_results_list_path(const QueryType search_type, const QueryAttribute search_attr);
 const char* get_continuation_token_path(const QueryType search_type, const QueryAttribute search_attr);
-void get_continuation_token(cJSON* json, char* dest, const QueryType query_type, const QueryAttribute query_attr);
+void get_continuation_token(cJSON* json, char** dest, const QueryType query_type, const QueryAttribute query_attr);
 
 #endif

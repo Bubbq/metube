@@ -4,6 +4,7 @@
 #include "include/json_utils.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -407,26 +408,23 @@ const char* get_continuation_token_path(const QueryType search_type, const Query
     }
 }
 
-void get_continuation_token(cJSON* json, char* dest, const QueryType query_type, const QueryAttribute query_attr)
+void get_continuation_token(cJSON* json, char** dest, const QueryType query_type, const QueryAttribute query_attr)
 {
-    if (json == NULL) {
-        printf("get_continuation_token: invalid input(s)\n");
-        return;
-    }
+    if ((json == NULL) || (dest == NULL)) return;
 
     const char* continuation_path = get_continuation_token_path(query_type, query_attr);
     
-    if (dest) {
-        free(dest); dest = NULL;
+    if (*dest) {
+        free(*dest); (*dest) = NULL;
     }
 
     const cJSON* token_obj = cjson_pointer_get(json, continuation_path);
     if (json_string_is_valid(token_obj) == false) {
-        printf("get_continuation_token: 'token_obj' is invalid (path: %s)\n", continuation_path);
+        fprintf(stderr, "get_continuation_token: invalid json string parsed (path: %s)\n", continuation_path);
         return;
     }
 
-    if ((dest = strdup(token_obj->valuestring)) == NULL) {
-        printf("get_continuation_token: strdup failed\n");
+    if (((*dest) = strdup(token_obj->valuestring)) == NULL) {
+        fprintf(stderr, "get_continuation_token: strdup returned null\n");
     }
 }

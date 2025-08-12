@@ -1,6 +1,5 @@
 #include <math.h>
 #include <time.h>
-#include <ctype.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -10,9 +9,9 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "include/threads.h"
 #include "include/media_type.h"
 #include "include/yt_parse.h"
-#include "include/thread_task.h"
 #include "include/search_result.h"
 #include "include/raw_thumbnail.h"
 #include "include/list.h"
@@ -28,15 +27,11 @@
 
 #include "include/uthash.h"
 #include "include/raylib.h"
-#include "arpa/inet.h"
 #include "cjson/cJSON.h"
 #include "openssl/ssl.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
-
-#define MAX_THREADS 4
-#define N_CONN MAX_THREADS
 
 #define ARRAY_NAME "array"
 
@@ -63,71 +58,6 @@
 static SSL_CTX* ssl_ctx = NULL;
 static char* continuation_token = NULL;
 static const char* api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-
-static bool application_running = true;
-
-void* worker_thread_funct(void* args)
-{
-    List* task_queue = (List*) args;
-    
-    while (application_running) {
-        pthread_mutex_lock(&task_queue->mutex);
-        while ((task_queue->count == 0) && application_running) 
-            pthread_cond_wait(&task_queue->cond, &task_queue->mutex);
-
-        if (application_running == false) {
-            pthread_mutex_unlock(&task_queue->mutex);
-            break;
-        }
-
-        Node* node = list_dequeue(task_queue);
-        ThreadTask* task = (ThreadTask*) node->content;
-
-        pthread_mutex_unlock(&task_queue->mutex); 
-        task->funct(task->args);
-        free(task); task = NULL;
-        free(node); node = NULL;
-    }
-
-    return NULL;
-}
-
-bool launch_task(List* task_queue, void* targs, void* (*funct)(void*))
-{
-    if ((task_queue == NULL) || (targs == NULL) || (funct == NULL)) return false;
-
-    Node* node = node_init(NODE_TYPE_THREAD_TASK);
-    if ((node == NULL) || (node->content == NULL)) {
-        printf("launch_task: node_init failed\n");
-        if (node) {
-            free(node); node = NULL;
-        } 
-        return false;
-    }
-
-    ThreadTask* task = (ThreadTask*) node->content;
-    task->args = targs;
-    task->funct = funct;
-
-    pthread_mutex_lock(&task_queue->mutex);
-    list_append(task_queue, node);
-    pthread_cond_signal(&task_queue->cond);
-    pthread_mutex_unlock(&task_queue->mutex);
-
-    return true;
-}
-
-void init_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads], void* (*worker_funct)(void*), void* worker_args)
-{
-    for (int t = 0; t < nthreads; t++) 
-        pthread_create(&thread_pool[t], NULL, worker_funct, worker_args);
-}
-
-void free_thread_pool(const size_t nthreads, pthread_t thread_pool[nthreads])
-{
-    for (int t = 0; t < nthreads; t++) 
-        pthread_join(thread_pool[t], NULL);
-}
 
 typedef struct 
 {
@@ -177,7 +107,6 @@ void* load_thumbnail(void* args)
     pthread_mutex_unlock(&targs->thumbnail_queue->mutex);
 
     clean:
-        free(targs); targs = NULL;
         return NULL;
 }
 
@@ -314,7 +243,6 @@ void* get_results_from_query(void* args)
     HttpsRequest req = configure_post_request(targs->query, targs->conn->host, api_key, continuation_token);
     if (post_request_is_ready(req) == false) {
         printf("get_results_from_query: invalid post req configured\n");
-        free(targs); targs = NULL;
         return NULL;
     }
 
@@ -324,7 +252,6 @@ void* get_results_from_query(void* args)
 
     if (json_res == NULL) {
         printf("get_results_from_query: 'json_res' is null\n");
-        free(targs); targs = NULL;
         return NULL;
     }
 
@@ -337,13 +264,12 @@ void* get_results_from_query(void* args)
     
     pthread_mutex_unlock(&targs->search_results->mutex);
 
-    get_continuation_token(json_res, continuation_token, query_type, query_attr);
-
+    get_continuation_token(json_res, &continuation_token, query_type, query_attr);
+    
     SetWindowTitle(TextFormat("[search results(%zu)] - metube", targs->search_results->count));
     
     log_search(query_type, query_attr, GetTime() - start_time, elements_added);
 
-    free(targs); targs = NULL;
     cJSON_Delete(json_res); json_res = NULL;
     return NULL;
 }
@@ -892,7 +818,6 @@ void* open_video_window(void* args)
     cleanup:
         if (targs->req.payload) free(targs->req.payload);
         if (json) cJSON_Delete(json);
-        if (targs) free(targs);
         return NULL;
 }
 
@@ -1081,7 +1006,6 @@ void* open_channel_window(void* args)
         if (req.payload) {
             free(req.payload); req.payload = NULL;
         }
-        free(targs); targs = NULL;
         return NULL;
     }
 
@@ -1091,7 +1015,6 @@ void* open_channel_window(void* args)
         if (req.payload) {
             free(req.payload); req.payload = NULL;
         }
-        free(targs); targs = NULL;
         return NULL;
     }
 
@@ -1106,7 +1029,7 @@ void* open_channel_window(void* args)
     create_results_from_json(json, targs->results, query_type, query_attr, false);
     pthread_mutex_unlock(&targs->results->mutex);
 
-    get_continuation_token(json, continuation_token, query_type, query_attr);
+    get_continuation_token(json, &continuation_token, query_type, query_attr);
 
     if (query_attr == QUERTY_ATTR_APPEND) {
         goto clean;
@@ -1152,7 +1075,6 @@ void* open_channel_window(void* args)
 
     clean: 
         cJSON_Delete(json); json = NULL;
-        free(targs); targs = NULL;
         return NULL;
 }
 
@@ -1338,11 +1260,12 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
 
 // split programs up 
     // user data management
-    // threading stuff
     // bug with getting user's videos sometimes shows for half a second, then dissapears
 
 int main()
 {
+    bool application_running = true;
+
     List thumbnail_queue = list_init();
     List task_queue = list_init();
     List results = list_init();
@@ -1350,11 +1273,12 @@ int main()
     TextureCache texture_cache = NULL;
 
     pthread_t thread_pool[MAX_THREADS]; 
-    init_thread_pool(MAX_THREADS, thread_pool, worker_thread_funct, &task_queue);
+
+    launch_workers(thread_pool, MAX_THREADS, &task_queue, &application_running);
     
-    ConnectionPool youtube_pool = connection_pool_init("www.youtube.com", HTTPS_PORT, N_CONN);
-    ConnectionPool video_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO), HTTPS_PORT, N_CONN);
-    ConnectionPool channel_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL), HTTPS_PORT, N_CONN);
+    ConnectionPool youtube_pool = connection_pool_init("www.youtube.com", HTTPS_PORT, MAX_THREADS);
+    ConnectionPool video_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_VIDEO), HTTPS_PORT, MAX_THREADS);
+    ConnectionPool channel_thumbnail_pool = connection_pool_init(media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL), HTTPS_PORT, MAX_THREADS);
 
     bool load_video_information = false;
     Vector2 description_scrollbar = {0};
@@ -1751,7 +1675,7 @@ int main()
         // free worker thread stuff
         application_running = false;
         pthread_cond_broadcast(&task_queue.cond);
-        free_thread_pool(MAX_THREADS, thread_pool);
+        thread_pool_free(thread_pool, MAX_THREADS);
         list_free(&task_queue);         
         
         // deinit app
