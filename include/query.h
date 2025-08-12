@@ -2,6 +2,7 @@
 #define QUERY_H
 
 #include "media_type.h"
+
 #include "raylib.h"
 
 typedef enum 
