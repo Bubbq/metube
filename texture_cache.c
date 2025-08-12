@@ -38,7 +38,7 @@ void texture_cache_entry_free(TextureCacheEntry* entry)
 
 bool texture_cache_entry_is_ready(TextureCacheEntry* entry) 
 {
-    return (entry) && (entry->id[0] != '\0') && (IsTextureReady(entry->texture));
+    return (entry) && (valid_string(entry->id)) && (IsTextureReady(entry->texture));
 }
 
 void texture_cache_add_entry(TextureCache* texture_cache, TextureCacheEntry* entry)

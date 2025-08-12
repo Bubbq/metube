@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
+#include "include/raw_thumbnail.h"
 #include "include/utils.h"
 #include "include/query.h"
 #include "include/timer.h"
@@ -89,34 +90,6 @@ void search_result_free(SearchResult *search_result)
 {
     if (!search_result) return;
     free(search_result);
-}
-
-typedef struct RawThumbnail
-{
-    char id[256];     
-    Buffer data;              
-    struct RawThumbnail *next;
-    MediaType media_type;
-} RawThumbnail;
-
-RawThumbnail* raw_thumbnail_init()
-{
-    RawThumbnail* raw_thumbnail = malloc(sizeof(RawThumbnail));
-    if (raw_thumbnail == NULL) return NULL;
-
-    raw_thumbnail->next = NULL;
-    raw_thumbnail->data = buffer_init();
-    raw_thumbnail->media_type = MEDIA_TYPE_UNDF;
-    memset(raw_thumbnail->id, 0, sizeof(raw_thumbnail->id));
-
-    return raw_thumbnail;
-}
-
-void raw_thumbnail_free(RawThumbnail* raw_thumbnail)
-{
-    if (raw_thumbnail == NULL) return;
-    if (buffer_is_ready(&raw_thumbnail->data)) buffer_free(&raw_thumbnail->data);
-    free(raw_thumbnail); raw_thumbnail = NULL;
 }
 
 typedef struct ThreadTask
@@ -936,37 +909,6 @@ void init_app()
     InitWindow(1000, 750, "metube");
 }
 
-Texture2D load_texture_from_memory(const Buffer buffer, const float width, const float height)
-{
-    if (!buffer_is_ready(&buffer)) {
-        printf("load_texture_from_memory: buffer obj passed is invalid\n");
-        return (Texture2D){0};
-    }
-
-    else if (width < 0 || height < 0) {
-        printf("load_texture_from_memory: thumbnail dimensions are invalid\n");
-        return (Texture2D){0};
-    }
-
-    Image image = LoadImageFromMemory(".jpg", (unsigned char *)buffer.data, buffer.size);
-    if (!IsImageReady(image)) {
-        printf("load_texture_from_memory: LoadImageFromMemory returned invalid image obj\n");
-        return (Texture2D){0};
-    }
-
-    ImageResize(&image, width, height);
-    
-    Texture2D ret = LoadTextureFromImage(image);
-    if (!IsTextureReady(ret)) {
-        printf("load_texture_from_memory: LoadTextureFromImage returned invalid Texture obj\n");
-        return (Texture2D){0};
-    }
-
-    UnloadImage(image);
-
-    return ret;
-}
-
 typedef struct
 {
     Font font;
@@ -1313,27 +1255,6 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
         default:    
             break;
     }
-}
-
-void process_raw_thumbnail(RawThumbnail* raw_thumbnail, TextureCacheEntry** hashtable)
-{   
-    if ((raw_thumbnail == NULL) || (buffer_is_ready(&raw_thumbnail->data) == false)) return;
-    
-    const Vector2 dimension = media_type_to_thumbnail_dim(raw_thumbnail->media_type);
-
-    const Texture2D thumbnail = load_texture_from_memory(raw_thumbnail->data, dimension.x, dimension.y);
-    if (IsTextureReady(thumbnail) == false) {
-        printf("process_raw_thumbnail: 'thumbnail' is invalid\n");
-        return;
-    }
-
-    TextureCacheEntry* cached_entry = texture_cache_entry_init(thumbnail, raw_thumbnail->id);
-    if (cached_entry == NULL) {
-        printf("process_raw_thumbnail: 'cached_entry' is null\n");
-        return;
-    }
-    
-    texture_cache_add_entry(hashtable, cached_entry);
 }
 
 void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)

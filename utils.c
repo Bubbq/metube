@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
- #include <arpa/inet.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 
 int bound_index_to_array (const int pos, const int array_size)
