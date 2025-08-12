@@ -46,6 +46,45 @@ typedef struct
     MediaType media_type;
 } LoadThumbnailArgs;
 
+typedef struct
+{
+    Query query;
+    Connection* conn;
+    List* search_results;
+} SearchThreadArgs;
+
+typedef struct
+{
+    SearchResult info;
+    char* description;
+} HighlightedVideo;
+
+typedef struct
+{
+    HttpsRequest req;
+    Connection* conn;
+    HighlightedVideo* highlighted_video;
+} FocusedInfoArgs;
+
+typedef struct
+{
+    SearchResult info;
+    TextureCacheEntry* cached;
+    bool is_subscribed;
+} HighlightedChannel;
+
+typedef struct
+{
+    Query query;
+    TextureCacheEntry** texture_cache;
+    cJSON* subscribed_channels_json;
+    HighlightedChannel* channel;
+    Connection* thumbnail_conn;
+    Connection* results_conn;
+    List* raw_thumbnail_queue;
+    List* results;
+} ParseChannelArgs;
+
 void* load_thumbnail(void* args)
 {
     LoadThumbnailArgs* targs = (LoadThumbnailArgs*) args;
@@ -88,13 +127,6 @@ void* load_thumbnail(void* args)
         return NULL;
 }
 
-typedef struct
-{
-    Query query;
-    Connection* conn;
-    List* search_results;
-} SearchThreadArgs;
-
 int create_results_from_json(cJSON* json, List* results, const QueryType query_type, const QueryAttribute query_attr, const bool allow_youtube_shorts)
 {
     if ((json == NULL || (results == NULL))) return -1;
@@ -104,6 +136,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType query_t
     cJSON* results_array = cjson_pointer_get(json, path);
     if (cJSON_IsArray(results_array) == false) {
         printf("create_results_from_json: invalid results array from path %s\n", path);
+        write_json_to_file(json, "results.json");
         return -1;
     }
 
@@ -218,6 +251,198 @@ void* get_results_from_query(void* args)
     return NULL;
 }
 
+void* open_video_window(void* args)
+{
+    cJSON* json = NULL;
+    FocusedInfoArgs* targs = (FocusedInfoArgs*) args;
+    if (targs == NULL) {
+        printf("open_video_window: 'targs' is NULL\n");
+        goto cleanup;
+    }
+
+    json = get_json_response(&targs->req, ssl_ctx, targs->conn, HTTP_PROTOCOL_VER);
+    if (json == NULL) {
+        fprintf(stderr, "open_video_window: failed to get json response\n");
+        goto cleanup;
+    }
+
+    if (targs->highlighted_video->description) {
+        free(targs->highlighted_video->description); targs->highlighted_video->description = NULL;
+    }
+
+    targs->highlighted_video->description = get_video_description(json);
+
+    SetWindowTitle(TextFormat("[%s] - metube", targs->highlighted_video->info.title));
+
+    cleanup:
+        if (targs->req.payload) free(targs->req.payload);
+        if (json) cJSON_Delete(json);
+        return NULL;
+}
+
+void* open_channel_window(void* args)
+{
+    ParseChannelArgs* targs = (ParseChannelArgs*) args;
+    if ((targs == NULL) ||
+        (targs->texture_cache == NULL) || 
+        (targs->channel == NULL) ||
+        (targs->raw_thumbnail_queue == NULL) ||
+        (targs->results == NULL)) {
+        printf("open_channel_window: invalid input(s)\n");
+        return NULL;
+    }
+    
+    HttpsRequest req = configure_post_request(targs->query, targs->results_conn->host, api_key, continuation_token);
+    if (post_request_is_ready(req) == false) {
+        printf("open_channel_window: invalid post request\n");
+        if (req.payload) {
+            free(req.payload); req.payload = NULL;
+        }
+        return NULL;
+    }
+
+    cJSON* json = get_json_response(&req, ssl_ctx, targs->results_conn, HTTP_PROTOCOL_VER);
+    if (json == NULL) {
+        printf("open_channel_window: 'targs' is null\n");
+        if (req.payload) {
+            free(req.payload); req.payload = NULL;
+        }
+        return NULL;
+    }
+
+    if (req.payload) {
+        free(req.payload); req.payload = NULL;
+    }
+
+    const QueryType query_type = targs->query.type;
+    const QueryAttribute query_attr = targs->query.attr;
+    
+    pthread_mutex_lock(&targs->results->mutex);
+    create_results_from_json(json, targs->results, query_type, query_attr, false);
+    pthread_mutex_unlock(&targs->results->mutex);
+
+    get_continuation_token(json, &continuation_token, query_type, query_attr);
+
+    if (query_attr == QUERTY_ATTR_APPEND) {
+        goto clean;
+    }
+
+    if (parse_highlighted_channel(json, &targs->channel->info) == false) {
+        targs->channel->info.thumbnail_loaded = false;
+        targs->channel->info.thumbnail_path[0] = '\0';
+        targs->channel->cached = NULL;
+        goto clean;
+    }
+
+    targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, targs->channel->info.id);
+    
+    TextureCacheEntry* cached = texture_cache_find_entry(targs->texture_cache, targs->channel->info.id);
+    if (cached) {
+        targs->channel->info.thumbnail_loaded = true;
+        targs->channel->cached = cached;
+    }
+
+    else {
+        LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
+        if (thumb_args == NULL) {
+            printf("parse_channel: 'thumb_args' is null\n");
+            targs->channel->info.thumbnail_loaded = false;
+            targs->channel->info.thumbnail_path[0] = '\0';
+            targs->channel->cached = NULL;
+            goto clean;
+        }
+
+        thumb_args->conn = targs->thumbnail_conn;
+        thumb_args->media_type = MEDIA_TYPE_CHANNEL;
+        thumb_args->thumbnail_queue = targs->raw_thumbnail_queue;
+        snprintf(thumb_args->id, sizeof(thumb_args->id), "%s", targs->channel->info.id);
+        snprintf(thumb_args->thumbnail_path, sizeof(thumb_args->thumbnail_path), "%s", targs->channel->info.thumbnail_path);
+
+        load_thumbnail(thumb_args);
+
+        targs->channel->info.thumbnail_loaded = false;
+    }
+
+    SetWindowTitle(TextFormat("[Uploads from %s] - metube", targs->channel->info.title));
+
+    clean: 
+        cJSON_Delete(json); json = NULL;
+        return NULL;
+}
+
+void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)
+{
+    if (thumbnail_queue == NULL) return;
+
+    while (thumbnail_queue->head != NULL) {
+        Node* node = list_dequeue(thumbnail_queue);
+
+        if (node->type == NODE_TYPE_RAW_THUMBNAIL) {
+            process_raw_thumbnail(node->content, hashtable);
+        }
+
+        node_free(node);
+    }
+}
+
+bool queue_thumbnail_load(List* task_queue, List* thumbnail_queue, Connection* conn, const char* search_result_id, const char* thumbnail_path,  MediaType media_type)
+{
+    
+    if ((task_queue == NULL) || (thumbnail_queue == NULL) || (conn == NULL) || (search_result_id == NULL) || (thumbnail_path == NULL)) {
+        printf("queue_thumbnail_load: invalid args\n");
+        return false;
+    }
+
+    LoadThumbnailArgs* targs = malloc(sizeof(LoadThumbnailArgs));
+    if (targs == NULL) {
+        printf("queue_thumbnail_load: malloc returned NULL for 'targs'\n");
+        return false;
+    }
+
+    targs->conn = conn;
+    targs->media_type = media_type;
+    targs->thumbnail_queue = thumbnail_queue;
+    snprintf(targs->id, sizeof(targs->id), "%s", search_result_id);
+    snprintf(targs->thumbnail_path, sizeof(targs->thumbnail_path), "%s", thumbnail_path);
+
+    return launch_task(task_queue, targs, load_thumbnail);
+}
+
+void load_user_data(List* results, cJSON* user_data)
+{
+    if ((results == NULL) || (user_data == NULL)) return;
+
+    cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
+    if (cJSON_IsArray(array) == false) {
+        fprintf(stderr, "load_user_data: invalid array parsed\n");
+        return;
+    }
+
+    pthread_mutex_lock(&results->mutex);
+    
+    const int old_size = results->count;
+
+    cJSON* item;
+    cJSON_ArrayForEach(item, array) {
+        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+        if (node) {
+            SearchResult* dest = (SearchResult*) node->content;
+            if (dest) {
+                parse_user_data(item, dest);
+                
+                if (dest->media_type != MEDIA_TYPE_UNDF) list_append(results, node);
+                else node_free(node);
+            }
+        }
+    }
+
+    for (int i = 0; i < old_size; i++) {
+        node_free(list_dequeue(results));
+    }
+
+    pthread_mutex_unlock(&results->mutex);
+}
+
 void init_app()
 {
     SetTargetFPS(60);
@@ -230,6 +455,8 @@ void init_app()
 typedef struct
 {
     Font font;
+    Color text_color;
+    int font_size;
     int padding;
     int spacing;
     bool word_wrap;
@@ -371,7 +598,7 @@ void DrawTextBoxed(const char *text, Rectangle rec, Ui ui, float fontSize, Color
     DrawTextBoxedSelectable(ui, text, rec, fontSize, tint, 0, 0, WHITE, WHITE);
 }
 
-Rectangle padded_rectangle(const float padding, const Rectangle rect)
+Rectangle get_padded_rectangle(const float padding, const Rectangle rect)
 {
     return (Rectangle) { rect.x + padding, rect.y + padding, rect.width - (padding * 2), rect.height - (padding * 2) };
 }
@@ -515,7 +742,7 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
     };
 
     if (search_result->title[0] != '\0') {
-        DrawTextBoxed(search_result->title, padded_rectangle(ui.padding, title_area), ui, font_size, BLACK);                            
+        DrawTextBoxed(search_result->title, get_padded_rectangle(ui.padding, title_area), ui, font_size, BLACK);                            
     }
 
     const Rectangle subtext_area = {
@@ -562,7 +789,7 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
             const float x_padding = thumbnail.width / 2.0f;
             const float y_padding = (container.height - thumbnail.height) / 2.0f;
             DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x + x_padding, thumbnail_area.y + y_padding}, 0.0f, 1.0f, WHITE);
-            DrawTextBoxed(search_result->subscriber_count, padded_rectangle(ui.padding, subtext_area), ui, 12, BLACK);
+            DrawTextBoxed(search_result->subscriber_count, get_padded_rectangle(ui.padding, subtext_area), ui, 12, BLACK);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, "Channel");
             break;
         }
@@ -575,214 +802,97 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
     }
 }
 
-void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)
+const int anticipate_lines(const Font font, const char* text, int font_size, int spacing, bool word_wrap, float container_width)
 {
-    if (thumbnail_queue == NULL) return;
+    if (valid_string(text) == false) return 1;
 
-    while (thumbnail_queue->head != NULL) {
-        Node* node = list_dequeue(thumbnail_queue);
+    int nlines = 1;
+    float line_w = 0.0f;
 
-        if (node->type == NODE_TYPE_RAW_THUMBNAIL) {
-            process_raw_thumbnail(node->content, hashtable);
+    if (word_wrap) {
+        const char* word_start = text;
+        while (*word_start) {
+            const char* word_end = word_start;
+            while (*word_end && *word_end != ' ' && *word_end != '\n') 
+                word_end++;
+
+            size_t word_len = (size_t)(word_end - word_start);
+            if (word_len > 0) {
+                char word_buf[word_len + 1];
+                memcpy(word_buf, word_start, word_len);
+                word_buf[word_len] = '\0';
+
+                float word_w = MeasureTextEx(font, word_buf, font_size, spacing).x;
+
+                if (line_w + word_w > container_width) {
+                    nlines++;
+                    line_w = 0.0f;
+                }
+
+                line_w += word_w;
+            }
+
+            if (*word_end == ' ') {
+                Vector2 space_size = MeasureTextEx(font, " ", font_size, spacing);
+                line_w += space_size.x;
+                word_end++;
+            } 
+            
+            else if (*word_end == '\n') {
+                nlines++;
+                line_w = 0.0f;
+                word_end++;
+            }
+
+            word_start = word_end;
         }
-
-        node_free(node);
-    }
-}
-
-int anticipate_lines_wordwrap(Font font, const char* text, float fontSize, float spacing, float maxWidth)
-{
-    if (!text) return 0;
-
-    int lines = 1;
-    float line_width = 0.0f;
-
-    const char* word_start = text;
-    while (*word_start) {
-        if (*word_start == '\n') {
-            lines++;
-            line_width = 0;
-            word_start++;
-            continue;
-        }
-
-        const char* word_end = word_start;
-        while (*word_end && *word_end != ' ' && *word_end != '\n') word_end++;
-
-        int word_len = word_end - word_start;
-        char word_buf[256];
-        strncpy(word_buf, word_start, word_len);
-        word_buf[word_len] = '\0';
-
-        Vector2 size = MeasureTextEx(font, word_buf, fontSize, spacing);
-
-        if (line_width + size.x > maxWidth) {
-            lines++;
-            line_width = 0;
-        }
-
-        line_width += size.x;
-
-        if (*word_end == ' ') {
-            Vector2 space_size = MeasureTextEx(font, " ", fontSize, spacing);
-            line_width += space_size.x;
-            word_end++;
-        }
-
-        word_start = word_end;
-    }
-
-    return lines;
-}
-
-bool queue_thumbnail_load(List* task_queue, List* thumbnail_queue, Connection* conn, const char* search_result_id, const char* thumbnail_path,  MediaType media_type)
-{
+    } 
     
-    if ((task_queue == NULL) || (thumbnail_queue == NULL) || (conn == NULL) || (search_result_id == NULL) || (thumbnail_path == NULL)) {
-        printf("queue_thumbnail_load: invalid args\n");
-        return false;
+    else {
+        const char* p = text;
+        
+        char buf[2] = {0};
+
+        while (*p) {
+            if (*p == '\n') {
+                nlines++;
+                line_w = 0.0f;
+            } else {
+                buf[0] = *p;
+                float char_w = MeasureTextEx(font, buf, font_size, spacing).x;
+                line_w += char_w;
+
+                if (line_w > container_width) {
+                    nlines++;
+                    line_w = char_w;
+                }
+            }
+
+            p++;
+        }
     }
 
-    LoadThumbnailArgs* targs = malloc(sizeof(LoadThumbnailArgs));
-    if (targs == NULL) {
-        printf("queue_thumbnail_load: malloc returned NULL for 'targs'\n");
-        return false;
-    }
-
-    targs->conn = conn;
-    targs->media_type = media_type;
-    targs->thumbnail_queue = thumbnail_queue;
-    snprintf(targs->id, sizeof(targs->id), "%s", search_result_id);
-    snprintf(targs->thumbnail_path, sizeof(targs->thumbnail_path), "%s", thumbnail_path);
-
-    return launch_task(task_queue, targs, load_thumbnail);
+    return nlines;
 }
 
-typedef struct
+void draw_text_scrollable(const Rectangle scroll_window_bounds, const bool show_scrollbar, const Ui ui, Vector2* scrollbar_position, const char* text)
 {
-    SearchResult info;
-    char* description;
-} HighlightedVideo;
+    if (show_scrollbar && (scrollbar_position == NULL)) return;
 
-void draw_highlighted_video(const Rectangle container, Ui ui, Vector2* scrollbar_position, HighlightedVideo* highlighted_video)
-{
-    if ((scrollbar_position == NULL) || (highlighted_video == NULL)) return;
-
-    const Color text_color = BLACK;
-    const int font_size = 12;
-    const int spacing = 2;
-
-    const Rectangle scroll_window_area = {
-        .x = container.x,
-        .y = container.y + (container.height * 0.25f),
-        .width = fmax(20, container.width - ui.padding),
-        .height = container.height * 0.75f,
-    };
-
-    const float padded_width = container.width - (ui.padding * 2);
-
-    const float line_height = font_size + spacing;
-    const int nlines = anticipate_lines_wordwrap(ui.font, highlighted_video->description, font_size, spacing, padded_width);
-    const float video_desc_text_height = line_height * nlines;
+    const float padded_width = scroll_window_bounds.width - (ui.padding * 2);
+    const int nlines = anticipate_lines(ui.font, text, ui.font_size, ui.spacing, ui.word_wrap, padded_width);
     
-    const Rectangle scroll_content_area = {
-        .x = scroll_window_area.x,
-        .y = scroll_window_area.y,
-        .width = scroll_window_area.width,
-        .height = video_desc_text_height,
-    };
+    const float text_height = (ui.font_size + ui.spacing + ui.padding) * nlines;
+    Rectangle content_area = get_padded_rectangle(ui.padding, scroll_window_bounds);
+    content_area.height = text_height;
 
-    GuiScrollPanel(scroll_window_area, NULL, scroll_content_area, scrollbar_position, NULL, false);
+    GuiScrollPanel(scroll_window_bounds, NULL, content_area, scrollbar_position, NULL, show_scrollbar);
 
-    const Rectangle video_desc_bounds = {
-        .x = scroll_content_area.x,
-        .y = scroll_window_area.y + scrollbar_position->y,
-        .height = video_desc_text_height,
-        .width = scroll_content_area.width,
-    };
-
-    BeginScissorMode(scroll_window_area.x, scroll_window_area.y, scroll_window_area.width, scroll_window_area.height);
-
-    const Rectangle padded_video_desc_bounds = padded_rectangle(ui.padding, video_desc_bounds);
-    DrawTextBoxed(highlighted_video->description, padded_video_desc_bounds, ui, font_size, text_color);
-
+    Rectangle text_area = content_area;
+    text_area.y += scrollbar_position->y;
+    BeginScissorMode(scroll_window_bounds.x, scroll_window_bounds.y, scroll_window_bounds.width, scroll_window_bounds.height);
+    DrawTextBoxed(text, text_area, ui, ui.font_size, ui.text_color);
     EndScissorMode();
-}
-
-typedef struct
-{
-    HttpsRequest req;
-    Connection* conn;
-    HighlightedVideo* highlighted_video;
-} FocusedInfoArgs;
-
-FocusedInfoArgs* init_focused_info_args(HttpsRequest req, Connection* conn, HighlightedVideo* highlighted_video)
-{
-    if ((conn == NULL) || (highlighted_video == NULL)) {
-        printf("init_focused_info_args: invalid input\n");
-        return NULL;
-    }
-
-    FocusedInfoArgs* targs = malloc(sizeof(FocusedInfoArgs));
-    if (targs == NULL) {
-        printf("init_focused_info_args: malloc returned NULL for 'targs'\n");
-        return NULL;
-    }
-
-    targs->req = req;
-    targs->conn = conn;
-    targs->highlighted_video = highlighted_video;
-
-    return targs;
-}
-
-void* open_video_window(void* args)
-{
-    cJSON* json = NULL;
-    FocusedInfoArgs* targs = (FocusedInfoArgs*) args;
-    if (targs == NULL) {
-        printf("open_video_window: 'targs' is NULL\n");
-        goto cleanup;
-    }
-
-    json = get_json_response(&targs->req, ssl_ctx, targs->conn, HTTP_PROTOCOL_VER);
-    if (json == NULL) {
-        fprintf(stderr, "open_video_window: failed to get json response\n");
-        goto cleanup;
-    }
-
-    if (targs->highlighted_video->description) {
-        free(targs->highlighted_video->description); targs->highlighted_video->description = NULL;
-    }
-
-    targs->highlighted_video->description = get_video_description(json);
-
-    SetWindowTitle(TextFormat("[%s] - metube", targs->highlighted_video->info.title));
-
-    cleanup:
-        if (targs->req.payload) free(targs->req.payload);
-        if (json) cJSON_Delete(json);
-        return NULL;
-}
-
-typedef struct
-{
-    SearchResult info;
-    TextureCacheEntry* cached;
-    bool is_subscribed;
-} HighlightedChannel;
-
-bool is_subbed_to_channel(cJSON* subscribed_channels_json, const char* id)
-{
-    if ((subscribed_channels_json == NULL) || (id == NULL)) return false;
-
-    cJSON* subbed_channels = cjson_pointer_get(subscribed_channels_json, ARRAY_NAME);
-    
-    if (cJSON_IsArray(subbed_channels) == false) return false;
-
-    const int found = find_user_data_index(subbed_channels, id, OBJ_ID_PATH);
-
-    return (found >= 0);
 }
 
 void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* subscribed_channels_json, HighlightedChannel* highlighted_channel)
@@ -834,143 +944,6 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
         
         highlighted_channel->is_subscribed = !highlighted_channel->is_subscribed;
     }
-}
-
-typedef struct
-{
-    Query query;
-    TextureCacheEntry** texture_cache;
-    cJSON* subscribed_channels_json;
-    HighlightedChannel* channel;
-    Connection* thumbnail_conn;
-    Connection* results_conn;
-    List* raw_thumbnail_queue;
-    List* results;
-} ParseChannelArgs;
-
-void* open_channel_window(void* args)
-{
-    ParseChannelArgs* targs = (ParseChannelArgs*) args;
-    if ((targs == NULL) ||
-        (targs->texture_cache == NULL) || 
-        (targs->channel == NULL) ||
-        (targs->raw_thumbnail_queue == NULL) ||
-        (targs->results == NULL)) {
-        printf("open_channel_window: invalid input(s)\n");
-        return NULL;
-    }
-    
-    HttpsRequest req = configure_post_request(targs->query, targs->results_conn->host, api_key, continuation_token);
-    if (post_request_is_ready(req) == false) {
-        printf("open_channel_window: invalid post request\n");
-        if (req.payload) {
-            free(req.payload); req.payload = NULL;
-        }
-        return NULL;
-    }
-
-    cJSON* json = get_json_response(&req, ssl_ctx, targs->results_conn, HTTP_PROTOCOL_VER);
-    if (json == NULL) {
-        printf("open_channel_window: 'targs' is null\n");
-        if (req.payload) {
-            free(req.payload); req.payload = NULL;
-        }
-        return NULL;
-    }
-
-    if (req.payload) {
-        free(req.payload); req.payload = NULL;
-    }
-
-    const QueryType query_type = targs->query.type;
-    const QueryAttribute query_attr = targs->query.attr;
-    
-    pthread_mutex_lock(&targs->results->mutex);
-    create_results_from_json(json, targs->results, query_type, query_attr, false);
-    pthread_mutex_unlock(&targs->results->mutex);
-
-    get_continuation_token(json, &continuation_token, query_type, query_attr);
-
-    if (query_attr == QUERTY_ATTR_APPEND) {
-        goto clean;
-    }
-
-    if (parse_highlighted_channel(json, &targs->channel->info) == false) {
-        targs->channel->info.thumbnail_loaded = false;
-        targs->channel->info.thumbnail_path[0] = '\0';
-        targs->channel->cached = NULL;
-        goto clean;
-    }
-
-    targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, targs->channel->info.id);
-    
-    TextureCacheEntry* cached = texture_cache_find_entry(targs->texture_cache, targs->channel->info.id);
-    if (cached) {
-        targs->channel->info.thumbnail_loaded = true;
-        targs->channel->cached = cached;
-    }
-
-    else {
-        LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
-        if (thumb_args == NULL) {
-            printf("parse_channel: 'thumb_args' is null\n");
-            targs->channel->info.thumbnail_loaded = false;
-            targs->channel->info.thumbnail_path[0] = '\0';
-            targs->channel->cached = NULL;
-            goto clean;
-        }
-
-        thumb_args->conn = targs->thumbnail_conn;
-        thumb_args->media_type = MEDIA_TYPE_CHANNEL;
-        thumb_args->thumbnail_queue = targs->raw_thumbnail_queue;
-        snprintf(thumb_args->id, sizeof(thumb_args->id), "%s", targs->channel->info.id);
-        snprintf(thumb_args->thumbnail_path, sizeof(thumb_args->thumbnail_path), "%s", targs->channel->info.thumbnail_path);
-
-        load_thumbnail(thumb_args);
-
-        targs->channel->info.thumbnail_loaded = false;
-    }
-
-    SetWindowTitle(TextFormat("[Uploads from %s] - metube", targs->channel->info.title));
-
-    clean: 
-        cJSON_Delete(json); json = NULL;
-        return NULL;
-}
-
-void load_user_data(List* results, cJSON* user_data)
-{
-    if ((results == NULL) || (user_data == NULL)) return;
-
-    cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
-    if (cJSON_IsArray(array) == false) {
-        fprintf(stderr, "load_user_data: invalid array parsed\n");
-        return;
-    }
-
-    pthread_mutex_lock(&results->mutex);
-    
-    const int old_size = results->count;
-
-    cJSON* item;
-    cJSON_ArrayForEach(item, array) {
-        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
-        if (node) {
-            SearchResult* dest = (SearchResult*) node->content;
-            if (dest) {
-                parse_user_data(item, dest);
-                
-                if (dest->media_type != MEDIA_TYPE_UNDF) list_append(results, node);
-                else node_free(node);
-            }
-        }
-    }
-
-    for (int i = 0; i < old_size; i++) {
-        node_free(list_dequeue(results));
-    }
-
-    pthread_mutex_unlock(&results->mutex);
 }
 
 void draw_video_management_buttons(const Rectangle container, Query* query, HighlightedVideo* selected_video, cJSON* liked_video_data, bool* launch_search, bool* load_channel_info)
@@ -1111,9 +1084,6 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-// split programs up 
-    // bug with getting user's videos sometimes shows for half a second, then dissapears
-
 int main()
 {
     bool application_running = true;
@@ -1151,7 +1121,6 @@ int main()
     bool view_liked_videos = false;
     bool view_watch_history = false;
     bool view_subscribed_channels = false;
-
     
     ssl_ctx = SSL_CTX_new(TLS_client_method());
     if (ssl_ctx == NULL) {
@@ -1180,6 +1149,8 @@ int main()
 
     Ui ui = {
         .font = GetFontDefault(),
+        .font_size = 12,
+        .text_color = BLACK,
         .padding = 5,
         .spacing = 2,
         .word_wrap = true,
@@ -1201,12 +1172,16 @@ int main()
             load_video_information = false;
 
             Connection* conn = &youtube_pool.connections[youtube_pool.current_conn];
+            
             HttpsRequest req = configure_post_request(query, conn->host, api_key, continuation_token);
             if (post_request_is_ready(req)) {
-                FocusedInfoArgs* targs = init_focused_info_args(req, conn, &highlighted_video);
+                FocusedInfoArgs* targs = malloc(sizeof(FocusedInfoArgs));
                 if (targs) {
+                    targs->conn = conn;
+                    targs->highlighted_video = &highlighted_video;
+                    targs->req = req;
+
                     if (launch_task(&task_queue, targs, open_video_window) == false) {
-                        printf("failed to launch task: 'open_video_window'\n");
                         free(targs); targs = NULL;
                     }
                 }
@@ -1400,7 +1375,7 @@ int main()
 
             GuiScrollPanel(scroll_window_bounds, NULL, content_area, &result_scrollbar, NULL, true);
 
-            const Rectangle scissor_rect = padded_rectangle(1, scroll_window_bounds);
+            const Rectangle scissor_rect = get_padded_rectangle(1, scroll_window_bounds);
 
             BeginScissorMode(scissor_rect.x, scissor_rect.y, scissor_rect.width, scissor_rect.height);
 
@@ -1534,7 +1509,7 @@ int main()
                 .height = GetScreenHeight() - focused_video_bounds.y - BAR_HEIGHT - (ui.padding * 2),
             };
             
-            draw_highlighted_video(focused_video_bounds, ui, &description_scrollbar, &highlighted_video);
+            draw_text_scrollable(focused_video_bounds, true, ui, &description_scrollbar, highlighted_video.description);
             
         EndDrawing();
     }
@@ -1576,7 +1551,6 @@ int main()
 // stuff to do:
     // able to add videos to created playlist
     // fonts for L.O.T.E.
-    // handle connecticity issues (no wifi on startup, changing connections, etc.)
     // thumbnail frames from video click
     // better create_results_from_json?
     // move ui stuff together

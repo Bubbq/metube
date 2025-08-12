@@ -168,6 +168,19 @@ int find_user_data_index(const cJSON* user_data, const char* id, const char* id_
     return -1;
 }
 
+bool is_subbed_to_channel(cJSON* subscribed_channels_json, const char* id)
+{
+    if ((subscribed_channels_json == NULL) || (id == NULL)) return false;
+
+    cJSON* subbed_channels = cjson_pointer_get(subscribed_channels_json, ARRAY_NAME);
+    
+    if (cJSON_IsArray(subbed_channels) == false) return false;
+
+    const int found = find_user_data_index(subbed_channels, id, OBJ_ID_PATH);
+
+    return (found >= 0);
+}
+
 void parse_user_data(cJSON* user_data, SearchResult* dest) 
 {
     if ((user_data == NULL) || (dest == NULL)) return;

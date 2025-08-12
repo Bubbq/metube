@@ -40,6 +40,7 @@ cJSON* init_search_result_json(const SearchResult* result);
 void delete_user_data(cJSON* user_data, const char* id);
 void add_user_data(cJSON* user_data, const SearchResult* interacted_result);
 int  find_user_data_index(const cJSON* user_data, const char* id, const char* id_path);
+bool is_subbed_to_channel(cJSON* subscribed_channels_json, const char* id);
 
 void parse_user_data(cJSON* user_data, SearchResult* dest);
 
