@@ -6,7 +6,7 @@
 
 typedef struct RawThumbnail
 {
-    char id[256];     
+    char id[64];     
     Buffer data;              
     struct RawThumbnail *next;
     MediaType media_type;

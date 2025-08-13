@@ -40,9 +40,9 @@ const char* query_attr_to_text(const QueryAttribute query_attr)
     }
 }
 
-const char* query_type_to_endpoint(const QueryType search_type)
+const char* query_type_to_endpoint(const QueryType query_type)
 {
-    switch (search_type) {
+    switch (query_type) {
         case QUERY_TYPE_USER_INPUT: return "search";
         case QUERY_TYPE_VIEW_CHANNEL:
         case QUERY_TYPE_VIEW_PLAYLIST:
@@ -50,7 +50,7 @@ const char* query_type_to_endpoint(const QueryType search_type)
         case QUERY_TYPE_VIEW_VIDEO: return "player";
         case QUERY_TYPE_VIEW_RELATED: return "next";
         default:    
-            fprintf(stderr, "query_type_to_endpoint: invalid QueryType\n");
+            fprintf(stderr, "query_type_to_endpoint: QueryType %d is invalid\n", query_type);
             return NULL;
     }
 }

@@ -1,5 +1,6 @@
+#include "include/https_utils.h"
 #include "include/utils.h"
-#include "include/yt_client.h"
+#include "include/request_config.h"
 
 #include <stdio.h>
 #include <string.h>
