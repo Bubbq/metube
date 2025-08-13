@@ -47,15 +47,30 @@ const char* media_type_to_text(const MediaType media_type)
     }
 }
 
-const Vector2 media_type_to_thumbnail_dim(const MediaType media_type)
+const float media_type_to_thumbnail_width(const MediaType media_type)
 {
     switch (media_type) {
         case MEDIA_TYPE_LIVE:
         case MEDIA_TYPE_SHORT:
         case MEDIA_TYPE_VIDEO:
-        case MEDIA_TYPE_PLAYLIST: return (Vector2) { 150, 80 };
-        case MEDIA_TYPE_CHANNEL:  return (Vector2) { 75, 70 };
-        case MEDIA_TYPE_UNDF:
-        case MEDIA_TYPE_ANY:      return (Vector2) { 0 }; 
+        case MEDIA_TYPE_PLAYLIST: return 150.0f;
+        case MEDIA_TYPE_CHANNEL: return 75.0f;
+        default:
+            fprintf(stderr, "media_type_to_thumbnail_width: MediaType %d is not valid\n", media_type);
+            return 0;
+    }
+}
+
+const float media_type_to_thumbnail_height(const MediaType media_type)
+{
+    switch (media_type) {
+        case MEDIA_TYPE_LIVE:
+        case MEDIA_TYPE_SHORT:
+        case MEDIA_TYPE_VIDEO:
+        case MEDIA_TYPE_PLAYLIST: return 80.0f;
+        case MEDIA_TYPE_CHANNEL: return 70.0f;
+        default:
+            fprintf(stderr, "media_type_to_thumbnail_height: MediaType %d is not valid\n", media_type);
+            return 0;
     }
 }

@@ -3,6 +3,8 @@
 
 #include "media_type.h"
 
+#include <stdbool.h>
+
 typedef struct
 {
     char thumbnail_path[256];    

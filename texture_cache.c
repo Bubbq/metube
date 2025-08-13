@@ -1,5 +1,7 @@
-#include "include/utils.h"
 #include "include/texture_cache.h"
+
+#include "include/utils.h"
+#include "include/media_type.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +41,28 @@ void texture_cache_entry_free(TextureCacheEntry* entry)
 bool texture_cache_entry_is_ready(TextureCacheEntry* entry) 
 {
     return (entry) && (valid_string(entry->id)) && (IsTextureReady(entry->texture));
+}
+
+void process_raw_thumbnail(RawThumbnail* raw_thumbnail, TextureCache* texture_cache)
+{   
+    if ((raw_thumbnail == NULL) || (buffer_is_ready(&raw_thumbnail->data) == false)) return;
+    
+    const float thumbnail_w = media_type_to_thumbnail_width(raw_thumbnail->media_type);
+    const float thumbnail_h = media_type_to_thumbnail_height(raw_thumbnail->media_type);
+
+    Texture thumbnail = {0};
+
+    Image image = LoadImageFromMemory(".jpeg", (const unsigned char *) raw_thumbnail->data.data, raw_thumbnail->data.size);
+    if (IsImageReady(image)) {
+        ImageResize(&image, thumbnail_w, thumbnail_h);
+        thumbnail = LoadTextureFromImage(image);
+        UnloadImage(image);
+    }
+
+    TextureCacheEntry* entry = texture_cache_entry_init(thumbnail, raw_thumbnail->id);
+    if (texture_cache_entry_is_ready(entry) ) {
+        texture_cache_add_entry(texture_cache, entry);
+    }
 }
 
 void texture_cache_add_entry(TextureCache* texture_cache, TextureCacheEntry* entry)

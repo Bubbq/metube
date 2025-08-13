@@ -3,7 +3,7 @@
 
 #include "media_type.h"
 
-#include "raylib.h"
+#include <stdbool.h>
 
 typedef enum 
 {

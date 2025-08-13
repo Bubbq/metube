@@ -1,8 +1,6 @@
 #ifndef MEDIA_TYPE_H
 #define MEDIA_TYPE_H
 
-#include "raylib.h"
-
 typedef enum
 {
     MEDIA_TYPE_LIVE,
@@ -17,6 +15,7 @@ typedef enum
 const char* media_type_to_search_param(MediaType media_type);
 const char* media_type_to_thumbnail_host(const MediaType media_type);
 const char* media_type_to_text(const MediaType media_type);
-const Vector2 media_type_to_thumbnail_dim(const MediaType media_type);
+const float media_type_to_thumbnail_width(const MediaType media_type);
+const float media_type_to_thumbnail_height(const MediaType media_type);
 
 #endif

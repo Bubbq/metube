@@ -34,6 +34,9 @@ bool add_view_user_input_payload(cJSON* root, const char* user_input, const Sort
 
 // request config
 bool configure_youtube_internal_api_path(char* dest, const size_t dest_size, QueryType query_type, const char* key);
+bool configure_get_header(char* dest, const size_t dest_size, const char* host, const char* path);
+bool configure_post_header(char* dest, const size_t dest_size, const char* host, const char* path, const size_t content_length);
+bool post_request_is_ready(const HttpsRequest post);
 HttpsRequest configure_post_request(const Query query, const char* host, const char* api_key, const char* continuation_token);
 
 #endif

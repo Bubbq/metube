@@ -3,10 +3,10 @@
 #include "include/utils.h"
 #include "include/json_utils.h"
 
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 bool video_is_youtube_short(cJSON *videoRenderer) 
 {

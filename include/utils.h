@@ -2,7 +2,6 @@
 #define UTILS_H
 
 #include <stdio.h>
-#include <dirent.h> 
 #include <stdbool.h>
 
 int bound_index_to_array (const int pos, const int array_size);

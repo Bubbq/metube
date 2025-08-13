@@ -1,7 +1,6 @@
 #include "include/utils.h"
 #include "include/yt_client.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -177,6 +176,46 @@ bool configure_youtube_internal_api_path(char* dest, const size_t dest_size, Que
     return (written > 0) && (written < dest_size);
 }
 
+bool configure_get_header(char* dest, const size_t dest_size, const char* host, const char* path)
+{
+    if ((dest == NULL) || (!valid_string(host)) || (!valid_string(path)))
+        return false;
+
+    const int written =  snprintf(dest, dest_size,
+                "GET %s HTTP/%s\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: %s\r\n"
+                        "Connection: %s\r\n"
+                        "\r\n",
+                        path, HTTP_PROTOCOL_VER, host, USER_AGENT, CONNECTION_STATUS);
+    
+    return (written > 0) && (written < dest_size);
+}
+
+bool configure_post_header(char* dest, const size_t dest_size, const char* host, const char* path, const size_t content_length)
+{
+    if ((dest == NULL) || (!valid_string(host)) || (!valid_string(path)))
+        return false;
+
+    const int written = snprintf(dest, dest_size,
+                        "POST %s HTTP/%s\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: %s\r\n"
+                        "Content-Type: */*\r\n"
+                        "Accept: */*\r\n"
+                        "Content-Length: %zu\r\n"
+                        "Connection: %s\r\n"
+                        "\r\n",
+                        path, HTTP_PROTOCOL_VER, host, USER_AGENT, content_length, CONNECTION_STATUS);
+    
+    return (written > 0) && (written < dest_size);
+}
+
+bool post_request_is_ready(const HttpsRequest post)
+{
+    return valid_string(post.header) && valid_string(post.payload);
+}
+
 HttpsRequest configure_post_request(const Query query, const char* host, const char* api_key, const char* continuation_token)
 {
     if (valid_string(host) == false) return (HttpsRequest){0};
@@ -197,7 +236,7 @@ HttpsRequest configure_post_request(const Query query, const char* host, const c
 
     post.payload = cJSON_Print(payload);
 
-    if (configure_post_header(post.header, sizeof(post.header), host, post.path, USER_AGENT, CONNECTION_STATUS, strlen(post.payload), HTTP_PROTOCOL_VER) == false) {
+    if (!configure_post_header(post.header, sizeof(post.header), host, post.path, strlen(post.payload))) {
         fprintf(stderr, "configure_post_request: failed to resolve header\n");
         free(post.payload); post.payload = NULL;
     }

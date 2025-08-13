@@ -22,11 +22,6 @@ typedef struct
     char* payload;
 } HttpsRequest;
 
-// request configuration
-bool configure_get_header(char* dest, const size_t dest_size, const char* host, const char* path, const char* user_agent, const char* connection_status, const char* protocol_ver);
-bool configure_post_header(char* dest, const size_t dest_size, const char* host, const char* path, const char* user_agent, const char* connection_status, const size_t content_length, const char* protocol_ver);
-bool post_request_is_ready(const HttpsRequest post);
-
 // ssl communication
 bool ssl_write_request(SSL* ssl, const HttpsRequest req);
 int ssl_read_n(SSL* ssl, Buffer* buffer, const size_t n);

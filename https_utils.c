@@ -5,58 +5,6 @@
 #include <ctype.h>
 #include <stdbool.h>
 
-bool configure_get_header(char* dest, const size_t dest_size, const char* host, const char* path, const char* user_agent, const char* connection_status, const char* protocol_ver)
-{
-    if ((dest == NULL) || 
-       (!valid_string(host)) || 
-       (!valid_string(path)) || 
-       (!valid_string(user_agent)) || 
-       (!valid_string(connection_status)) || 
-       (!valid_string(protocol_ver))) {
-        return false;
-    }
-
-    const int written =  snprintf(dest, dest_size,
-                "GET %s HTTP/%s\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: %s\r\n"
-                        "Connection: %s\r\n"
-                        "\r\n",
-                        path, protocol_ver, host, user_agent, connection_status);
-    
-    return (written > 0) && (written < dest_size);
-}
-
-bool configure_post_header(char* dest, const size_t dest_size, const char* host, const char* path, const char* user_agent, const char* connection_status, const size_t content_length, const char* protocol_ver)
-{
-    if ((dest == NULL) || 
-       (!valid_string(host)) || 
-       (!valid_string(path)) || 
-       (!valid_string(user_agent)) || 
-       (!valid_string(connection_status)) || 
-       (!valid_string(protocol_ver))) {
-        return false;
-    }
-
-    const int written = snprintf(dest, dest_size,
-                        "POST %s HTTP/%s\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: %s\r\n"
-                        "Content-Type: */*\r\n"
-                        "Accept: */*\r\n"
-                        "Content-Length: %zu\r\n"
-                        "Connection: %s\r\n"
-                        "\r\n",
-                        path, protocol_ver, host, user_agent, content_length, connection_status);
-    
-    return (written > 0) && (written < dest_size);
-}
-
-bool post_request_is_ready(const HttpsRequest post)
-{
-    return valid_string(post.header) && valid_string(post.payload);
-}
-
 bool ssl_write_request(SSL* ssl, const HttpsRequest req)
 {
     if (ssl == NULL) return false;

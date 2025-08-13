@@ -94,7 +94,7 @@ void* load_thumbnail(void* args)
     }
 
     HttpsRequest req = {0};
-    if (configure_get_header(req.header, sizeof(req.header), targs->conn->host, targs->thumbnail_path, USER_AGENT, CONNECTION_STATUS, HTTP_PROTOCOL_VER) == false) {
+    if (configure_get_header(req.header, sizeof(req.header), targs->conn->host, targs->thumbnail_path) == false) {
         printf("load_thumbnail: req header was truncated\n");
         goto clean;
     }
@@ -725,7 +725,7 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
 
     const int font_size = 12;
 
-    const float thumbnail_width = media_type_to_thumbnail_dim(MEDIA_TYPE_VIDEO).x;
+    const float thumbnail_width = media_type_to_thumbnail_width(MEDIA_TYPE_VIDEO);
 
     const Rectangle thumbnail_area = { 
         .x = container.x, 
@@ -904,22 +904,22 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
 
     if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->cached == NULL) || (highlighted_channel->info.id[0] == '\0')) return;
 
-    const Vector2 dim = media_type_to_thumbnail_dim(MEDIA_TYPE_CHANNEL);
-
+    const float thumbnail_w = media_type_to_thumbnail_width(MEDIA_TYPE_CHANNEL);
+    
     if (texture_cache_entry_is_ready(highlighted_channel->cached)) {
         timer_start(&highlighted_channel->cached->timer, CACHED_TEXTURE_LIFETIME);
         DrawTextureEx(highlighted_channel->cached->texture, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
     }
 
     const Vector2 title_pos = {
-        .x = container.x + dim.x + (ui->padding * 2),
+        .x = container.x + thumbnail_w + (ui->padding * 2),
         .y = container.y + (container.height / 3.0f) - (title_size / 2.0f),
     };
 
     DrawTextEx(ui->font, highlighted_channel->info.title, title_pos, title_size, ui->spacing, BLACK);
     
     const Vector2 sub_count_pos = {
-        .x = container.x + dim.x + (ui->padding * 2),
+        .x = container.x + thumbnail_w + (ui->padding * 2),
         .y = container.y + container.height - MeasureTextEx(ui->font, highlighted_channel->info.subscriber_count, font_size, ui->spacing).y - ui->padding,
     };
 
@@ -1509,7 +1509,7 @@ int main()
                 .height = GetScreenHeight() - focused_video_bounds.y - BAR_HEIGHT - (ui.padding * 2),
             };
             
-            draw_text_scrollable(focused_video_bounds, true, ui, &description_scrollbar, highlighted_video.description);
+            draw_text_scrollable(focused_video_bounds, false, ui, &description_scrollbar, highlighted_video.description);
             
         EndDrawing();
     }
