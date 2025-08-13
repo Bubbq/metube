@@ -7,6 +7,8 @@
 #include <pthread.h>
 #include <openssl/ssl.h>
 
+#define HTTPS_PORT "443"
+
 typedef struct {
     char host[64];
     pthread_mutex_t mutex;
