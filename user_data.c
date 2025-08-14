@@ -1,5 +1,7 @@
 #include "include/user_data.h"
 
+#include "include/list.h"
+#include "include/search_result.h"
 #include "include/utils.h"
 #include "include/media_type.h"
 #include "include/json_utils.h"
@@ -229,20 +231,22 @@ void load_user_data(List* results, cJSON* user_data)
 
     cJSON* item;
     cJSON_ArrayForEach(item, array) {
-        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+        Node* node = init_node((void*) search_result_init, NULL, (void*) search_result_free, NULL);
         if (node) {
             SearchResult* dest = (SearchResult*) node->content;
             if (dest) {
                 parse_user_data(item, dest);
                 
-                if (dest->media_type != MEDIA_TYPE_UNDF) list_append(results, node);
-                else node_free(node);
+                if (dest->media_type != MEDIA_TYPE_UNDF) 
+                    append_list(results, node);
+                else 
+                    free_node(node);
             }
         }
     }
 
     for (int i = 0; i < old_size; i++) {
-        node_free(list_dequeue(results));
+        free_node(dequeue_list(results));
     }
 
     pthread_mutex_unlock(&results->mutex);

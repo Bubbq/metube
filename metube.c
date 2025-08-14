@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include "include/thread_context.h"
 #include "include/utils.h"
 #include "include/threads.h"
 #include "include/user_data.h"
@@ -22,7 +23,7 @@ void init_app()
     SetTraceLogLevel(LOG_ERROR);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
-    InitWindow(1000, 750, "metube");
+    InitWindow(1000, 750, "Metube");
 }
 
 typedef struct
@@ -653,22 +654,15 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-// make big struct of thread stuff????
-// make 'is_ready' funct for client context and thumbnail loader
+// need to check if all big structs failed in init or not
+
+// seperate all queue operations somewhere?
 
 int main()
 {
-    bool application_running = true;
-
-    // List thumbnail_queue = list_init();
-    List task_queue = list_init();
-    List results = list_init();
+    List results = init_list();
 
     TextureCache texture_cache = NULL;
-
-    pthread_t thread_pool[MAX_THREADS]; 
-
-    launch_workers(thread_pool, MAX_THREADS, &task_queue, &application_running);
 
     bool load_video_information = false;
     Vector2 description_scrollbar = {0};
@@ -689,12 +683,8 @@ int main()
     bool view_liked_videos = false;
     bool view_watch_history = false;
     bool view_subscribed_channels = false;
-    
-    
     bool show_filter_window = false;
-    
     bool text_box_focused = false;
-    
     bool launch_search = false;
     
     QueryType last_query_type = -1;
@@ -716,18 +706,24 @@ int main()
     UserData user_data = user_data_init();
     if (user_data_is_ready(&user_data) == false) {
         fprintf(stderr, "CRITICAL: failed to create UserData object\n");
-        goto cleanup;
+        return 1;
     }
     
     ClientContext client_ctx = client_context_init(MAX_THREADS);
     ThumbnailLoader thumbnail_loader = thumbnail_loader_init(MAX_THREADS);
 
+    ThreadContext thread_context;
+    if (!thread_context_init(&thread_context, MAX_THREADS)) {
+        fprintf(stderr, "CRITICAL: failed to initialize ThreadContext object\n");
+        return 1;
+    }
+
     SSL_CTX* ssl_ctx =  SSL_CTX_new(TLS_client_method());
     if (ssl_ctx == NULL) {
         fprintf(stderr, "CRITICAL: failed to create SSL_CTX object\n");
-        goto cleanup;
+        return 1;
     }
-
+    
     while (!WindowShouldClose())
     {
         texture_cache_remove_expried_entries(&texture_cache);
@@ -744,8 +740,8 @@ int main()
                 targs->ssl_ctx = ssl_ctx;
                 targs->client_ctx = &client_ctx;
                 targs->highlighted_video = &highlighted_video;
-
-                if (!launch_task(&task_queue, targs, get_video_metadata)) {
+                
+                if (!thread_context_add_task(&thread_context, targs, get_video_metadata)) {
                     free(targs); targs = NULL;
                 }
             }
@@ -760,12 +756,12 @@ int main()
             }
 
             last_query_type = query.type;
-            strlcpy(last_search_query, query.string, sizeof(last_search_query));
+            strncpy(last_search_query, query.string, sizeof(last_search_query));
 
             SearchThreadArgs* targs = malloc(sizeof(SearchThreadArgs));
             if (targs == NULL) {
                 printf("'targs' is null\n");
-                goto cleanup;
+                return 1;
             }
 
             targs->query = query;
@@ -773,7 +769,7 @@ int main()
             targs->ssl_ctx = ssl_ctx;
             targs->client_ctx = &client_ctx;
 
-            if (launch_task(&task_queue, targs, get_results_from_query) == false) {
+            if (thread_context_add_task(&thread_context, targs, get_results_from_query) == false) {
                 printf("failed to launch task: 'get_results_from_query'\n");
                 free(targs); targs = NULL;
             }
@@ -835,7 +831,7 @@ int main()
                 targs->thumbnail_loader = &thumbnail_loader;
                 targs->subscribed_channels_json = user_data.subscribed_channels;
 
-                if (!launch_task(&task_queue, targs, get_channel_metadata)) {
+                if (!thread_context_add_task(&thread_context, targs, get_channel_metadata)) {
                     fprintf(stderr, "failed to launch get_channel_metadata task\n");
                     free(targs); targs = NULL;
                 }
@@ -978,7 +974,7 @@ int main()
                 else if (valid_string(search_result->thumbnail_path) && !search_result->thumbnail_loaded) {
                     search_result->thumbnail_loaded = true;
 
-                    if (!queue_thumbnail_load(ssl_ctx, &thumbnail_loader, &task_queue, search_result->media_type, search_result->id, search_result->thumbnail_path)) {
+                    if (!queue_thumbnail_load(ssl_ctx, &thumbnail_loader, &thread_context.task_queue, search_result->media_type, search_result->id, search_result->thumbnail_path)) {
                         fprintf(stderr, "failed to queue thumbnail load\n");
                     }
                 }
@@ -1013,9 +1009,9 @@ int main()
                             load_channel_information = true;
                             query.type = QUERY_TYPE_VIEW_CHANNEL;
                             break;
-                        default:
-                            printf("CRITICAL: invalid media type pressed\n");
-                            goto cleanup;
+                        case MEDIA_TYPE_ANY:
+                        case MEDIA_TYPE_UNDF:
+                          break;
                     }
                 }
             }
@@ -1071,35 +1067,28 @@ int main()
             
         EndDrawing();
     }
+
+    thread_context_free(&thread_context);     
+    thumbnail_loader_free(&thumbnail_loader);
+    client_context_free(&client_ctx);
+
+    UnloadFont(ui.font);
+    free_list(&results);
+    texture_cache_free(&texture_cache);
     
-    cleanup:
-        // free worker thread stuff
-        application_running = false;
-        pthread_cond_broadcast(&task_queue.cond);
-        thread_pool_free(thread_pool, MAX_THREADS);
-        list_free(&task_queue);         
-        
-        // deinit app
-        UnloadFont(ui.font);
-        list_free(&results);
-        texture_cache_free(&texture_cache);
-        
-        user_data_free(&user_data);
-        
-        if (highlighted_video.description) {
-            free(highlighted_video.description); highlighted_video.description = NULL;
-        }
-        
-        if (ssl_ctx) {
-            SSL_CTX_free(ssl_ctx); ssl_ctx = NULL;
-        }
-
-        client_context_free(&client_ctx);
-        thumbnail_loader_free(&thumbnail_loader);
-
-        CloseWindow();
-        
-        return 0;
+    user_data_free(&user_data);
+    
+    if (highlighted_video.description) {
+        free(highlighted_video.description); highlighted_video.description = NULL;
+    }
+    
+    if (ssl_ctx) {
+        SSL_CTX_free(ssl_ctx); ssl_ctx = NULL;
+    }
+    
+    CloseWindow();
+    
+    return 0;
 }
 
 // stuff to do:
@@ -1110,4 +1099,3 @@ int main()
     // move ui stuff together
     // update highlighted channel anytime you press a video
     // issue with pressing user's videos button, sometimes channel shows for half second, then dissapears
-    // remove raylib dependency in query.h

@@ -410,7 +410,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType query_t
 
     cJSON *item;
     cJSON_ArrayForEach (item, results_array) {
-        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+        Node* node = init_node((void*) search_result_init, NULL, (void*) search_result_free, NULL);
         if (node == NULL) {
             fprintf(stderr, "create_results_from_json: failed to create node\n");
             return 0;
@@ -445,16 +445,16 @@ int create_results_from_json(cJSON* json, List* results, const QueryType query_t
 
         if (search_result->media_type != MEDIA_TYPE_UNDF) {
             elements_added++; 
-            list_append(results, node);
+            append_list(results, node);
         }
 
         else 
-            node_free(node);
+            free_node(node);
     }
 
     if (query_attr == QUERY_ATTR_REPLACE) {
         for (int i = 0; results->head && (i < old_size); i++) {
-            node_free(list_dequeue(results));
+            free_node(dequeue_list(results));
         }
     }
 

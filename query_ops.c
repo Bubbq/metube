@@ -3,6 +3,7 @@
 #include "include/user_data.h"
 #include "include/yt_parse.h"
 #include "include/request_config.h"
+#include <string.h>
 
 void* get_video_metadata(void* args)
 {
@@ -167,8 +168,8 @@ void* get_channel_metadata(void* args)
             return NULL;
         }
 
-        strlcpy(thumb_args->id, targs->channel->info.id, sizeof(thumb_args->id));
-        strlcpy(thumb_args->path, targs->channel->info.thumbnail_path, sizeof(thumb_args->path));
+        strncpy(thumb_args->id, targs->channel->info.id, sizeof(thumb_args->id));
+        strncpy(thumb_args->path, targs->channel->info.thumbnail_path, sizeof(thumb_args->path));
         thumb_args->loader = targs->thumbnail_loader;
         thumb_args->media_type = MEDIA_TYPE_CHANNEL;
         thumb_args->ssl_ctx = targs->ssl_ctx;

@@ -1,38 +1,38 @@
-#ifndef LIST_H
-#define LIST_H
+#ifndef LINKED_LIST_H
+#define LINKED_LIST_H
 
 #include <pthread.h>
 
-typedef enum
-{
-    NODE_TYPE_SEACH_RESULT,
-    NODE_TYPE_RAW_THUMBNAIL,
-    NODE_TYPE_THREAD_TASK,
-    NODE_TYPE_UNDF,
-} NodeType;
+typedef void* (*content_init_funct)(void*);
+typedef void (*content_free_funct)(void*);
+typedef void (*content_print_funct)(void*);
 
 typedef struct Node 
 {
+    content_init_funct init;
+    content_free_funct free;
+    content_print_funct print;
     void* content;
     struct Node* next;
-    NodeType type;
 } Node;
 
-Node* node_init(const NodeType node_type);
-void node_free(Node* node);
+Node* init_node(const content_init_funct init_funct, void* init_params, const content_free_funct free_funct, const content_print_funct print_funct);
+void free_node(Node* node);
+void print_node(const Node* node);
 
 typedef struct
 {
     pthread_cond_t cond;
     pthread_mutex_t mutex;
+    size_t count;
     Node* head; 
     Node* tail; 
-    int count;
 } List;
 
-List list_init();
-void list_free(List* list);
-Node* list_dequeue(List* list);
-void list_append(List* list, Node* node);
+List init_list();
+void free_list(List* list);
+void print_list(const List* list);
+Node* dequeue_list(List* list);
+void append_list(List* list, Node* node);
 
 #endif

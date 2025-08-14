@@ -1,8 +1,10 @@
 #include "include/thumbnail_loader.h"
 
+#include "include/raw_thumbnail.h"
 #include "include/utils.h"
 #include "include/threads.h"
 #include "include/request_config.h"
+#include <string.h>
 
 ThumbnailLoader thumbnail_loader_init(const size_t nconns)
 {
@@ -10,7 +12,7 @@ ThumbnailLoader thumbnail_loader_init(const size_t nconns)
     const char* channel_thumb_host = media_type_to_thumbnail_host(MEDIA_TYPE_CHANNEL);
     
     ThumbnailLoader loader = {
-        .thumbail_queue = list_init(),
+        .thumbail_queue = init_list(),
         .video_thumbnail_pool = connection_pool_init(video_thumb_host, HTTPS_PORT, nconns),
         .channel_thumbnail_pool = connection_pool_init(channel_thumb_host, HTTPS_PORT, nconns),
     };
@@ -24,7 +26,7 @@ void thumbnail_loader_free(ThumbnailLoader* loader)
 {
     if (loader == NULL) return;
 
-    list_free(&loader->thumbail_queue);
+    free_list(&loader->thumbail_queue);
     pthread_mutex_destroy(&loader->pool_mutex);
     connection_pool_free(&loader->video_thumbnail_pool);
     connection_pool_free(&loader->channel_thumbnail_pool);
@@ -77,7 +79,7 @@ void thumbnail_loader_process_raw_images(ThumbnailLoader* loader, TextureCache* 
     pthread_mutex_lock(&queue->mutex);
     
     while(queue->head) {
-        Node* node = list_dequeue(queue);
+        Node* node = dequeue_list(queue);
 
         RawThumbnail* raw = (RawThumbnail*) node->content;
 
@@ -90,7 +92,7 @@ void thumbnail_loader_process_raw_images(ThumbnailLoader* loader, TextureCache* 
         if (texture_cache_entry_is_ready(entry)) 
             texture_cache_add_entry(texture_cache, entry);
 
-        node_free(node);
+        free_node(node);
     }
 
     pthread_mutex_unlock(&queue->mutex);
@@ -116,8 +118,8 @@ bool queue_thumbnail_load(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, List* task_
     targs->ssl_ctx = ssl_ctx;
     targs->media_type = media_type;
     targs->loader = loader;
-    strlcpy(targs->id, id, sizeof(targs->id));
-    strlcpy(targs->path, path, sizeof(targs->path));
+    strncpy(targs->id, id, sizeof(targs->id));
+    strncpy(targs->path, path, sizeof(targs->path));
 
     return launch_task(task_queue, targs, load_thumbnail);
 }
@@ -152,8 +154,8 @@ void* load_thumbnail(void* args)
         return NULL;
     }
     
-    Node* node = node_init(NODE_TYPE_RAW_THUMBNAIL);
-    if (node == NULL) {
+    Node* node = init_node((void*) raw_thumbnail_init, NULL, (void*) raw_thumbnail_free, NULL);
+    if (!node) {
         fprintf(stderr, "load_thumbnail: failed to initalize node\n");
         buffer_free(&image_data);
         return NULL;
@@ -164,12 +166,12 @@ void* load_thumbnail(void* args)
     raw_image->next = NULL;
     raw_image->data = image_data;
     raw_image->media_type = targs->media_type;
-    strlcpy(raw_image->id, targs->id, sizeof(raw_image->id));
+    strncpy(raw_image->id, targs->id, sizeof(raw_image->id));
 
     List* thumbail_queue = &targs->loader->thumbail_queue;
 
     pthread_mutex_lock(&thumbail_queue->mutex);
-    list_append(thumbail_queue, node);
+    append_list(thumbail_queue, node);
     pthread_mutex_unlock(&thumbail_queue->mutex);
 
     return NULL;

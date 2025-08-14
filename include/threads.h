@@ -10,16 +10,23 @@
 
 typedef struct
 {
+    pthread_t* threads;
+    size_t nthreads;
+} ThreadPool;
+
+bool thread_pool_init(ThreadPool* thread_pool, const size_t nthreads);
+void thread_pool_free(ThreadPool* thread_pool);
+
+bool launch_task(List* task_queue, void* targs, void* (*funct)(void*));
+
+typedef struct
+{
     List* task_queue;
     bool* is_application_running;
 } WorkerArgs;
 
-WorkerArgs* worker_args_init(List* task_queue, bool* app_running);
-
 void* worker(void* args);
-bool launch_task(List* task_queue, void* targs, void* (*funct)(void*));
-void launch_workers(pthread_t* pool, const size_t nthreads, List* task_queue, bool* app_running);
-
-void thread_pool_free(pthread_t* pool, const size_t nthreads);
+WorkerArgs* worker_args_init(List* task_queue, bool* app_running);
+bool launch_workers(List* task_queue, ThreadPool* thread_pool, bool* application_is_running);
 
 #endif
