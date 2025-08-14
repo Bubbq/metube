@@ -1,8 +1,7 @@
 #include "include/thumbnail_loader.h"
 
 #include "include/utils.h"
-#include "include/media_type.h"
-#include "include/https_utils.h"
+#include "include/threads.h"
 #include "include/request_config.h"
 
 ThumbnailLoader thumbnail_loader_init(const size_t nconns)
@@ -97,26 +96,52 @@ void thumbnail_loader_process_raw_images(ThumbnailLoader* loader, TextureCache* 
     pthread_mutex_unlock(&queue->mutex);
 }
 
+bool queue_thumbnail_load(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, List* task_queue, MediaType media_type, const char* id, const char* path)
+{
+    if ((ssl_ctx == NULL) || 
+        (loader == NULL) || 
+        (task_queue == NULL) || 
+        (!valid_string(id)) || 
+        (!valid_string(path))) {
+        fprintf(stderr, "queue_thumbnail_load: invalid args\n");
+        return false;
+    }
+
+    LoadThumbnailArgs* targs = malloc(sizeof(LoadThumbnailArgs));
+    if (targs == NULL) {
+        fprintf(stderr, "queue_thumbnail_load: malloc returned null\n");
+        return false;
+    }
+
+    targs->ssl_ctx = ssl_ctx;
+    targs->media_type = media_type;
+    targs->loader = loader;
+    strlcpy(targs->id, id, sizeof(targs->id));
+    strlcpy(targs->path, path, sizeof(targs->path));
+
+    return launch_task(task_queue, targs, load_thumbnail);
+}
+
 void* load_thumbnail(void* args)
 {
     LoadThumbnailArgs* targs = (LoadThumbnailArgs*) args;
     if ((targs == NULL) || 
-        (targs->thumb_loader == NULL) || 
+        (targs->loader == NULL) || 
         (targs->ssl_ctx == NULL) || 
-        (!valid_string(targs->thumbnail_path) || 
+        (!valid_string(targs->path) || 
         (!valid_string(targs->id)))) {
         fprintf(stderr, "load_thumbnail: invalid args\n");
         return NULL;
     }
     
-    Connection* thumb_conn = thumbnail_loader_get_connection(targs->thumb_loader, targs->media_type);
+    Connection* thumb_conn = thumbnail_loader_get_connection(targs->loader, targs->media_type);
     if (thumb_conn == NULL) {
         fprintf(stderr, "load_thumbnail: thumbnail connection is null\n");
         return NULL;
     }
 
     HttpsRequest req = {0};
-    if (!configure_get_header(req.header, sizeof(req.header), thumb_conn->host, targs->thumbnail_path)) {
+    if (!configure_get_header(req.header, sizeof(req.header), thumb_conn->host, targs->path)) {
         fprintf(stderr, "load_thumbnail: failed to resolve request header\n");
         return NULL;
     }
@@ -141,7 +166,7 @@ void* load_thumbnail(void* args)
     raw_image->media_type = targs->media_type;
     strlcpy(raw_image->id, targs->id, sizeof(raw_image->id));
 
-    List* thumbail_queue = &targs->thumb_loader->thumbail_queue;
+    List* thumbail_queue = &targs->loader->thumbail_queue;
 
     pthread_mutex_lock(&thumbail_queue->mutex);
     list_append(thumbail_queue, node);

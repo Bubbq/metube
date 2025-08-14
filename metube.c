@@ -3,413 +3,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <time.h>
 
-#include "include/thumbnail_loader.h"
-#include "include/client_context.h"
-#include "include/user_data.h"
-#include "include/threads.h"
-#include "include/media_type.h"
-#include "include/yt_parse.h"
-#include "include/search_result.h"
-#include "include/list.h"
 #include "include/utils.h"
-#include "include/query.h"
-#include "include/timer.h"
+#include "include/threads.h"
+#include "include/user_data.h"
+#include "include/query_ops.h"
 #include "include/request_config.h"
-#include "include/connection.h"
-#include "include/json_utils.h"
-#include "include/https_utils.h"
-#include "include/texture_cache.h"
 
-#include "include/uthash.h"
 #include "include/raylib.h"
 #include "cjson/cJSON.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
-
-static SSL_CTX* ssl_ctx = NULL;
-
-typedef struct
-{
-    SearchResult info;
-    char* description;
-} HighlightedVideo;
-
-typedef struct
-{
-    SearchResult info;
-    TextureCacheEntry* cached;
-    bool is_subscribed;
-} HighlightedChannel;
-
-int create_results_from_json(cJSON* json, List* results, const QueryType query_type, const QueryAttribute query_attr, const bool allow_youtube_shorts)
-{
-    if ((json == NULL || (results == NULL))) return -1;
-
-    const char* path = get_results_list_path(query_type, query_attr); 
-
-    cJSON* results_array = cjson_pointer_get(json, path);
-    if (cJSON_IsArray(results_array) == false) {
-        printf("create_results_from_json: invalid results array from path %s\n", path);
-        write_json_to_file(json, "results.json");
-        return -1;
-    }
-
-    char author_id[64] = {0};
-    if (query_type == QUERY_TYPE_VIEW_CHANNEL) {
-        const char* author_id_path = (query_attr == QUERY_ATTR_REPLACE) 
-                                     ? ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId"
-                                     : ".responseContext.serviceTrackingParams[0].params[3].value";
-
-        if (assign_string_from_path(json, author_id_path, author_id, sizeof(author_id)) == false) {
-            printf("create_results_from_json: failed to parse author id from the path %s\n", author_id_path);
-        }
-    }
-
-    int elements_added = 0;
-    const int old_size = results->count;
-
-    cJSON *item;
-    cJSON_ArrayForEach (item, results_array) {
-        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
-        if ((node == NULL) || (node->content == NULL)) {
-            printf("create_results_from_json: node_init returned NULL\n");
-            return 0;
-        }
-
-        SearchResult* search_result = (SearchResult*) node->content;
-        
-        cJSON* videoRenderer             = cjson_pointer_get(item, ".videoRenderer");     
-        cJSON* richItemRenderer          = cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
-        cJSON* playlistVideoRenderer     = cjson_pointer_get(item, ".playlistVideoRenderer");
-        cJSON* channelRenderer           = cjson_pointer_get(item, ".channelRenderer");  
-        cJSON* lockupViewModel           = cjson_pointer_get(item, ".lockupViewModel");   
-        
-        if      (videoRenderer)             parse_video(videoRenderer, author_id, allow_youtube_shorts, search_result);
-        else if (richItemRenderer)          parse_video(richItemRenderer, author_id, allow_youtube_shorts,search_result);
-        else if (playlistVideoRenderer)     parse_playlist_video(playlistVideoRenderer, search_result);
-        else if (channelRenderer)           parse_channel_result(channelRenderer, search_result);
-        else if (lockupViewModel) {
-            if (query_type == QUERY_TYPE_VIEW_RELATED) 
-                parse_related_video(lockupViewModel, search_result);
-            else 
-                parse_playlist_result(lockupViewModel, search_result);
-        }
-
-        if (search_result->media_type != MEDIA_TYPE_UNDF) {
-            elements_added++; list_append(results, node);
-        }
-
-        else node_free(node);
-    }
-
-    if (query_attr == QUERY_ATTR_REPLACE) {
-        for (int i = 0; results->head && (i < old_size); i++) {
-            node_free(list_dequeue(results));
-        }
-    }
-
-    return elements_added;
-}
-
-void log_search(const QueryType query_type, const QueryAttribute query_attr, const float duration, const int nresults)
-{
-    const char* type_text = query_type_to_text(query_type);
-    const char* attr_text = query_attr_to_text(query_attr);
-    printf("%s (%s) took %f seconds, %d items found\n", type_text, attr_text, duration, nresults);
-}
-
-typedef struct
-{
-    Query query;
-    List* results;
-    ClientContext* client_ctx;
-} SearchThreadArgs;
-
-void* get_results_from_query(void* args)
-{
-    const float start_time = GetTime(); 
-    
-    SearchThreadArgs* targs = (SearchThreadArgs*) args;
-    if ((targs == NULL) || (targs->client_ctx == NULL) || (targs->results == NULL)) {
-        fprintf(stderr, "get_results_from_query: invalid args\n");
-        return NULL;
-    }
-
-    ClientContext* client_ctx = targs->client_ctx;
-    
-    Connection* youtube_conn = &client_ctx->youtube_api_pool.connections[client_ctx->youtube_api_pool.current_conn];
-    char** continuation_token = &targs->client_ctx->continuation_token;
-    const char* api_key = targs->client_ctx->api_key;
-
-    HttpsRequest req = configure_post_request(targs->query, youtube_conn->host, api_key, (*continuation_token));
-    if (post_request_is_ready(req) == false) {
-        fprintf(stderr, "get_results_from_query: failed to resolve request\n");
-        return NULL;
-    }
-
-    cJSON* res = get_json_response(&req, ssl_ctx, youtube_conn, HTTP_PROTOCOL_VER);
-
-    free(req.payload); req.payload = NULL;
-
-    if (res == NULL) {
-        fprintf(stderr, "get_results_from_query: failed to resolve json response\n");
-        return NULL;
-    }
-
-    const QueryType query_type = targs->query.type;
-    const QueryAttribute query_attr = targs->query.attr;
-    
-    pthread_mutex_lock(&targs->results->mutex);
-    create_results_from_json(res, targs->results, query_type, query_attr, targs->query.allow_youtube_shorts);
-    const int elements_added = targs->results->count; 
-    pthread_mutex_unlock(&targs->results->mutex);
-
-    pthread_mutex_lock(&targs->client_ctx->token_mutex);
-    get_continuation_token(res, continuation_token, query_type, query_attr);
-    pthread_mutex_unlock(&targs->client_ctx->token_mutex);
-    
-    log_search(query_type, query_attr, GetTime() - start_time, elements_added);
-    SetWindowTitle(TextFormat("[search results(%d)] - metube", targs->results->count));
-
-    cJSON_Delete(res); res = NULL;
-
-    return NULL;
-}
-
-typedef struct
-{
-    HttpsRequest req;
-    ClientContext* client_ctx;
-    HighlightedVideo* highlighted_video;
-} VideoMetadataArgs;
-
-void* get_video_metadata(void* args)
-{
-    VideoMetadataArgs* targs = (VideoMetadataArgs*) args;
-    if ((targs == NULL) || 
-        (!post_request_is_ready(targs->req)) ||
-        (targs->client_ctx == NULL) || 
-        (targs->highlighted_video == NULL)) {
-        fprintf(stderr, "get_video_metadata: invalid args\n");
-        return NULL;
-    }
-
-    ClientContext* client_ctx = targs->client_ctx;
-
-    Connection* youtube_conn = &client_ctx->youtube_api_pool.connections[client_ctx->youtube_api_pool.current_conn];
-
-    cJSON* res = get_json_response(&targs->req, ssl_ctx, youtube_conn, HTTP_PROTOCOL_VER);
-    
-    free(targs->req.payload); targs->req.payload = NULL;
-
-    if (res == NULL) {
-        fprintf(stderr, "get_video_metadata: failed to resolve json response\n");
-        return NULL;
-    }
-
-    if (targs->highlighted_video->description) {
-        free(targs->highlighted_video->description); targs->highlighted_video->description = NULL;
-    }
-
-    targs->highlighted_video->description = get_video_description(res);
-
-    cJSON_Delete(res); res = NULL;
-    
-    SetWindowTitle(TextFormat("[%s] - metube", targs->highlighted_video->info.title));
-
-    return NULL;
-}
-
-typedef struct
-{
-    Query query;
-    TextureCacheEntry** texture_cache;
-    ThumbnailLoader* thumbnail_loader;
-    cJSON* subscribed_channels_json;
-    HighlightedChannel* channel;
-    ClientContext* client_ctx;
-    List* results;
-} ChannelMetadataArgs;
-
-void* get_channel_metadata(void* args)
-{
-    ChannelMetadataArgs* targs = (ChannelMetadataArgs*) args;
-    if ((targs == NULL) || 
-        (targs->subscribed_channels_json == NULL) || 
-        (targs->channel == NULL) || 
-        (targs->client_ctx == NULL) || 
-        (targs->thumbnail_loader == NULL) || 
-        (targs->results == NULL)) {
-        fprintf(stderr, "get_channel_metadata: invalid args\n");
-        return NULL;
-    }
-
-    ClientContext* client_ctx = targs->client_ctx;
-    Connection* youtube_conn = &client_ctx->youtube_api_pool.connections[client_ctx->youtube_api_pool.current_conn];
-    char** continuation_token = &client_ctx->continuation_token; 
-    const char* api_key = client_ctx->api_key;
-
-    HttpsRequest results_req = configure_post_request(targs->query, youtube_conn->host, api_key, (*continuation_token));
-    if (!post_request_is_ready(results_req)) {
-        fprintf(stderr, "get_channel_metadata: failed to resolve results request\n");
-        return NULL;
-    }
-
-    cJSON* res = get_json_response(&results_req, ssl_ctx, youtube_conn, HTTP_PROTOCOL_VER);
-
-    free(results_req.payload); results_req.payload = NULL;
-    
-    if (res == NULL) {
-        fprintf(stderr, "get_channel_metadata: failed to resolve json response\n");
-        return NULL;
-    }
-
-    const QueryType query_type = targs->query.type;
-    const QueryAttribute query_attr = targs->query.attr;
-    
-    pthread_mutex_lock(&targs->results->mutex);
-    create_results_from_json(res, targs->results, query_type, query_attr, false);
-    pthread_mutex_unlock(&targs->results->mutex);
-
-    pthread_mutex_lock(&client_ctx->token_mutex);
-    get_continuation_token(res, continuation_token, query_type, query_attr);
-    pthread_mutex_unlock(&client_ctx->token_mutex);
-
-    if (query_attr == QUERY_ATTR_REPLACE) {
-        const bool channel_parse_status = parse_highlighted_channel(res, &targs->channel->info);
-        
-        cJSON_Delete(res); res = NULL;
-        
-        if (!channel_parse_status) {
-            fprintf(stderr, "get_channel_metadata: failed to parse channel information\n");
-            targs->channel->info.thumbnail_loaded = false;
-            targs->channel->info.thumbnail_path[0] = '\0';
-            targs->channel->cached = NULL;
-            return NULL;
-        }
-
-        targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, targs->channel->info.id);
-   
-        TextureCacheEntry* cached = texture_cache_find_entry(targs->texture_cache, targs->channel->info.id);
-        if (cached) {
-            targs->channel->info.thumbnail_loaded = true;
-            targs->channel->cached = cached;
-        }
-    
-        else {
-            LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
-            if (thumb_args == NULL) {
-                fprintf(stderr, "get_channel_metadata: malloc returned null\n");
-                targs->channel->info.thumbnail_loaded = false;
-                targs->channel->info.thumbnail_path[0] = '\0';
-                targs->channel->cached = NULL;
-                return NULL;
-            }
-            
-            Connection* channel_conn = thumbnail_loader_get_connection(targs->thumbnail_loader, MEDIA_TYPE_CHANNEL);
-            
-            if (channel_conn == NULL) {
-                fprintf(stderr, "get_channel_metadata: failed to resolve channel thumbnail connection\n");
-                targs->channel->info.thumbnail_loaded = false;
-                targs->channel->info.thumbnail_path[0] = '\0';
-                targs->channel->cached = NULL;
-                return NULL;
-            }
-
-            strlcpy(thumb_args->id, targs->channel->info.id, sizeof(thumb_args->id));
-            strlcpy(thumb_args->thumbnail_path, targs->channel->info.thumbnail_path, sizeof(thumb_args->thumbnail_path));
-            thumb_args->thumb_loader = targs->thumbnail_loader;
-            thumb_args->media_type = MEDIA_TYPE_CHANNEL;
-            thumb_args->ssl_ctx = ssl_ctx;
-    
-            load_thumbnail(thumb_args);
-    
-            targs->channel->info.thumbnail_loaded = false;
-        }
-    }
-
-    SetWindowTitle(TextFormat("[Uploads from %s] - metube", targs->channel->info.title));
-    
-    return NULL;
-}
-
-void process_thumbnail_queue(List* thumbnail_queue, TextureCacheEntry **hashtable)
-{
-    if (thumbnail_queue == NULL) return;
-
-    while (thumbnail_queue->head != NULL) {
-        Node* node = list_dequeue(thumbnail_queue);
-
-        if (node->type == NODE_TYPE_RAW_THUMBNAIL) {
-            process_raw_thumbnail(node->content, hashtable);
-        }
-
-        node_free(node);
-    }
-}
-
-bool queue_load_thumbnail(ThumbnailLoader* thumbnail_loader, List* task_queue, const char* id, const char* thumbnail_path, MediaType media_type)
-{
-    if ((task_queue == NULL) || 
-        (thumbnail_loader == NULL) || 
-        (!valid_string(id)) || 
-        (!valid_string(thumbnail_path))) {
-        fprintf(stderr, "queue_load_thumbnail: invalid args\n");
-        return false;
-    }
-
-    LoadThumbnailArgs* targs = malloc(sizeof(LoadThumbnailArgs));
-    if (targs == NULL) {
-        fprintf(stderr, "queue_load_thumbnail: malloc returned null\n");
-        return false;
-    }
-
-    targs->ssl_ctx = ssl_ctx;
-    targs->media_type = media_type;
-    targs->thumb_loader = thumbnail_loader;
-    strlcpy(targs->id, id, sizeof(targs->id));
-    strlcpy(targs->thumbnail_path, thumbnail_path, sizeof(targs->thumbnail_path));
-
-    return launch_task(task_queue, targs, load_thumbnail);
-}
-
-void load_user_data(List* results, cJSON* user_data)
-{
-    if ((results == NULL) || (user_data == NULL)) return;
-
-    cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
-    if (cJSON_IsArray(array) == false) {
-        fprintf(stderr, "load_user_data: invalid array parsed\n");
-        return;
-    }
-
-    pthread_mutex_lock(&results->mutex);
-    
-    const int old_size = results->count;
-
-    cJSON* item;
-    cJSON_ArrayForEach(item, array) {
-        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
-        if (node) {
-            SearchResult* dest = (SearchResult*) node->content;
-            if (dest) {
-                parse_user_data(item, dest);
-                
-                if (dest->media_type != MEDIA_TYPE_UNDF) list_append(results, node);
-                else node_free(node);
-            }
-        }
-    }
-
-    for (int i = 0; i < old_size; i++) {
-        node_free(list_dequeue(results));
-    }
-
-    pthread_mutex_unlock(&results->mutex);
-}
 
 void init_app()
 {
@@ -959,7 +564,6 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
         query->type = QUERY_TYPE_VIEW_RELATED;
         strncpy(query->focused_id, selected_video->info.id, sizeof(query->focused_id) - 1);
         query->focused_id[sizeof(query->focused_id) - 1] = '\0';
-        SetWindowTitle(TextFormat("[Related:%s(loading)] - metube", query->focused_id));                
     }
     
     const Rectangle users_videos_button_bounds = {
@@ -976,8 +580,6 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
 
         strncpy(query->focused_id, selected_video->info.authorId, sizeof(query->focused_id) - 1);
         query->focused_id[sizeof(query->focused_id) - 1] = '\0';
-        
-        SetWindowTitle(TextFormat("[User %s Videos(loading)] - metube", query->focused_id));
     }
 
     GuiSetState(STATE_NORMAL);
@@ -1048,11 +650,8 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
         *load_more = true;
         query->type = last_query;
         query->attr = QUERTY_ATTR_APPEND;
-        SetWindowTitle("[Appending] - metube");
     }
 }
-
-// make queue functions of all query operations
 
 // make big struct of thread stuff????
 // make 'is_ready' funct for client context and thumbnail loader
@@ -1123,7 +722,7 @@ int main()
     ClientContext client_ctx = client_context_init(MAX_THREADS);
     ThumbnailLoader thumbnail_loader = thumbnail_loader_init(MAX_THREADS);
 
-    ssl_ctx =  SSL_CTX_new(TLS_client_method());
+    SSL_CTX* ssl_ctx =  SSL_CTX_new(TLS_client_method());
     if (ssl_ctx == NULL) {
         fprintf(stderr, "CRITICAL: failed to create SSL_CTX object\n");
         goto cleanup;
@@ -1131,10 +730,7 @@ int main()
 
     while (!WindowShouldClose())
     {
-        if (HASH_COUNT(texture_cache) > 0) {
-            texture_cache_remove_expried_entries(&texture_cache);
-        }
-
+        texture_cache_remove_expried_entries(&texture_cache);
         thumbnail_loader_process_raw_images(&thumbnail_loader, &texture_cache);
 
         if (load_video_information) {
@@ -1145,6 +741,7 @@ int main()
             VideoMetadataArgs* targs = malloc(sizeof(VideoMetadataArgs));
             if (targs) {
                 targs->req = req;
+                targs->ssl_ctx = ssl_ctx;
                 targs->client_ctx = &client_ctx;
                 targs->highlighted_video = &highlighted_video;
 
@@ -1173,6 +770,7 @@ int main()
 
             targs->query = query;
             targs->results = &results;
+            targs->ssl_ctx = ssl_ctx;
             targs->client_ctx = &client_ctx;
 
             if (launch_task(&task_queue, targs, get_results_from_query) == false) {
@@ -1193,8 +791,6 @@ int main()
             pthread_mutex_unlock(&client_ctx.token_mutex);
 
             load_user_data(&results, user_data.liked_videos);
-
-            SetWindowTitle("[Liked Videos] - metube");
         }
 
         if (view_watch_history) {
@@ -1209,8 +805,6 @@ int main()
             pthread_mutex_unlock(&client_ctx.token_mutex);
 
             load_user_data(&results, user_data.watched_videos);
-
-            SetWindowTitle("[History] - metube");
         }
 
         if (view_subscribed_channels) {
@@ -1225,8 +819,6 @@ int main()
             pthread_mutex_unlock(&client_ctx.token_mutex);
 
             load_user_data(&results, user_data.subscribed_channels);
-
-            SetWindowTitle("[Subscriptions] - metube");
         }
 
         if (load_channel_information) {
@@ -1237,8 +829,8 @@ int main()
             if (targs) {
                 targs->query = query;
                 targs->results = &results;
+                targs->ssl_ctx = ssl_ctx;
                 targs->client_ctx = &client_ctx;
-                targs->texture_cache = &texture_cache;
                 targs->channel = &highlighted_channel;
                 targs->thumbnail_loader = &thumbnail_loader;
                 targs->subscribed_channels_json = user_data.subscribed_channels;
@@ -1267,7 +859,6 @@ int main()
                 launch_search = true;
                 query.attr = QUERY_ATTR_REPLACE;
                 query.type = QUERY_TYPE_VIEW_TRENDING;
-                SetWindowTitle("[Trending] - metube");
             }
 
             const Rectangle search_bar_bounds = {
@@ -1293,7 +884,6 @@ int main()
                     launch_search = true;
                     query.attr = QUERY_ATTR_REPLACE;
                     query.type = QUERY_TYPE_USER_INPUT;
-                    SetWindowTitle(TextFormat("[%s(loading)] - metube", query.string));
                 }
             }
 
@@ -1388,7 +978,7 @@ int main()
                 else if (valid_string(search_result->thumbnail_path) && !search_result->thumbnail_loaded) {
                     search_result->thumbnail_loaded = true;
 
-                    if (!queue_load_thumbnail(&thumbnail_loader, &task_queue, search_result->id, search_result->thumbnail_path, search_result->media_type)) {
+                    if (!queue_thumbnail_load(ssl_ctx, &thumbnail_loader, &task_queue, search_result->media_type, search_result->id, search_result->thumbnail_path)) {
                         fprintf(stderr, "failed to queue thumbnail load\n");
                     }
                 }
@@ -1418,12 +1008,10 @@ int main()
                         case MEDIA_TYPE_PLAYLIST:
                             launch_search = true;
                             query.type = QUERY_TYPE_VIEW_PLAYLIST;
-                            SetWindowTitle(TextFormat("[Playlist:%s(loading)] - metube", query.focused_id));
                             break;
                         case MEDIA_TYPE_CHANNEL:
                             load_channel_information = true;
                             query.type = QUERY_TYPE_VIEW_CHANNEL;
-                            SetWindowTitle(TextFormat("[Channel:%s(loading)] - metube", query.focused_id));
                             break;
                         default:
                             printf("CRITICAL: invalid media type pressed\n");

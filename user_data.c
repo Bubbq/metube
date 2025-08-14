@@ -212,3 +212,38 @@ void parse_user_data(cJSON* user_data, SearchResult* dest)
             break;
     }
 }
+
+void load_user_data(List* results, cJSON* user_data)
+{
+    if ((results == NULL) || (user_data == NULL)) return;
+
+    cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
+    if (cJSON_IsArray(array) == false) {
+        fprintf(stderr, "load_user_data: invalid array parsed\n");
+        return;
+    }
+
+    pthread_mutex_lock(&results->mutex);
+    
+    const int old_size = results->count;
+
+    cJSON* item;
+    cJSON_ArrayForEach(item, array) {
+        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+        if (node) {
+            SearchResult* dest = (SearchResult*) node->content;
+            if (dest) {
+                parse_user_data(item, dest);
+                
+                if (dest->media_type != MEDIA_TYPE_UNDF) list_append(results, node);
+                else node_free(node);
+            }
+        }
+    }
+
+    for (int i = 0; i < old_size; i++) {
+        node_free(list_dequeue(results));
+    }
+
+    pthread_mutex_unlock(&results->mutex);
+}

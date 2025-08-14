@@ -11,8 +11,8 @@ typedef struct
 } Buffer;
 
 Buffer buffer_init();
-void buffer_free(Buffer *buffer);
-bool buffer_is_ready(const Buffer *buffer);
-void buffer_write_data(Buffer *buffer, const char* data, const size_t data_size);
+void buffer_free(Buffer* buffer);
+bool buffer_is_ready(const Buffer* buffer);
+bool buffer_write_data(Buffer* buffer, const char* data, const size_t data_size);
 
 #endif

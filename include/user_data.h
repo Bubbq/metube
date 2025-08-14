@@ -1,6 +1,11 @@
 #ifndef USER_DATA_H
 #define USER_DATA_H
 
+#include "list.h"
+#include "search_result.h"
+
+#include <cjson/cJSON.h>
+
 #define ARRAY_NAME "array"
 #define ELEMENT_NAME "element"
 
@@ -15,13 +20,9 @@
 #define OBJ_VIDEO_LENGTH_PATH "duration"
 #define OBJ_MEDIA_TYPE_PATH   "media_type"
 
-#define LIKED_VIDEOS_FILE  "liked_videos.json"
+#define  LIKED_VIDEOS_FILE  "liked_videos.json"
 #define SUBSCRIPTIONS_FILE "subscriptions.json"
 #define WATCH_HISTORY_FILE "watch_history.json"
-
-#include "search_result.h"
-
-#include <cjson/cJSON.h>
 
 typedef struct
 {
@@ -43,5 +44,6 @@ int  find_user_data_index(const cJSON* user_data, const char* id, const char* id
 bool is_subbed_to_channel(cJSON* subscribed_channels_json, const char* id);
 
 void parse_user_data(cJSON* user_data, SearchResult* dest);
+void load_user_data(List* results, cJSON* user_data);
 
 #endif

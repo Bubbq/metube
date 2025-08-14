@@ -188,15 +188,6 @@ void parse_video(cJSON* videoRenderer, const char* author_id_override, const boo
     }
 }
 
-char* get_video_description(cJSON* videoDetails)
-{
-    const char* desc_path = ".videoDetails.shortDescription";
-
-    const cJSON* description_item = cjson_pointer_get(videoDetails, desc_path);
-
-    return json_string_is_valid(description_item) ? strdup(description_item->valuestring) : NULL;
-}
-
 void parse_related_video(cJSON* lockupViewModel, SearchResult* related_vid)
 {
     if ((lockupViewModel == NULL) || (related_vid == NULL)) return;
@@ -389,6 +380,87 @@ const char* get_results_list_path(const QueryType query_type, const QueryAttribu
     }
 }
 
+int create_results_from_json(cJSON* json, List* results, const QueryType query_type, const QueryAttribute query_attr, const bool allow_shorts)
+{
+    if ((json == NULL)|| (results == NULL)) 
+        return -1;
+
+    const char* path = get_results_list_path(query_type, query_attr); 
+
+    cJSON* results_array = cjson_pointer_get(json, path);
+    if (cJSON_IsArray(results_array) == false) {
+        printf("create_results_from_json: invalid results array from path %s\n", path);
+        write_json_to_file(json, "results.json");
+        return -1;
+    }
+
+    char author_id[64] = {0};
+    if (query_type == QUERY_TYPE_VIEW_CHANNEL) {
+        const char* author_id_path = (query_attr == QUERY_ATTR_REPLACE) 
+                                     ? ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId"
+                                     : ".responseContext.serviceTrackingParams[0].params[3].value";
+
+        if (assign_string_from_path(json, author_id_path, author_id, sizeof(author_id)) == false) {
+            printf("create_results_from_json: failed to parse author id from the path %s\n", author_id_path);
+        }
+    }
+
+    int elements_added = 0;
+    const int old_size = results->count;
+
+    cJSON *item;
+    cJSON_ArrayForEach (item, results_array) {
+        Node* node = node_init(NODE_TYPE_SEACH_RESULT);
+        if (node == NULL) {
+            fprintf(stderr, "create_results_from_json: failed to create node\n");
+            return 0;
+        }
+
+        SearchResult* search_result = (SearchResult*) node->content;
+        
+        cJSON* videoRenderer = cjson_pointer_get(item, ".videoRenderer");     
+        cJSON* richItemRenderer = cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
+        cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer");
+        cJSON* channelRenderer = cjson_pointer_get(item, ".channelRenderer");  
+        cJSON* lockupViewModel = cjson_pointer_get(item, ".lockupViewModel");   
+        
+        if (videoRenderer)             
+            parse_video(videoRenderer, author_id, allow_shorts, search_result);
+        
+        else if (richItemRenderer)
+            parse_video(richItemRenderer, author_id, allow_shorts,search_result);
+        
+        else if (playlistVideoRenderer)     
+            parse_playlist_video(playlistVideoRenderer, search_result);
+
+        else if (channelRenderer)
+            parse_channel_result(channelRenderer, search_result);
+        
+        else if (lockupViewModel) {
+            if (query_type == QUERY_TYPE_VIEW_RELATED) 
+                parse_related_video(lockupViewModel, search_result);
+            else 
+                parse_playlist_result(lockupViewModel, search_result);
+        }
+
+        if (search_result->media_type != MEDIA_TYPE_UNDF) {
+            elements_added++; 
+            list_append(results, node);
+        }
+
+        else 
+            node_free(node);
+    }
+
+    if (query_attr == QUERY_ATTR_REPLACE) {
+        for (int i = 0; results->head && (i < old_size); i++) {
+            node_free(list_dequeue(results));
+        }
+    }
+
+    return elements_added;
+}
+
 const char* get_continuation_token_path(const QueryType search_type, const QueryAttribute search_attr)
 {
     switch (search_type) {
@@ -427,4 +499,13 @@ void get_continuation_token(cJSON* json, char** dest, const QueryType query_type
     if (((*dest) = strdup(token_obj->valuestring)) == NULL) {
         fprintf(stderr, "get_continuation_token: strdup returned null\n");
     }
+}
+
+char* get_video_description(cJSON* videoDetails)
+{
+    const char* desc_path = ".videoDetails.shortDescription";
+
+    const cJSON* description_item = cjson_pointer_get(videoDetails, desc_path);
+
+    return json_string_is_valid(description_item) ? strdup(description_item->valuestring) : NULL;
 }

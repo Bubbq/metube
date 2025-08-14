@@ -26,13 +26,14 @@ Texture load_texture_from_memory(const Buffer* image_buffer, const char* image_e
 
 typedef struct 
 {
-    char thumbnail_path[256];
+    char path[256];
     char id[64];
-    ThumbnailLoader* thumb_loader;
+    ThumbnailLoader* loader;
     SSL_CTX* ssl_ctx;
     MediaType media_type;
 } LoadThumbnailArgs;
 
+bool queue_thumbnail_load(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, List* task_queue, MediaType media_type, const char* id, const char* path);
 void* load_thumbnail(void* args);
 
 #endif
