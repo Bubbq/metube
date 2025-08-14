@@ -36,6 +36,16 @@ typedef struct
     bool word_wrap;
 } Ui;
 
+typedef struct
+{
+    bool load_query_results;
+    bool load_video_metadata;
+    bool load_channel_metadata;
+    bool load_liked_videos;
+    bool load_watch_history;
+    bool load_subscribed_channels;
+} UpdateFlags;
+
 // Draw text using font inside rectangle limits with support for text selection
 void DrawTextBoxedSelectable(Ui ui, const char *text, Rectangle rec, float fontSize, Color tint, int selectStart, int selectLength, Color selectTint, Color selectBackTint)
 {
@@ -202,7 +212,7 @@ bool draw_toggle_filter(const Rectangle container, const Ui ui, const char* labe
 
     const char* button_text = "SWITCH";
     const float button_width = 50;
-    const float button_height = container.height - (ui.padding * 2);
+    const float widget_height = container.height - (ui.padding * 2);
 
     const float y_level = container.y + ui.padding;
 
@@ -224,7 +234,7 @@ bool draw_toggle_filter(const Rectangle container, const Ui ui, const char* labe
         .x = container.x + container.width - button_width - ui.padding,
         .y = y_level,
         .width = button_width,
-        .height = button_height,
+        .height = widget_height,
     };
 
     return GuiButton(button_bounds, button_text);
@@ -500,10 +510,10 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
     DrawTextEx(ui->font, highlighted_channel->info.subscriber_count, sub_count_pos, font_size, ui->spacing, BLACK);
 
     const float button_width = 75;
-    const float button_height = 25;
+    const float widget_height = 25;
     const Rectangle subscribe_button_bounds = {
         .x = container.x + container.width - button_width - ui->padding,
-        .y = container.y + container.height - button_height - ui->padding,
+        .y = container.y + container.height - widget_height - ui->padding,
         .width = button_width,
         .height = 25,
     };
@@ -520,7 +530,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
     }
 }
 
-void draw_video_management_buttons(const Rectangle container, Query* query, HighlightedVideo* selected_video, cJSON* liked_video_data, bool* launch_search, bool* load_channel_info)
+void draw_video_management_buttons(const Rectangle container, Query* query, HighlightedVideo* selected_video, cJSON* liked_video_data, UpdateFlags* update_flags)
 {
     const int padding = 5;
 
@@ -560,7 +570,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
     };
 
     if (GuiButton(related_videos_button_bounds, "Related Videos")) {
-        *launch_search = true;
+        update_flags->load_query_results = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_RELATED;
         strncpy(query->focused_id, selected_video->info.id, sizeof(query->focused_id) - 1);
@@ -575,7 +585,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
     };
 
     if (GuiButton(users_videos_button_bounds, "User's Videos")) {
-        *load_channel_info = true;
+        update_flags->load_channel_metadata = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_CHANNEL;
 
@@ -586,7 +596,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
     GuiSetState(STATE_NORMAL);
 }
 
-void draw_user_data_buttons(const Rectangle container, Query* query, bool* view_subscribed_channels, bool* view_liked_videos, bool* view_watch_history)
+void draw_user_data_buttons(const Rectangle container, Query* query, UpdateFlags* update_flags)
 {
     const int padding = 5;
     const int nbuttons = 3;
@@ -602,7 +612,7 @@ void draw_user_data_buttons(const Rectangle container, Query* query, bool* view_
     };
 
     if (GuiButton(subscriptions_button_bounds, "Subscribed Channels")) {
-        *view_subscribed_channels = true;
+        update_flags->load_subscribed_channels = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
     }
@@ -615,7 +625,7 @@ void draw_user_data_buttons(const Rectangle container, Query* query, bool* view_
     };
 
     if (GuiButton(liked_videos_button_bounds, "Liked Videos")) {
-        *view_liked_videos = true;
+        update_flags->load_liked_videos = true;
     }
     
     const Rectangle watch_history_button_bounds = {
@@ -626,7 +636,7 @@ void draw_user_data_buttons(const Rectangle container, Query* query, bool* view_
     };
 
     if (GuiButton(watch_history_button_bounds, "Watch History")) {
-        *view_watch_history = true;
+        update_flags->load_watch_history = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_WATCH_HISTORY;
     }
@@ -654,9 +664,86 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-// need to check if all big structs failed in init or not
+void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_ctx, ThreadContext* thread_ctx, HighlightedVideo* highlighted_video, Query query)
+{
+    if (!ssl_ctx || !client_ctx || !thread_ctx || !highlighted_video)
+        return;
 
-// seperate all queue operations somewhere?
+    HttpsRequest req = configure_post_request(query, client_ctx->youtube_api_pool.connections->host, client_ctx->api_key, client_ctx->continuation_token);
+
+    VideoMetadataArgs* targs = malloc(sizeof(VideoMetadataArgs));
+    if (!targs) {
+        fprintf(stderr, "queue_video_metadata_task: malloc returned null\n");
+        return;
+    }
+
+    targs->req = req;
+    targs->ssl_ctx = ssl_ctx;
+    targs->client_ctx = client_ctx;
+    targs->highlighted_video = highlighted_video;
+    
+    if (!thread_context_add_task(thread_ctx, targs, get_video_metadata)) {
+        fprintf(stderr, "queue_video_metadata_task: failed to queue task\n");
+        free(targs); targs = NULL;
+    }
+}
+
+void draw_search_bar(const Rectangle container, const Ui* ui, Query* query, UpdateFlags* update_flags, bool* text_box_focused, bool* show_filter_window)
+{
+    const int button_w = 25;
+    const int widget_h = 25;
+
+    const char* trending_button_text = "T";
+
+    const Rectangle trending_button_bounds = {
+        .x = ui->padding,
+        .y = ui->padding,
+        .width = button_w,
+        .height = widget_h,
+    };
+
+    if (GuiButton(trending_button_bounds, trending_button_text)) {
+        update_flags->load_query_results = true;
+        query->attr = QUERY_ATTR_REPLACE;
+        query->type = QUERY_TYPE_VIEW_TRENDING;
+    }
+
+    const Rectangle text_bar_bounds = {
+        .x = trending_button_bounds.x + trending_button_bounds.width + ui->padding, 
+        .y = ui->padding, 
+        .width = (container.width * 0.75f), 
+        .height = widget_h, 
+    };
+
+    if (GuiTextBox(text_bar_bounds, query->string, sizeof(query->string), (*text_box_focused))) 
+        (*text_box_focused) = !(*text_box_focused);
+
+    const Rectangle search_button_bounds = {
+        .x = text_bar_bounds.x + text_bar_bounds.width + ui->padding, 
+        .y = ui->padding, 
+        .width = button_w, 
+        .height = widget_h
+    };
+
+    if ((GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) && 
+       (trim_whitespace(query->string) > 0)) {
+        update_flags->load_query_results = true;
+        query->attr = QUERY_ATTR_REPLACE;
+        query->type = QUERY_TYPE_USER_INPUT;
+    }
+
+    const char* filter_button_text = "Fil";
+
+    const Rectangle filter_button_bounds = {
+        .x = search_button_bounds.x + search_button_bounds.width + ui->padding,
+        .y = ui->padding,
+        .width = button_w,
+        .height = widget_h,
+    };
+
+    if (GuiButton(filter_button_bounds, filter_button_text)) 
+        (*show_filter_window) = !(*show_filter_window);
+}
 
 int main()
 {
@@ -664,11 +751,9 @@ int main()
 
     TextureCache texture_cache = NULL;
 
-    bool load_video_information = false;
     Vector2 description_scrollbar = {0};
     HighlightedVideo highlighted_video = {0};
     
-    bool load_channel_information = false;
     HighlightedChannel highlighted_channel = {0};
 
     Query query = {
@@ -679,13 +764,9 @@ int main()
         .type = QUERY_TYPE_USER_INPUT,
         .allow_youtube_shorts = true,
     };
-    
-    bool view_liked_videos = false;
-    bool view_watch_history = false;
-    bool view_subscribed_channels = false;
+
     bool show_filter_window = false;
     bool text_box_focused = false;
-    bool launch_search = false;
     
     QueryType last_query_type = -1;
     char last_search_query[512] = {0};
@@ -718,6 +799,8 @@ int main()
         return 1;
     }
 
+    UpdateFlags update_flags = {false};
+
     SSL_CTX* ssl_ctx =  SSL_CTX_new(TLS_client_method());
     if (ssl_ctx == NULL) {
         fprintf(stderr, "CRITICAL: failed to create SSL_CTX object\n");
@@ -729,26 +812,13 @@ int main()
         texture_cache_remove_expried_entries(&texture_cache);
         thumbnail_loader_process_raw_images(&thumbnail_loader, &texture_cache);
 
-        if (load_video_information) {
-            load_video_information = false;
-
-            HttpsRequest req = configure_post_request(query, client_ctx.youtube_api_pool.connections->host, client_ctx.api_key, client_ctx.continuation_token);
-
-            VideoMetadataArgs* targs = malloc(sizeof(VideoMetadataArgs));
-            if (targs) {
-                targs->req = req;
-                targs->ssl_ctx = ssl_ctx;
-                targs->client_ctx = &client_ctx;
-                targs->highlighted_video = &highlighted_video;
-                
-                if (!thread_context_add_task(&thread_context, targs, get_video_metadata)) {
-                    free(targs); targs = NULL;
-                }
-            }
+        if (update_flags.load_video_metadata) {
+            update_flags.load_video_metadata = false;
+            queue_video_metadata_task(ssl_ctx, &client_ctx, &thread_context, &highlighted_video, query);
         }
 
-        if (launch_search) {
-            launch_search = false;
+        if (update_flags.load_query_results) {
+            update_flags.load_query_results = false;
 
             // evade bot detection
             if (strcmp(last_search_query, query.string) == 0) {
@@ -775,8 +845,8 @@ int main()
             }
         }
 
-        if (view_liked_videos) {
-            view_liked_videos = false;
+        if (update_flags.load_liked_videos) {
+            update_flags.load_liked_videos = false;
 
             pthread_mutex_lock(&client_ctx.token_mutex);
 
@@ -789,8 +859,8 @@ int main()
             load_user_data(&results, user_data.liked_videos);
         }
 
-        if (view_watch_history) {
-            view_watch_history = false;
+        if (update_flags.load_watch_history) {
+            update_flags.load_watch_history = false;
 
             pthread_mutex_lock(&client_ctx.token_mutex);
 
@@ -803,8 +873,8 @@ int main()
             load_user_data(&results, user_data.watched_videos);
         }
 
-        if (view_subscribed_channels) {
-            view_subscribed_channels = false;
+        if (update_flags.load_subscribed_channels) {
+            update_flags.load_subscribed_channels = false;
 
             pthread_mutex_lock(&client_ctx.token_mutex);
 
@@ -817,8 +887,8 @@ int main()
             load_user_data(&results, user_data.subscribed_channels);
         }
 
-        if (load_channel_information) {
-            load_channel_information = false;
+        if (update_flags.load_channel_metadata) {
+            update_flags.load_channel_metadata = false;
             last_query_type = query.type;
 
             ChannelMetadataArgs* targs = malloc(sizeof(ChannelMetadataArgs));
@@ -844,91 +914,41 @@ int main()
 
             const float BAR_HEIGHT = 25.0;
 
-            const Rectangle trending_button_bounds = {
-                .x = ui.padding,
-                .y = ui.padding,
-                .width = 20,
-                .height = BAR_HEIGHT,
-            };
-
-            if (GuiButton(trending_button_bounds, "T")) {
-                launch_search = true;
-                query.attr = QUERY_ATTR_REPLACE;
-                query.type = QUERY_TYPE_VIEW_TRENDING;
-            }
-
             const Rectangle search_bar_bounds = {
-                .x = trending_button_bounds.x + trending_button_bounds.width + ui.padding, 
-                .y = ui.padding, 
-                .width = 325, 
-                .height = BAR_HEIGHT 
+                .x = 0,
+                .y = 0,
+                .width = 375, 
+                .height = 35,
             };
 
-            if (GuiTextBox(search_bar_bounds, query.string, sizeof(query.string), text_box_focused)) {
-                text_box_focused = !text_box_focused;
-            }
-
-            const Rectangle search_button_bounds = {
-                .x = search_bar_bounds.x + search_bar_bounds.width + ui.padding, 
-                .y = ui.padding, 
-                .width = 25, 
-                .height = BAR_HEIGHT
-            };
-
-            if (GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) {
-                if (trim_whitespace(query.string) > 0) {
-                    launch_search = true;
-                    query.attr = QUERY_ATTR_REPLACE;
-                    query.type = QUERY_TYPE_USER_INPUT;
-                }
-            }
-
-            const Rectangle filter_button_bounds = {
-                .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
-                .y = ui.padding,
-                .width = 25,
-                .height = BAR_HEIGHT,
-            };
-
-            if (GuiButton(filter_button_bounds, "Fil")) {
-                show_filter_window = !show_filter_window;
-            }
+            draw_search_bar(search_bar_bounds, &ui, &query, &update_flags, &text_box_focused, &show_filter_window);
 
             const Rectangle filter_window_bounds = {
-                    .x = ui.padding,
-                    .y = BAR_HEIGHT + (ui.padding * 2), 
-                    .width = trending_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
-                    .height = 75
+                .x = ui.padding,
+                .y = search_bar_bounds.y + search_bar_bounds.height,
+                .width = search_bar_bounds.width - ui.padding,
+                .height = 80,
             };
 
-            if (show_filter_window) {
+            if (show_filter_window)
                 draw_filter_window(filter_window_bounds, ui, &query);
-            }
             
             const float focused_channel_height = 80;
-            const Rectangle focused_channel_bounds = {
-                .x = ui.padding,
-                .y = GetScreenHeight() - focused_channel_height - ui.padding,
-                .width = trending_button_bounds.width + search_bar_bounds.width + search_button_bounds.width + filter_button_bounds.width + (ui.padding * 3), 
-                .height = focused_channel_height,
-            };
-           
+
             const Rectangle scroll_window_bounds = { 
                 .x = ui.padding, 
-                .y = search_bar_bounds.y + search_bar_bounds.height + (show_filter_window ? (filter_window_bounds.height + ui.padding) : 0) + ui.padding, 
-                .width = focused_channel_bounds.width, 
-                .height = GetScreenHeight() - scroll_window_bounds.y - focused_channel_height - (ui.padding * 2), 
+                .y = search_bar_bounds.y + search_bar_bounds.height + (show_filter_window ? (filter_window_bounds.height + ui.padding) : 0), 
+                .width = search_bar_bounds.width, 
+                .height = 595, 
             };
 
-            const bool load_more_button_visible = valid_string(client_ctx.continuation_token);
-            const size_t results_len = results.count + load_more_button_visible;
-
             const int container_height = 80;
+
             const Rectangle content_area = {
                 .x = scroll_window_bounds.x,
                 .y = scroll_window_bounds.y,
                 .width = scroll_window_bounds.width,
-                .height = container_height * results_len,
+                .height = container_height * results.count,
             };
 
             const int SCROLLBAR_WIDTH = 13;
@@ -994,7 +1014,7 @@ int main()
                         case MEDIA_TYPE_SHORT:
                         case MEDIA_TYPE_VIDEO:
                             if (result_is_highlighted == false) {
-                                load_video_information = true;
+                                update_flags.load_video_metadata = true;
                                 query.type = QUERY_TYPE_VIEW_VIDEO;
                                 memcpy(&highlighted_video.info, search_result, sizeof(SearchResult));
                                 add_user_data(user_data.watched_videos, search_result);
@@ -1002,11 +1022,11 @@ int main()
                             }
                             break;
                         case MEDIA_TYPE_PLAYLIST:
-                            launch_search = true;
+                            update_flags.load_query_results = true;
                             query.type = QUERY_TYPE_VIEW_PLAYLIST;
                             break;
                         case MEDIA_TYPE_CHANNEL:
-                            load_channel_information = true;
+                            update_flags.load_channel_metadata = true;
                             query.type = QUERY_TYPE_VIEW_CHANNEL;
                             break;
                         case MEDIA_TYPE_ANY:
@@ -1017,44 +1037,55 @@ int main()
             }
 
             pthread_mutex_unlock(&results.mutex);
-            
-            if (load_more_button_visible) {
-                const Rectangle load_more_button_bounds = {
-                    .x = container.x,
-                    .y = container.y + container_height,
-                    .width = container.width,
-                    .height = container_height,
-                };
-
-                draw_load_more_button(load_more_button_bounds, ui.font, &query, last_query_type, &launch_search);
-            }
-            
+                    
             EndScissorMode();
+                    
+            const Rectangle load_more_button_bounds = {
+                .x = ui.padding,
+                .y = scroll_window_bounds.y + scroll_window_bounds.height + ui.padding,
+                .width = scroll_window_bounds.width,
+                .height = 25,
+            };
+
+            DrawRectangleRec(load_more_button_bounds, RED);
+
+            if (GuiButton(load_more_button_bounds, "<< LOAD MORE >> ")) {
+                update_flags.load_query_results = true;;
+                query.type = last_query_type;
+                query.attr = QUERTY_ATTR_APPEND;
+            }
 
             const Rectangle TOP_RIGHT_PANEL = {
-                .x = filter_button_bounds.x + filter_button_bounds.width + ui.padding,
+                .x = search_bar_bounds.x + search_bar_bounds.width + (ui.padding * 2),
                 .y = ui.padding,
                 .width = GetScreenWidth() - TOP_RIGHT_PANEL.x - ui.padding,
                 .height = BAR_HEIGHT, 
             };
 
-            draw_video_management_buttons(TOP_RIGHT_PANEL, &query, &highlighted_video, user_data.liked_videos, &launch_search, &load_channel_information);
+            draw_video_management_buttons(TOP_RIGHT_PANEL, &query, &highlighted_video, user_data.liked_videos, &update_flags);
 
             if ((highlighted_channel.info.thumbnail_loaded == false) && (highlighted_channel.info.thumbnail_path[0] != '\0')) { 
                 highlighted_channel.info.thumbnail_loaded = true;
                 highlighted_channel.cached = texture_cache_find_entry(&texture_cache, highlighted_channel.info.id);
             }
 
-            draw_highlighted_channel(focused_channel_bounds, &ui, user_data.subscribed_channels, &highlighted_channel);
+             const Rectangle highlighted_channel_bounds = {
+                .x = ui.padding,
+                .y = load_more_button_bounds.y + load_more_button_bounds.height + ui.padding,
+                .width = search_bar_bounds.width, 
+                .height = focused_channel_height,
+            };
+
+            draw_highlighted_channel(highlighted_channel_bounds, &ui, user_data.subscribed_channels, &highlighted_channel);
 
             const Rectangle BOTTOM_RIGHT_PANEL = {
-                .x = focused_channel_bounds.x + focused_channel_bounds.width + ui.padding,
+                .x = TOP_RIGHT_PANEL.x + ui.padding,
                 .y = GetScreenHeight() - BAR_HEIGHT - ui.padding,
                 .width = TOP_RIGHT_PANEL.width,
                 .height = BAR_HEIGHT,
             };
 
-            draw_user_data_buttons(BOTTOM_RIGHT_PANEL, &query, &view_subscribed_channels, &view_liked_videos, &view_watch_history);
+            draw_user_data_buttons(BOTTOM_RIGHT_PANEL, &query, &update_flags);
             
             const Rectangle focused_video_bounds = {
                 .x = scroll_window_bounds.x + scroll_window_bounds.width + ui.padding,
