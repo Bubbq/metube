@@ -4,9 +4,10 @@
 
 void timer_start(Timer* timer, const size_t lifetime) 
 {
-    if (timer == NULL) return;
+    if (!timer) 
+        return;
 
-	timer->start_time = (size_t) time(NULL);
+    timer->start_time = (size_t) time(NULL);
 	timer->lifetime = lifetime;
 }
 

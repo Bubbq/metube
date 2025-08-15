@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-Node* init_node(const content_init_funct init_funct, void* init_params, const content_free_funct free_funct, const content_print_funct print_funct)
+Node* node_init(const content_init_funct init_funct, void* init_params, const content_free_funct free_funct, const content_print_funct print_funct)
 {
     Node* node = malloc(sizeof(Node));
     if (!node) {
@@ -28,7 +28,7 @@ Node* init_node(const content_init_funct init_funct, void* init_params, const co
     return node;
 }
 
-void free_node(Node* node)
+void node_free(Node* node)
 {
     if (!node)
         return;
@@ -39,7 +39,7 @@ void free_node(Node* node)
     free(node); node = NULL;
 }
 
-void print_node(const Node *node)
+void node_print(const Node *node)
 {
     if (!node || !node->print)
         return;
@@ -47,7 +47,7 @@ void print_node(const Node *node)
     node->print(node->content);
 }
 
-List init_list()
+List list_init()
 {
     List list;
     
@@ -59,29 +59,29 @@ List init_list()
     return list;
 }
 
-void free_list(List* list)
+void list_free(List* list)
 {
     if (!list)
         return;
 
     while (list->head)
-        free_node(dequeue_list(list));
+        node_free(list_dequeue(list));
 
     list->head = list->tail = NULL;
     pthread_cond_destroy(&list->cond);
     pthread_mutex_destroy(&list->mutex);
 }
 
-void print_list(const List* list)
+void list_print(const List* list)
 {
     if (!list)
         return;
 
     for (Node* node = list->head; node; node = node->next)
-        print_node(node);
+        node_print(node);
 }
 
-void append_list(List* list, Node* node)
+void list_append(List* list, Node* node)
 {
     if (!list || !node)
         return;
@@ -99,7 +99,7 @@ void append_list(List* list, Node* node)
     list->count++;
 }
 
-Node* dequeue_list(List* list)
+Node* list_dequeue(List* list)
 {
     if (!list)
         return NULL;

@@ -4,10 +4,7 @@
 #include "buffer.h"
 #include "connection.h"
 
-#include <stdlib.h>
-#include <stdbool.h>
 #include <cjson/cJSON.h>
-#include <openssl/types.h>
 
 #define CRLF "\r\n"
 #define VALID_HTTPS_RESPONSE_CODE "200"

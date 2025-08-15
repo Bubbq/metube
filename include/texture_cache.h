@@ -4,7 +4,6 @@
 #include "timer.h"
 #include "raylib.h"
 #include "uthash.h"
-#include "raw_thumbnail.h"
 
 #define MINUTE 60
 #define CACHED_TEXTURE_LIFETIME (MINUTE * 1)
@@ -22,7 +21,6 @@ typedef TextureCacheEntry* TextureCache;
 TextureCacheEntry* texture_cache_entry_init(const Texture texture, const char* id);
 void texture_cache_entry_free(TextureCacheEntry* entry);
 bool texture_cache_entry_is_ready(TextureCacheEntry* entry);
-void process_raw_thumbnail(RawThumbnail* raw_thumbnail, TextureCache* texture_cache);
 void texture_cache_add_entry(TextureCache* texture_cache, TextureCacheEntry* entry);
 void texture_cache_remove_entry(TextureCache* texture_cache, TextureCacheEntry* entry);
 void texture_cache_free(TextureCache* texture_cache);

@@ -1,6 +1,7 @@
 #ifndef JSON_UTILS_H
 #define JSON_UTILS_H
 
+#include <stdbool.h>
 #include <cjson/cJSON.h>
 
 // file I/O

@@ -1,13 +1,13 @@
-#include "include/utils.h"
 #include "include/https_utils.h"
 
-#include <stdio.h>
+#include "include/utils.h"
+
 #include <ctype.h>
-#include <stdbool.h>
 
 bool ssl_write_request(SSL* ssl, const HttpsRequest req)
 {
-    if (ssl == NULL) return false;
+    if (!ssl) 
+        return false;
 
     int header_status;
     if ((header_status = SSL_write(ssl, req.header, strlen(req.header))) <= 0) {
@@ -27,7 +27,8 @@ bool ssl_write_request(SSL* ssl, const HttpsRequest req)
 
 int ssl_read_n(SSL* ssl, Buffer* buffer, const size_t n)
 {
-    if ((ssl == NULL) || (buffer == NULL)) return -1;
+    if (!ssl || !buffer)
+        return -1;
 
     char data[4096] = {0};
 
@@ -54,7 +55,8 @@ int ssl_read_n(SSL* ssl, Buffer* buffer, const size_t n)
 
 int ssl_read_line(SSL* ssl, char* dest, const size_t dest_size) 
 {
-    if ((ssl == NULL) || (dest == NULL)) return -1;
+    if (!ssl || !dest) 
+        return -1;
 
     size_t pos = 0;
     char c;
@@ -78,7 +80,8 @@ int ssl_read_line(SSL* ssl, char* dest, const size_t dest_size)
 
 int ssl_read_header(SSL* ssl, char* dest, const size_t dest_size)
 {
-    if ((ssl == NULL) || (dest == NULL)) return -1;
+    if (!ssl || !dest)
+        return -1;
 
     const char* last_line = "\r\n";
 
@@ -88,8 +91,7 @@ int ssl_read_header(SSL* ssl, char* dest, const size_t dest_size)
     int line_len = 0;
 
     while(strcmp(line, last_line) != 0) {
-        line_len = ssl_read_line(ssl, line, sizeof(line));
-        if (line_len <= 0) {
+        if ((line_len = ssl_read_line(ssl, line, sizeof(line))) <= 0) {
             fprintf(stderr, "ssl_read_header: invalid line read\n");
             dest[total_len] = '\0';
             return line_len;
@@ -107,7 +109,8 @@ int ssl_read_header(SSL* ssl, char* dest, const size_t dest_size)
 
 int ssl_read_chunk(SSL* ssl, Buffer* buffer)
 {
-    if ((ssl == NULL) || (buffer == NULL)) return -1;
+    if (!ssl || !buffer) 
+        return -1;
 
     const unsigned long crlf_len = strlen(CRLF);
 
@@ -139,10 +142,11 @@ int ssl_read_chunk(SSL* ssl, Buffer* buffer)
 
 bool status_code_is_valid(const char* response_header, const char* http_protocol_ver)
 {
-    if ((valid_string(response_header) == false) || (valid_string(http_protocol_ver) == false)) return false;
+    if (!valid_string(response_header) || !valid_string(http_protocol_ver)) 
+        return false;
 
     char* status_line = strstr(response_header, http_protocol_ver);
-    if (status_line == NULL) {
+    if (!status_line) {
         fprintf(stderr, "status_code_is_valid: request code not found\n");
         return false;
     }
@@ -164,10 +168,11 @@ bool status_code_is_valid(const char* response_header, const char* http_protocol
 
 void get_http_header_tag_value(const char* header, const char* tag, char* dest, const size_t dest_size)
 {
-    if ((valid_string(header) == false) || (valid_string(tag) == false) || (dest == NULL)) return;
+    if (!valid_string(header) || !valid_string(tag) || !dest) 
+        return;
 
     const char* header_line = strstr(header, tag);
-    if (header_line == NULL) {
+    if (!header_line) {
         fprintf(stderr, "get_http_header_value: \"%s\" was not found in response header\n", tag);
         return;
     }
@@ -176,14 +181,13 @@ void get_http_header_tag_value(const char* header, const char* tag, char* dest, 
     if (start) {
         char* ptr = start + 1; 
 
-        while(*ptr && isspace(*ptr)) {
+        while(*ptr && isspace(*ptr)) 
             ptr++;
-        } 
 
         size_t i;
-        for (i = 0; (i < dest_size) && (*ptr) && (*ptr != '\r'); i++, ptr++) {
+        for (i = 0; (i < dest_size) && (*ptr) && (*ptr != '\r'); i++, ptr++) 
             dest[i] = *ptr;
-        }
+        
 
         dest[i] = '\0';
     }
@@ -193,24 +197,25 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
 {
     Buffer res = buffer_init();
 
-    if ((ssl_ctx == NULL) || (connection == NULL) || (valid_string(http_protocol_ver) == false)) return res;
+    if (!ssl_ctx || !connection || !valid_string(http_protocol_ver)) 
+        return res;
 
     pthread_mutex_lock(&connection->mutex);
 
-    if (connected_to_internet() == false) {
+    if (!connected_to_internet()) {
         fprintf(stderr, "get_https_response: no internet connection\n");
         connection->connected = false;
         goto cleanup;
     }
 
-    if (connection->connected == false) {
+    if (!connection->connected) {
         if ((connection->connected = connection_establish(connection, ssl_ctx)) == false) {
             fprintf(stderr,"get_https_response: failed to establish connection\n");
             goto cleanup;
         }
     }
 
-    if (ssl_write_request(connection->ssl, request) == false) {
+    if (!ssl_write_request(connection->ssl, request)) {
         printf("get_https_response: failed to write request\n");
         connection->connected = false;
         goto cleanup;
@@ -222,7 +227,7 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
         goto cleanup;
     }
 
-    if (status_code_is_valid(header, http_protocol_ver) == false) {
+    if (!status_code_is_valid(header, http_protocol_ver)) {
         fprintf(stderr, "get_https_response: invalid response code\n");
         write_string_to_file("error_header.txt", header);
         goto cleanup;
@@ -249,9 +254,8 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
             while ((read = ssl_read_chunk(connection->ssl, &res)) > 0)
                 ;
 
-            if (read < 0) {
+            if (read < 0) 
                 buffer_free(&res);
-            }
         }
     }
 
@@ -262,10 +266,11 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
 
 cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* conn, const char* protocol_ver)
 {
-    if ((req == NULL) || (ssl_ctx == NULL) || (conn == NULL) || (valid_string(protocol_ver) == false)) return NULL;
+    if (!req || !ssl_ctx || !conn || !valid_string(protocol_ver)) 
+        return NULL;
 
     Buffer res = get_https_response((*req), ssl_ctx, conn, protocol_ver);
-    if (buffer_is_ready(&res) == false) {
+    if (!buffer_is_ready(&res)) {
         fprintf(stderr, "get_json_response: invalid response recived\n");
         return NULL;
     }

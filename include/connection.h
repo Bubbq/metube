@@ -1,10 +1,7 @@
 #ifndef CONNECTION_H
 #define CONNECTION_H
 
-#include <netdb.h>
-#include <stdlib.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <openssl/ssl.h>
 
 #define HTTPS_PORT "443"
@@ -31,7 +28,7 @@ typedef struct
     Connection* connections;
 } ConnectionPool;
 
-ConnectionPool connection_pool_init(const char* host, const char* port, const size_t n_conn);
+bool connection_pool_init(ConnectionPool* pool, const char* host, const char* port, const size_t n_conn);
 void connection_pool_free(ConnectionPool* pool);
 void cycle_connection(ConnectionPool* pool);
 

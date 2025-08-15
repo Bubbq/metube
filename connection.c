@@ -1,12 +1,14 @@
-#include "include/utils.h"
 #include "include/connection.h"
 
-#include <stdio.h>
+#include "include/utils.h"
+
+#include <netdb.h>
 #include <unistd.h>
 
 void connection_init(Connection* connection, const char* host, const char* port)
 {
-    if ((connection == NULL) || (valid_string(host) == false) || (valid_string(port) == false)) return;
+    if (!connection || !valid_string(host) || !valid_string(port)) 
+        return;
     
     connection->ssl = NULL;
     connection->sockfd = -1; 
@@ -19,7 +21,8 @@ void connection_init(Connection* connection, const char* host, const char* port)
 
 void connection_free(Connection* connection)
 {
-    if (connection == NULL) return;
+    if (!connection) 
+        return;
 
     disconnect(connection);
     pthread_mutex_destroy(&connection->mutex);
@@ -27,9 +30,11 @@ void connection_free(Connection* connection)
 
 bool connection_establish(Connection* connection, SSL_CTX* ssl_ctx)
 {
-    if ((connection == NULL) || (ssl_ctx == NULL)) return false;
+    if (!connection || !ssl_ctx)
+        return false;
 
-    if (connection->connected) disconnect(connection);
+    if (connection->connected) 
+        disconnect(connection);
 
     struct addrinfo addr = {0};
     addr.ai_family = AF_INET;
@@ -72,7 +77,8 @@ bool connection_establish(Connection* connection, SSL_CTX* ssl_ctx)
 
 void disconnect(Connection* connection)
 {
-    if (connection == NULL) return;
+    if (!connection) 
+        return;
 
     if (connection->address_information) {
         freeaddrinfo(connection->address_information); connection->address_information = NULL;
@@ -90,42 +96,41 @@ void disconnect(Connection* connection)
     connection->connected = false;
 }
 
-ConnectionPool connection_pool_init(const char* host, const char* port, const size_t n_conn)
+bool connection_pool_init(ConnectionPool* pool, const char* host, const char* port, const size_t n_conn)
 {
-    if ((valid_string(host) == false) || (valid_string(port) == false)) return (ConnectionPool){0};
+    if (!pool || !valid_string(host) || !valid_string(port))
+        return false;
 
-    ConnectionPool pool = {
-        .nconn = n_conn,
-        .current_conn = 0,
-        .connections = malloc(n_conn * sizeof(Connection)),
-    };
-
-    if (pool.connections == NULL) {
+    pool->nconn = n_conn;
+    pool->current_conn = 0;
+    pool->connections = malloc(n_conn * sizeof(Connection));
+    if (!pool->connections) {
         fprintf(stderr, "connection_pool_init: malloc returned null\n");
-        exit(EXIT_FAILURE);
+        return false;
     }
 
-    for (size_t c = 0; c < n_conn; c++) {
-        connection_init(&pool.connections[c], host, port);
-    } 
+    for (size_t c = 0; c < n_conn; c++) 
+        connection_init(&pool->connections[c], host, port);
     
-    return pool;
+    return true;
 }
 
 void connection_pool_free(ConnectionPool* pool)
 {
-    if (pool == NULL) return;
+    if (!pool) 
+        return;
 
-    for(size_t c = 0; c < pool->nconn; c++) {
+    for(size_t c = 0; c < pool->nconn; c++) 
         connection_free(&pool->connections[c]);
-    }
+    
     
     free(pool->connections); pool->connections = NULL;
 }
 
 void cycle_connection(ConnectionPool* pool)
 {
-    if (pool == NULL) return;
+    if (!pool) 
+        return;
 
     pool->current_conn = bound_index_to_array((pool->current_conn + 1), pool->nconn);
 }
