@@ -1,11 +1,16 @@
 #include "include/list.h"
+#include "include/timer.h"
 #include "include/utils.h"
 #include "include/json_utils.h"
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
+#include <bits/pthreadtypes.h>
+#include <cjson/cJSON.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -121,7 +126,7 @@ typedef struct
     char subscriber_count[32];  
     char date_published[32];      
     char video_count[32];            
-    char view_count[16];              
+    char view_count[32];              
     char duration[16];                   
     SearchResultType search_result_type;        
     bool thumbnail_loaded;
@@ -1846,6 +1851,8 @@ void* get_channel_metadata(ThreadArgs args)
 
         load_thumbnail(thumb_args);
 
+        free(thumb_args); thumb_args = NULL;
+
         targs->channel->info.thumbnail_loaded = false;
     }
 
@@ -1854,6 +1861,44 @@ void* get_channel_metadata(ThreadArgs args)
 
 typedef struct
 {
+    char video_id[64];
+    bool* playing_video;
+} PlayVideoArgs;
+
+bool configure_watch_url(const char* video_id, char* dest, const size_t dest_size)
+{
+    if (!valid_string(video_id) || !dest)
+        return false;
+
+    const int written = snprintf(dest, dest_size, "mpv https://www.youtube.com/watch?v=%s", video_id);
+    
+    return (0 < written) && (written < dest_size);
+}
+
+void* play_video(ThreadArgs args)
+{
+    PlayVideoArgs* targs = (PlayVideoArgs*) args;
+
+    if (!targs || !valid_string(targs->video_id) || !targs->playing_video)
+        return NULL;
+
+    char command[512] = {0};
+    
+    if (!configure_watch_url(targs->video_id, command, sizeof(command)))
+        return false;
+
+    (*targs->playing_video) = true;
+
+    system(command);
+
+    (*targs->playing_video) = false;
+    
+    return NULL;
+}
+
+typedef struct
+{
+    bool is_playing_video;
     bool load_query_results;
     bool load_video_metadata;
     bool load_channel_metadata;
@@ -2365,7 +2410,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
     }
 }
 
-void draw_video_management_buttons(const Rectangle container, Query* query, HighlightedVideo* selected_video, cJSON* liked_video_data, UpdateFlags* update_flags)
+void draw_video_management_buttons(const Rectangle container, Query* query, HighlightedVideo* selected_video, cJSON* liked_video_data, UpdateFlags* update_flags, ThreadContext* thread_context, UserData* user_data)
 {
     const int padding = 5;
 
@@ -2380,12 +2425,22 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
         .height = container.height,
     };
 
-    if (selected_video->info.id[0] == '\0') GuiSetState(STATE_DISABLED);
+    if (!valid_string(selected_video->info.id) || update_flags->is_playing_video) 
+        GuiSetState(STATE_DISABLED);
 
     if (GuiButton(play_video_button_bounds, "Play Video")) {
-        // TODO
+        PlayVideoArgs* targs = malloc(sizeof(PlayVideoArgs));
+        if (targs) {
+            targs->playing_video = &update_flags->is_playing_video;
+            snprintf(targs->video_id, sizeof(targs->video_id), "%s", selected_video->info.id);
+            thread_task_launch(&thread_context->task_queue, targs, play_video);
+            add_user_data(user_data->watched_videos, &selected_video->info);
+        }
     } 
-    
+
+    if (update_flags->is_playing_video)
+        GuiSetState(STATE_NORMAL);
+
     const Rectangle like_video_button_bounds = {
         .x = play_video_button_bounds.x + play_video_button_bounds.width + padding,
         .y = padding,
@@ -2499,8 +2554,6 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-
-
 void draw_search_bar(const Rectangle container, const Ui* ui, Query* query, UpdateFlags* update_flags, bool* text_box_focused, bool* show_filter_window)
 {
     const int button_w = 25;
@@ -2558,7 +2611,25 @@ void draw_search_bar(const Rectangle container, const Ui* ui, Query* query, Upda
         (*show_filter_window) = !(*show_filter_window);
 }
 
-// fail to read view count on some videos (most viewed elden ring videos)
+void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** continuation_token, cJSON* user_data, bool* update_flag)
+{
+    if (!results || !token_mutex || !continuation_token || !user_data || !update_flag)
+        return;
+
+    (*update_flag) = false;
+
+    pthread_mutex_lock(token_mutex);
+
+    if ((*continuation_token)) {
+        free((*continuation_token)); (*continuation_token) = NULL;
+    }
+
+    pthread_mutex_unlock(token_mutex);
+
+    load_user_data(results, user_data);
+}
+
+// handle when exiting application before mpv is closed
 
 int main()
 {
@@ -2652,47 +2723,14 @@ int main()
             queue_search_task(ssl_ctx, &client_context, &thread_context.task_queue, &results, query);
         }
 
-        if (update_flags.load_liked_videos) {
-            update_flags.load_liked_videos = false;
+        if (update_flags.load_liked_videos) 
+            handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.liked_videos, &update_flags.load_liked_videos);
 
-            pthread_mutex_lock(&client_context.token_mutex);
+        if (update_flags.load_watch_history) 
+            handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.watched_videos, &update_flags.load_watch_history);
 
-            if (client_context.continuation_token) {
-                free(client_context.continuation_token); client_context.continuation_token = NULL;
-            }
-
-            pthread_mutex_unlock(&client_context.token_mutex);
-
-            load_user_data(&results, user_data.liked_videos);
-        }
-
-        if (update_flags.load_watch_history) {
-            update_flags.load_watch_history = false;
-
-            pthread_mutex_lock(&client_context.token_mutex);
-
-            if (client_context.continuation_token) {
-                free(client_context.continuation_token); client_context.continuation_token = NULL;
-            }
-
-            pthread_mutex_unlock(&client_context.token_mutex);
-
-            load_user_data(&results, user_data.watched_videos);
-        }
-
-        if (update_flags.load_subscribed_channels) {
-            update_flags.load_subscribed_channels = false;
-
-            pthread_mutex_lock(&client_context.token_mutex);
-
-            if (client_context.continuation_token) {
-                free(client_context.continuation_token); client_context.continuation_token = NULL;
-            }
-
-            pthread_mutex_unlock(&client_context.token_mutex);
-
-            load_user_data(&results, user_data.subscribed_channels);
-        }
+        if (update_flags.load_subscribed_channels)
+            handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.subscribed_channels, &update_flags.load_subscribed_channels);
 
         if (update_flags.load_channel_metadata) {
             update_flags.load_channel_metadata = false;
@@ -2799,10 +2837,10 @@ int main()
         
             // bottom left portion
             {  
-                if ((highlighted_channel.info.thumbnail_loaded == false) && (highlighted_channel.info.thumbnail_path[0] != '\0')) { 
-                    highlighted_channel.info.thumbnail_loaded = true;
+                if (!highlighted_channel.cached || (strcmp(highlighted_channel.info.id, highlighted_channel.cached->id) != 0))
                     highlighted_channel.cached = texture_cache_find_entry(&texture_cache, highlighted_channel.info.id);
-                }
+                else
+                    timer_start(&highlighted_channel.cached->timer, CACHED_TEXTURE_LIFETIME);
 
                 const Rectangle highlighted_channel_bounds = {
                     .x = ui.padding,
@@ -2873,27 +2911,27 @@ int main()
 
                     SearchResult* search_result = (SearchResult*) node->content;
 
+                    Texture thumbnail = {0};
+                    
+                    TextureCacheEntry* cached = texture_cache_find_entry(&texture_cache, search_result->id);
+                    if (texture_cache_entry_is_ready(cached)) {
+                        timer_start(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
+                        thumbnail = cached->texture;
+                    }
+
                     if (!CheckCollisionRecs(scissor_rect, container)) 
                         continue;
 
-                    const bool result_is_highlighted = strcmp(search_result->id, highlighted_video.info.id) == 0;
-                    const Color container_color = result_is_highlighted ? BLUE : ((i % 2) ? WHITE : RAYWHITE);
-
-                    Texture2D thumbnail = (Texture2D){0};
-
-                    TextureCacheEntry* cached = texture_cache_find_entry(&texture_cache, search_result->id);
-                    if (texture_cache_entry_is_ready(cached)) {
-                        thumbnail = cached->texture;
-                        timer_start(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
-                    }
-
-                    else if (valid_string(search_result->thumbnail_path) && !search_result->thumbnail_loaded) {
+                    if (valid_string(search_result->thumbnail_path) && !search_result->thumbnail_loaded) {
                         search_result->thumbnail_loaded = true;
-
-                        if (!queue_load_thumbnail(ssl_ctx, &thumbnail_loader, &thread_context.task_queue, search_result->search_result_type, search_result->id, search_result->thumbnail_path)) {
-                            fprintf(stderr, "failed to queue thumbnail load\n");
-                        }
+                        queue_load_thumbnail(ssl_ctx, &thumbnail_loader, &thread_context.task_queue, search_result->search_result_type, search_result->id, search_result->thumbnail_path);
                     }
+
+                    const bool result_is_highlighted = strcmp(search_result->id, highlighted_video.info.id) == 0;
+
+                    const Color container_color = result_is_highlighted ? 
+                                                  BLUE : 
+                                                  i % 2 ? WHITE : RAYWHITE;
 
                     draw_search_result(search_result, thumbnail, container, container_color, ui);
 
@@ -2909,11 +2947,10 @@ int main()
                             case SEARCH_RESULT_TYPE_LIVE:
                             case SEARCH_RESULT_TYPE_SHORT:
                             case SEARCH_RESULT_TYPE_VIDEO:
-                                if (result_is_highlighted == false) {
+                                if (!result_is_highlighted) {
                                     update_flags.load_video_metadata = true;
                                     query.type = QUERY_TYPE_VIEW_VIDEO;
                                     memcpy(&highlighted_video.info, search_result, sizeof(SearchResult));
-                                    add_user_data(user_data.watched_videos, search_result);
                                 }
                                 break;
                             case SEARCH_RESULT_TYPE_PLAYLIST:
@@ -2945,7 +2982,7 @@ int main()
                 .height = button_bar_height, 
             };
 
-            draw_video_management_buttons(video_management_button_bar, &query, &highlighted_video, user_data.liked_videos, &update_flags);
+            draw_video_management_buttons(video_management_button_bar, &query, &highlighted_video, user_data.liked_videos, &update_flags, &thread_context, &user_data);
 
             const Rectangle user_data_button_bar = {
                 .x = search_bar_bounds.x + search_bar_bounds.width + (ui.padding * 2),
@@ -2990,3 +3027,13 @@ int main()
     
     return 0;
 }
+
+// stuff to do:
+    // able to add videos to created playlist
+    // fonts for L.O.T.E.
+    // thumbnail frames from video click
+    // better create_results_from_json?
+    // move ui stuff together
+    // update highlighted channel anytime you press a video
+    // issue with pressing user's videos button, sometimes channel shows for half second, then dissapears
+    // dont assign cached texture every frame

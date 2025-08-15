@@ -77,8 +77,10 @@ void texture_cache_remove_expried_entries(TextureCache* texture_cache)
     TextureCacheEntry *current, *tmp;
 
     HASH_ITER(hh, *texture_cache, current, tmp) {
-        if (timer_is_done(current->timer)) 
+        if (timer_is_done(current->timer)) {
+            printf("%s expired\n", current->id);
             texture_cache_remove_entry(texture_cache, current);
+        }
     }
 }
 

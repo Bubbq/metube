@@ -3,6 +3,7 @@
 #include "include/utils.h"
 
 #include <ctype.h>
+#include <stdio.h>
 
 bool ssl_write_request(SSL* ssl, const HttpsRequest req)
 {
@@ -90,14 +91,14 @@ int ssl_read_header(SSL* ssl, char* dest, const size_t dest_size)
     char line[1024] = {0};
     int line_len = 0;
 
-    while(strcmp(line, last_line) != 0) {
+    while((strcmp(line, last_line) != 0) && (total_len < dest_size - 1)) {
         if ((line_len = ssl_read_line(ssl, line, sizeof(line))) <= 0) {
-            fprintf(stderr, "ssl_read_header: invalid line read\n");
+            fprintf(stderr, "ssl_read_header: ssl read line returned (%d)\n", line_len);
             dest[total_len] = '\0';
             return line_len;
         }
 
-        strncat(dest, line, dest_size - total_len - 1);
+        snprintf(dest + total_len, dest_size - total_len, "%s", line);
 
         total_len += line_len;
     }
