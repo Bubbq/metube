@@ -1683,17 +1683,17 @@ typedef struct
     HttpsRequest req;
     SSL_CTX* ssl_ctx;
     ClientContext* client_context;
-    HighlightedVideo* highlighted_video;
+    char** description_out;
 } VideoMetadataArgs;
 
 void* get_video_metadata(ThreadArgs args)
 {
     VideoMetadataArgs* targs = (VideoMetadataArgs*) args;
-    if ((targs == NULL) || 
+    if (!targs || 
         (!post_request_is_ready(targs->req)) ||
-        (targs->ssl_ctx == NULL) || 
-        (targs->client_context == NULL) || 
-        (targs->highlighted_video == NULL)) {
+        !targs->ssl_ctx || 
+        !targs->client_context || 
+        !targs->description_out) {
         fprintf(stderr, "get_video_metadata: invalid args\n");
         return NULL;
     }
@@ -1706,25 +1706,25 @@ void* get_video_metadata(ThreadArgs args)
     
     free(targs->req.payload); targs->req.payload = NULL;
 
-    if (res == NULL) {
+    if (!res) {
         fprintf(stderr, "get_video_metadata: failed to resolve json response\n");
         return NULL;
     }
-
-    if (targs->highlighted_video->description) {
-        free(targs->highlighted_video->description); targs->highlighted_video->description = NULL;
+    
+    if ((*targs->description_out)) {
+        free(*targs->description_out); (*targs->description_out) = NULL;
     }
-
-    targs->highlighted_video->description = get_video_description(res);
+    
+    (*targs->description_out) = get_video_description(res);
 
     cJSON_Delete(res); res = NULL;
 
     return NULL;
 }
 
-void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_context, ThreadContext* thread_ctx, HighlightedVideo* highlighted_video, Query query)
+void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_context, ThreadContext* thread_ctx, char** description_out, Query query)
 {
-    if (!ssl_ctx || !client_context || !thread_ctx || !highlighted_video)
+    if (!ssl_ctx || !client_context || !thread_ctx || !description_out)
         return;
 
     HttpsRequest req = configure_post_request(query, client_context->youtube_api_pool.connections->host, client_context->api_key, client_context->continuation_token);
@@ -1738,7 +1738,7 @@ void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_context, 
     targs->req = req;
     targs->ssl_ctx = ssl_ctx;
     targs->client_context = client_context;
-    targs->highlighted_video = highlighted_video;
+    targs->description_out = description_out;
     
     if (!thread_task_launch(&thread_ctx->task_queue, targs, get_video_metadata)) {
         fprintf(stderr, "queue_video_metadata_task: failed to queue task\n");
@@ -2629,7 +2629,9 @@ void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** c
     load_user_data(results, user_data);
 }
 
-// handle when exiting application before mpv is closed
+// dont search for cached thumbnail every frame
+// ssl connection times out after 30-60s 
+
 
 int main()
 {
@@ -2700,14 +2702,26 @@ int main()
         return 1;
     }
     
+    char* get_video_metadata_output = NULL;
+
     while (!WindowShouldClose())
     {
         texture_cache_remove_expried_entries(&texture_cache);
+
         thumbnail_loader_process_raw_images(&thumbnail_loader, &texture_cache);
+
+        if (get_video_metadata_output) {
+            if (highlighted_video.description) {
+                free(highlighted_video.description); highlighted_video.description = NULL;
+            }
+
+            highlighted_video.description = get_video_metadata_output;
+            get_video_metadata_output = NULL;
+        }
 
         if (update_flags.load_video_metadata) {
             update_flags.load_video_metadata = false;
-            queue_video_metadata_task(ssl_ctx, &client_context, &thread_context, &highlighted_video, query);
+            queue_video_metadata_task(ssl_ctx, &client_context, &thread_context, &get_video_metadata_output, query);
         }
 
         if (update_flags.load_query_results) {
@@ -2719,7 +2733,7 @@ int main()
 
             last_query_type = query.type;
             strncpy(last_search_query, query.string, sizeof(last_search_query));
-            
+
             queue_search_task(ssl_ctx, &client_context, &thread_context.task_queue, &results, query);
         }
 
@@ -2729,9 +2743,9 @@ int main()
         if (update_flags.load_watch_history) 
             handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.watched_videos, &update_flags.load_watch_history);
 
-        if (update_flags.load_subscribed_channels)
+        if (update_flags.load_subscribed_channels) 
             handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.subscribed_channels, &update_flags.load_subscribed_channels);
-
+        
         if (update_flags.load_channel_metadata) {
             update_flags.load_channel_metadata = false;
             last_query_type = query.type;
@@ -2912,11 +2926,10 @@ int main()
                     SearchResult* search_result = (SearchResult*) node->content;
 
                     Texture thumbnail = {0};
-                    
-                    TextureCacheEntry* cached = texture_cache_find_entry(&texture_cache, search_result->id);
-                    if (texture_cache_entry_is_ready(cached)) {
-                        timer_start(&cached->timer, CACHED_TEXTURE_LIFETIME); // refresh lifetime
-                        thumbnail = cached->texture;
+                    TextureCacheEntry* entry = texture_cache_find_entry(&texture_cache, search_result->id);
+                    if (texture_cache_entry_is_ready(entry)) {
+                        timer_start(&entry->timer, CACHED_TEXTURE_LIFETIME);
+                        thumbnail = entry->texture;
                     }
 
                     if (!CheckCollisionRecs(scissor_rect, container)) 
@@ -2932,7 +2945,7 @@ int main()
                     const Color container_color = result_is_highlighted ? 
                                                   BLUE : 
                                                   i % 2 ? WHITE : RAYWHITE;
-
+                    
                     draw_search_result(search_result, thumbnail, container, container_color, ui);
 
                     if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
@@ -3036,4 +3049,3 @@ int main()
     // move ui stuff together
     // update highlighted channel anytime you press a video
     // issue with pressing user's videos button, sometimes channel shows for half second, then dissapears
-    // dont assign cached texture every frame

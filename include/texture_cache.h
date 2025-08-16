@@ -6,7 +6,7 @@
 #include "uthash.h"
 
 #define MINUTE 60
-#define CACHED_TEXTURE_LIFETIME (MINUTE * 1)
+#define CACHED_TEXTURE_LIFETIME (10)
 
 typedef struct
 {

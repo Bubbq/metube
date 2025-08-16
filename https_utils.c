@@ -225,6 +225,7 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
     char header[4096] = {0};
     if (ssl_read_header(connection->ssl, header, sizeof(header)) <= 0) {
         printf("get_https_response: failed to read header\n");
+        connection->connected = false;
         goto cleanup;
     }
 
