@@ -33,8 +33,7 @@ bool connection_establish(Connection* connection, SSL_CTX* ssl_ctx)
     if (!connection || !ssl_ctx)
         return false;
 
-    if (connection->connected) 
-        disconnect(connection);
+    disconnect(connection);
 
     struct addrinfo addr = {0};
     addr.ai_family = AF_INET;

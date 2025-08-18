@@ -1,16 +1,8 @@
-#include "include/list.h"
-#include "include/timer.h"
 #include "include/utils.h"
 #include "include/json_utils.h"
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
-#include <bits/pthreadtypes.h>
-#include <cjson/cJSON.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -1816,9 +1808,6 @@ void* get_channel_metadata(ThreadArgs args)
         
         if (!channel_parse_status) {
             fprintf(stderr, "get_channel_metadata: failed to parse channel information\n");
-            targs->channel->info.thumbnail_loaded = false;
-            targs->channel->info.thumbnail_path[0] = '\0';
-            targs->channel->cached = NULL;
             return NULL;
         }
 
@@ -1827,9 +1816,6 @@ void* get_channel_metadata(ThreadArgs args)
         LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
         if (thumb_args == NULL) {
             fprintf(stderr, "get_channel_metadata: malloc returned null\n");
-            targs->channel->info.thumbnail_loaded = false;
-            targs->channel->info.thumbnail_path[0] = '\0';
-            targs->channel->cached = NULL;
             return NULL;
         }
         
@@ -1837,9 +1823,6 @@ void* get_channel_metadata(ThreadArgs args)
         
         if (channel_conn == NULL) {
             fprintf(stderr, "get_channel_metadata: failed to resolve channel thumbnail connection\n");
-            targs->channel->info.thumbnail_loaded = false;
-            targs->channel->info.thumbnail_path[0] = '\0';
-            targs->channel->cached = NULL;
             return NULL;
         }
 
@@ -2370,10 +2353,8 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
 
     const float thumbnail_w = search_result_type_to_thumbnail_width(SEARCH_RESULT_TYPE_CHANNEL);
     
-    if (texture_cache_entry_is_ready(highlighted_channel->cached)) {
-        timer_start(&highlighted_channel->cached->timer, CACHED_TEXTURE_LIFETIME);
+    if (texture_cache_entry_is_ready(highlighted_channel->cached)) 
         DrawTextureEx(highlighted_channel->cached->texture, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
-    }
 
     const Vector2 title_pos = {
         .x = container.x + thumbnail_w + (ui->padding * 2),
@@ -2941,7 +2922,6 @@ int main()
                     }
 
                     const bool result_is_highlighted = strcmp(search_result->id, highlighted_video.info.id) == 0;
-
                     const Color container_color = result_is_highlighted ? 
                                                   BLUE : 
                                                   i % 2 ? WHITE : RAYWHITE;
@@ -3047,5 +3027,3 @@ int main()
     // thumbnail frames from video click
     // better create_results_from_json?
     // move ui stuff together
-    // update highlighted channel anytime you press a video
-    // issue with pressing user's videos button, sometimes channel shows for half second, then dissapears
