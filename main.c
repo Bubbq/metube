@@ -1317,6 +1317,24 @@ void client_context_free(ClientContext* client)
     pthread_mutex_destroy(&client->pool_mutex);
 }
 
+Connection* client_context_get_connection(ClientContext* client_context)
+{
+    if (!client_context)
+        return NULL;
+
+    pthread_mutex_lock(&client_context->pool_mutex);
+
+    ConnectionPool* pool = &client_context->youtube_api_pool;
+
+    Connection* conn = &pool->connections[pool->current_conn];
+    
+    cycle_connection(pool);
+
+    pthread_mutex_unlock(&client_context->pool_mutex);
+
+    return conn;
+}
+
 // user data management
 
 #define ARRAY_NAME "array"
@@ -1589,6 +1607,52 @@ void load_user_data(List* results, cJSON* user_data)
 
 // query operations
 
+cJSON* get_youtube_json(SSL_CTX* ssl_ctx, ClientContext* client_context, Query* query)
+{
+    if (!ssl_ctx || !client_context || !query)
+        return NULL;
+
+    Connection* conn = client_context_get_connection(client_context);
+    if (!conn) {
+        fprintf(stderr, "get_youtube_json: failed to retrieve connection\n");
+        return NULL;
+    }
+
+    const char* host = conn->host;
+    const char* api_key = client_context->api_key;
+    const char* continuation_token = client_context->continuation_token;
+
+    HttpsRequest post_req = configure_post_request((*query), host, api_key, continuation_token);
+    if (!post_request_is_ready(post_req)) {
+        fprintf(stderr, "get_youtube_json: failed to create request\n");
+        return NULL;
+    }
+
+    cJSON* youtube_json = get_json_response(&post_req, ssl_ctx, conn, HTTP_PROTOCOL_VER);
+
+    if (post_req.payload) {
+        free(post_req.payload); post_req.payload = NULL;
+    }
+
+    return youtube_json;
+}
+
+void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Query* query, List* dest)
+{
+    if (!youtube_json || !client_context || !query || !dest)
+        return;
+    
+    pthread_mutex_lock(&dest->mutex);
+    create_results_from_json(youtube_json, dest, query->type, query->attr, query->allow_youtube_shorts);
+    pthread_mutex_unlock(&dest->mutex);
+    
+    char** continuation_token = &client_context->continuation_token;
+    
+    pthread_mutex_lock(&client_context->token_mutex);
+    get_continuation_token(youtube_json, continuation_token, query->type, query->attr);
+    pthread_mutex_unlock(&client_context->token_mutex);
+}
+
 typedef struct
 {
     Query query;
@@ -1600,47 +1664,25 @@ typedef struct
 void* get_results_from_query(ThreadArgs args)
 {
     SearchThreadArgs* targs = (SearchThreadArgs*) args;
-    if ((targs == NULL) || 
-        (targs->results == NULL) || 
-        (targs->ssl_ctx == NULL) || 
-        (targs->client_context == NULL)) {
-        fprintf(stderr, "get_results_from_query: invalid args\n");
-        return NULL;
-    }
 
+    if (!targs || !targs->results || !targs->ssl_ctx || !targs->client_context) 
+        return NULL;
+
+    Query* query = &targs->query;
+    SSL_CTX* ssl_ctx = targs->ssl_ctx;
     ClientContext* client_context = targs->client_context;
     
-    Connection* youtube_conn = &client_context->youtube_api_pool.connections[client_context->youtube_api_pool.current_conn];
-    char** continuation_token = &targs->client_context->continuation_token;
-    const char* api_key = targs->client_context->api_key;
-
-    HttpsRequest req = configure_post_request(targs->query, youtube_conn->host, api_key, (*continuation_token));
-    if (post_request_is_ready(req) == false) {
-        fprintf(stderr, "get_results_from_query: failed to resolve request\n");
+    cJSON* json;
+    if ((json = get_youtube_json(ssl_ctx, client_context, query)) == NULL) {
+        fprintf(stderr, "get_results_from_query: youtube json is null\n");
         return NULL;
     }
-
-    cJSON* res = get_json_response(&req, targs->ssl_ctx, youtube_conn, HTTP_PROTOCOL_VER);
-
-    free(req.payload); req.payload = NULL;
-
-    if (res == NULL) {
-        fprintf(stderr, "get_results_from_query: failed to resolve json response\n");
-        return NULL;
-    }
-
-    const QueryType query_type = targs->query.type;
-    const QueryAttribute query_attr = targs->query.attr;
     
-    pthread_mutex_lock(&targs->results->mutex);
-    create_results_from_json(res, targs->results, query_type, query_attr, targs->query.allow_youtube_shorts);
-    pthread_mutex_unlock(&targs->results->mutex);
+    List* results = targs->results;
 
-    pthread_mutex_lock(&targs->client_context->token_mutex);
-    get_continuation_token(res, continuation_token, query_type, query_attr);
-    pthread_mutex_unlock(&targs->client_context->token_mutex);
+    get_youtube_results(json, client_context, query, results);
     
-    cJSON_Delete(res); res = NULL;
+    cJSON_Delete(json); json = NULL;
 
     return NULL;
 }
@@ -1672,7 +1714,7 @@ typedef struct
 
 typedef struct
 {
-    HttpsRequest req;
+    Query query;
     SSL_CTX* ssl_ctx;
     ClientContext* client_context;
     char** description_out;
@@ -1681,35 +1723,21 @@ typedef struct
 void* get_video_metadata(ThreadArgs args)
 {
     VideoMetadataArgs* targs = (VideoMetadataArgs*) args;
-    if (!targs || 
-        (!post_request_is_ready(targs->req)) ||
-        !targs->ssl_ctx || 
-        !targs->client_context || 
-        !targs->description_out) {
-        fprintf(stderr, "get_video_metadata: invalid args\n");
+    if (!targs || !targs->ssl_ctx || !targs->client_context || !targs->description_out) 
+        return NULL;
+
+    cJSON* json = get_youtube_json(targs->ssl_ctx, targs->client_context, &targs->query);
+    if (!json) {
+        fprintf(stderr, "get_video_metadata: get youtube json returned null\n");
         return NULL;
     }
 
-    ClientContext* client_context = targs->client_context;
-
-    Connection* youtube_conn = &client_context->youtube_api_pool.connections[client_context->youtube_api_pool.current_conn];
-
-    cJSON* res = get_json_response(&targs->req, targs->ssl_ctx, youtube_conn, HTTP_PROTOCOL_VER);
+    if ((*targs->description_out)) 
+        free((*targs->description_out));
     
-    free(targs->req.payload); targs->req.payload = NULL;
+    (*targs->description_out) = get_video_description(json);
 
-    if (!res) {
-        fprintf(stderr, "get_video_metadata: failed to resolve json response\n");
-        return NULL;
-    }
-    
-    if ((*targs->description_out)) {
-        free(*targs->description_out); (*targs->description_out) = NULL;
-    }
-    
-    (*targs->description_out) = get_video_description(res);
-
-    cJSON_Delete(res); res = NULL;
+    cJSON_Delete(json);
 
     return NULL;
 }
@@ -1719,15 +1747,13 @@ void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_context, 
     if (!ssl_ctx || !client_context || !thread_ctx || !description_out)
         return;
 
-    HttpsRequest req = configure_post_request(query, client_context->youtube_api_pool.connections->host, client_context->api_key, client_context->continuation_token);
-
     VideoMetadataArgs* targs = malloc(sizeof(VideoMetadataArgs));
     if (!targs) {
         fprintf(stderr, "queue_video_metadata_task: malloc returned null\n");
         return;
     }
 
-    targs->req = req;
+    targs->query = query;
     targs->ssl_ctx = ssl_ctx;
     targs->client_context = client_context;
     targs->description_out = description_out;
@@ -1748,96 +1774,61 @@ typedef struct
 typedef struct
 {
     Query query;
-    ThumbnailLoader* thumbnail_loader;
-    cJSON* subscribed_channels_json;
+    List* results;
+    SSL_CTX* ssl_ctx;
     HighlightedChannel* channel;
     ClientContext* client_context;
-    SSL_CTX* ssl_ctx;
-    List* results;
+    cJSON* subscribed_channels_json;
+    ThumbnailLoader* thumbnail_loader;
 } ChannelMetadataArgs;
 
 void* get_channel_metadata(ThreadArgs args)
 {
     ChannelMetadataArgs* targs = (ChannelMetadataArgs*) args;
-    if ((targs == NULL) || 
-        (targs->subscribed_channels_json == NULL) || 
-        (targs->channel == NULL) || 
-        (targs->client_context == NULL) || 
-        (targs->ssl_ctx == NULL) || 
-        (targs->thumbnail_loader == NULL) || 
-        (targs->results == NULL)) {
-        fprintf(stderr, "get_channel_metadata: invalid args\n");
-        return NULL;
-    }
 
+    if (!targs || !targs->subscribed_channels_json || !targs->channel || !targs->client_context || !targs->ssl_ctx || !targs->thumbnail_loader || !targs->results) 
+        return NULL;
+
+    Query* query = &targs->query;
+    SSL_CTX* ssl_ctx = targs->ssl_ctx;
     ClientContext* client_context = targs->client_context;
-    Connection* youtube_conn = &client_context->youtube_api_pool.connections[client_context->youtube_api_pool.current_conn];
-    char** continuation_token = &client_context->continuation_token; 
-    const char* api_key = client_context->api_key;
 
-    HttpsRequest results_req = configure_post_request(targs->query, youtube_conn->host, api_key, (*continuation_token));
-    if (!post_request_is_ready(results_req)) {
-        fprintf(stderr, "get_channel_metadata: failed to resolve results request\n");
+    cJSON* json;
+    if ((json = get_youtube_json(ssl_ctx, client_context, query)) == NULL) {
+        fprintf(stderr, "get_channel_metadata: youtube json is null\n");
         return NULL;
     }
 
-    cJSON* res = get_json_response(&results_req, targs->ssl_ctx, youtube_conn, HTTP_PROTOCOL_VER);
-
-    free(results_req.payload); results_req.payload = NULL;
+    List* results = targs->results;
     
-    if (res == NULL) {
-        fprintf(stderr, "get_channel_metadata: failed to resolve json response\n");
+    get_youtube_results(json, client_context, query, results);
+
+    const bool channel_parse_status = parse_highlighted_channel(json, &targs->channel->info);
+    
+    cJSON_Delete(json); 
+
+    if (!channel_parse_status) {
+        fprintf(stderr, "get_channel_metadata: failed to parse channel information\n");
         return NULL;
     }
 
-    const QueryType query_type = targs->query.type;
-    const QueryAttribute query_attr = targs->query.attr;
-    
-    pthread_mutex_lock(&targs->results->mutex);
-    create_results_from_json(res, targs->results, query_type, query_attr, false);
-    pthread_mutex_unlock(&targs->results->mutex);
+    targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, targs->channel->info.id);
 
-    pthread_mutex_lock(&client_context->token_mutex);
-    get_continuation_token(res, continuation_token, query_type, query_attr);
-    pthread_mutex_unlock(&client_context->token_mutex);
-
-    if (query_attr == QUERY_ATTR_REPLACE) {
-        const bool channel_parse_status = parse_highlighted_channel(res, &targs->channel->info);
-        
-        cJSON_Delete(res); res = NULL;
-        
-        if (!channel_parse_status) {
-            fprintf(stderr, "get_channel_metadata: failed to parse channel information\n");
-            return NULL;
-        }
-
-        targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, targs->channel->info.id);
-   
-        LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
-        if (thumb_args == NULL) {
-            fprintf(stderr, "get_channel_metadata: malloc returned null\n");
-            return NULL;
-        }
-        
-        Connection* channel_conn = thumbnail_loader_get_connection(targs->thumbnail_loader, SEARCH_RESULT_TYPE_CHANNEL);
-        
-        if (channel_conn == NULL) {
-            fprintf(stderr, "get_channel_metadata: failed to resolve channel thumbnail connection\n");
-            return NULL;
-        }
-
-        strncpy(thumb_args->id, targs->channel->info.id, sizeof(thumb_args->id));
-        strncpy(thumb_args->path, targs->channel->info.thumbnail_path, sizeof(thumb_args->path));
-        thumb_args->loader = targs->thumbnail_loader;
-        thumb_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
-        thumb_args->ssl_ctx = targs->ssl_ctx;
-
-        load_thumbnail(thumb_args);
-
-        free(thumb_args); thumb_args = NULL;
-
-        targs->channel->info.thumbnail_loaded = false;
+    LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
+    if (!thumb_args) {
+        fprintf(stderr, "get_channel_metadata: malloc returned null\n");
+        return NULL;
     }
+
+    thumb_args->ssl_ctx = targs->ssl_ctx;
+    thumb_args->loader = targs->thumbnail_loader;
+    thumb_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
+    strncpy(thumb_args->id, targs->channel->info.id, sizeof(thumb_args->id));
+    strncpy(thumb_args->path, targs->channel->info.thumbnail_path, sizeof(thumb_args->path));
+
+    load_thumbnail(thumb_args);
+
+    free(thumb_args); thumb_args = NULL;
 
     return NULL;
 }
@@ -2613,7 +2604,6 @@ void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** c
 // dont search for cached thumbnail every frame
 // ssl connection times out after 30-60s 
 
-
 int main()
 {
     init_app();
@@ -2857,7 +2847,7 @@ int main()
                     GuiSetState(STATE_DISABLED);
             
                 if (GuiButton(load_more_button_bounds, "<< LOAD MORE >> ")) {
-                    update_flags.load_query_results = true;;
+                    update_flags.load_query_results = true;
                     query.type = last_query_type;
                     query.attr = QUERY_ATTR_APPEND;
                 }
@@ -2951,8 +2941,10 @@ int main()
                                 query.type = QUERY_TYPE_VIEW_PLAYLIST;
                                 break;
                             case SEARCH_RESULT_TYPE_CHANNEL:
-                                update_flags.load_channel_metadata = true;
+                                update_flags.load_query_results = true;
                                 query.type = QUERY_TYPE_VIEW_CHANNEL;
+                                memcpy(&highlighted_channel.info, search_result, sizeof(SearchResult));
+                                highlighted_channel.is_subscribed = is_subbed_to_channel(user_data.subscribed_channels, highlighted_channel.info.id);
                                 break;
                             case SEARCH_RESULT_TYPE_ANY:
                             case SEARCH_RESULT_TYPE_UNDF:
