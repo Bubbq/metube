@@ -113,36 +113,57 @@ typedef struct
 {
     char thumbnail_path[256];    
     char title[256];                    
+    char id[64]; 
+} ResultData;
+
+typedef struct
+{
     char authorId[64];         
-    char id[64];                                
-    char subscriber_count[32];  
     char date_published[32];      
-    char video_count[32];            
     char view_count[32];              
     char duration[16];                   
-    SearchResultType search_result_type;        
+} Video;
+
+typedef struct
+{
+    char subscriber_count[32];  
+} Channel;
+
+typedef struct
+{
+    char video_count[32];            
+} Playlist;
+
+typedef struct
+{
+    ResultData base;
+    SearchResultType type;   
     bool thumbnail_loaded;
+    union {
+        Video video;
+        Channel channel;
+        Playlist playlist;
+    } data;
 } SearchResult;
 
-SearchResult* search_result_init()
+void* better_search_result_init(void* unused)
 {
-    SearchResult* search_result = calloc(1, sizeof(SearchResult));
-    if (!search_result) {
-        fprintf(stderr, "search_result_init: malloc returned null\n");
+    SearchResult* better_search_result = calloc(1, sizeof(SearchResult));
+    if (!better_search_result) {
+        fprintf(stderr, "better_search_result_init: malloc returned null\n");
         return NULL;
     }
 
-    search_result->search_result_type = SEARCH_RESULT_TYPE_UNDF;
-    
-    return search_result;
+    better_search_result->type = SEARCH_RESULT_TYPE_UNDF;
+
+    return better_search_result;
 }
 
-void search_result_free(SearchResult* search_result)
+void better_search_result_free(void* better_search_result)
 {
-    if (!search_result) 
-        return;
- 
-    free(search_result); search_result = NULL;
+    if (better_search_result) {
+        free(better_search_result); better_search_result = NULL;
+    }
 }
 
 typedef enum 
@@ -315,27 +336,33 @@ bool video_is_live(cJSON* videoRenderer)
     return false;
 }
 
-void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* playlist_vid)
+void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* dest)
 {
-    if ((playlistVideoRenderer == NULL) || (playlist_vid == NULL)) return;
+    if (!playlistVideoRenderer || !dest)    
+        return;
 
     const char* id_path = ".videoId";
 
-    if (!assign_string_from_path(playlistVideoRenderer, id_path, playlist_vid->id, sizeof(playlist_vid->id))) {
+    SearchResultType* type = &dest->type;
+
+    Video* playlist_vid = &dest->data.video;
+    ResultData* result_data = &dest->base;
+
+    if (!assign_string_from_path(playlistVideoRenderer, id_path, result_data->id, sizeof(result_data->id))) {
         printf("parse_playlist_video: id assign fail (json path: \"%s\")\n", id_path);
-        playlist_vid->search_result_type = SEARCH_RESULT_TYPE_UNDF;
+        (*type) = SEARCH_RESULT_TYPE_UNDF;
         return;
     }
 
-    playlist_vid->search_result_type = SEARCH_RESULT_TYPE_VIDEO;
+    (*type) = SEARCH_RESULT_TYPE_VIDEO;
 
-    if (!assign_video_thumbnail_path(playlist_vid->id, playlist_vid->thumbnail_path, sizeof(playlist_vid->thumbnail_path))) {
+    if (!assign_video_thumbnail_path(result_data->id, result_data->thumbnail_path, sizeof(result_data->thumbnail_path))) {
         printf("parse_playlist_video: thumbnail path fail\n");
     }
 
     const char* title_path = ".title.runs[0].text";
 
-    if (!assign_string_from_path(playlistVideoRenderer, title_path, playlist_vid->title, sizeof(playlist_vid->title))) {
+    if (!assign_string_from_path(playlistVideoRenderer, title_path, result_data->title, sizeof(result_data->title))) {
         printf("parse_playlist_video: title assign fail (json path: \"%s\")\n", title_path);
     }
 
@@ -367,38 +394,42 @@ void parse_playlist_video(cJSON* playlistVideoRenderer, SearchResult* playlist_v
     }
 }
 
-void parse_video(cJSON* videoRenderer, const char* author_id_override, const bool allow_youtube_shorts, SearchResult* video)
+void parse_video(cJSON* videoRenderer, const char* author_id_override, const bool allow_youtube_shorts, SearchResult* dest)
 {
-    if ((videoRenderer == NULL) || (author_id_override == NULL) || (video == NULL)) return;
+    if (!videoRenderer || !author_id_override || !dest) return;
+
+    SearchResultType* type = &dest->type;
 
     if (video_is_youtube_short(videoRenderer)) {
-        if (allow_youtube_shorts == false){
-            video->search_result_type = SEARCH_RESULT_TYPE_UNDF;
+        if (!allow_youtube_shorts) {
+            (*type) = SEARCH_RESULT_TYPE_UNDF;
             return;
         }
-
-        else video->search_result_type = SEARCH_RESULT_TYPE_SHORT;
+        
+        else 
+            (*type) = SEARCH_RESULT_TYPE_SHORT;
     }
+
+    Video* video = &dest->data.video;
+    ResultData* result_data = &dest->base;
 
     const char* id_path = ".videoId";
 
-    if (assign_string_from_path(videoRenderer, id_path, video->id, sizeof(video->id)) == false) {
-        printf("parse_video: id assign fail (json path: \"%s\")\n", id_path);
-        video->search_result_type = SEARCH_RESULT_TYPE_UNDF;
+    if (!assign_string_from_path(videoRenderer, id_path, result_data->id, sizeof(result_data->id))) {
+        fprintf(stderr, "parse_video: id assign fail (json path: \"%s\")\n", id_path);
+        (*type) = SEARCH_RESULT_TYPE_UNDF;
         return;
     }
 
-    video->search_result_type = SEARCH_RESULT_TYPE_VIDEO;
+    (*type) = SEARCH_RESULT_TYPE_VIDEO;
 
-    if (assign_video_thumbnail_path(video->id, video->thumbnail_path, sizeof(video->thumbnail_path)) == false) {
-        printf("parse_video: thumbnail path fail\n");
-    }
+    if (!assign_video_thumbnail_path(result_data->id, result_data->thumbnail_path, sizeof(result_data->thumbnail_path))) 
+        fprintf(stderr, "parse_video: thumbnail path fail\n");
     
     const char* title_path = ".title.runs[0].text";
     
-    if (assign_string_from_path(videoRenderer, title_path, video->title, sizeof(video->title)) == false) {
+    if (!assign_string_from_path(videoRenderer, title_path, result_data->title, sizeof(result_data->title)))
         printf("parse_video: title assign fail (json path: \"%s\")\n", title_path);
-    }
 
     if (author_id_override[0] != '\0') {
         strncpy(video->authorId, author_id_override, sizeof(video->authorId) - 1);
@@ -414,7 +445,7 @@ void parse_video(cJSON* videoRenderer, const char* author_id_override, const boo
     }
 
     if (video_is_live(videoRenderer)) {
-        video->search_result_type = SEARCH_RESULT_TYPE_LIVE;
+        (*type) = SEARCH_RESULT_TYPE_LIVE;
 
         const char* live_viewers_path = ".viewCountText.runs[0].text";
 
@@ -446,27 +477,33 @@ void parse_video(cJSON* videoRenderer, const char* author_id_override, const boo
     }
 }
 
-void parse_related_video(cJSON* lockupViewModel, SearchResult* related_vid)
+void parse_related_video(cJSON* lockupViewModel, SearchResult* dest)
 {
-    if ((lockupViewModel == NULL) || (related_vid == NULL)) return;
+    if (!lockupViewModel || !dest)
+        return;
+
+    SearchResultType* type = &dest->type;
+
+    Video* related_vid = &dest->data.video;
+    ResultData* result_data = &dest->base;
 
     const char* id_path = ".contentId";
 
-    if (!assign_string_from_path(lockupViewModel, id_path, related_vid->id, sizeof(related_vid->id))) {
+    if (!assign_string_from_path(lockupViewModel, id_path, result_data->id, sizeof(result_data->id))) {
         printf("parse_related_video: id assign fail (json path: \"%s\")\n", id_path);
-        related_vid->search_result_type = SEARCH_RESULT_TYPE_UNDF;
+        (*type) = SEARCH_RESULT_TYPE_UNDF;
         return;
     }
 
-    related_vid->search_result_type = SEARCH_RESULT_TYPE_VIDEO;
+    (*type) = SEARCH_RESULT_TYPE_VIDEO;
 
-    if (!assign_video_thumbnail_path(related_vid->id, related_vid->thumbnail_path, sizeof(related_vid->thumbnail_path))) {
+    if (!assign_video_thumbnail_path(result_data->id, result_data->thumbnail_path, sizeof(result_data->thumbnail_path))) {
         printf("parse_related_video: thumbnail path fail\n");
     } 
 
     const char* title_path = ".metadata.lockupMetadataViewModel.title.content";
 
-    if (!assign_string_from_path(lockupViewModel, title_path, related_vid->title, sizeof(related_vid->title))) {
+    if (!assign_string_from_path(lockupViewModel, title_path, result_data->title, sizeof(result_data->title))) {
         printf("parse_related_video: title assign fail (json path: \"%s\")\n", title_path);
     }
 
@@ -495,23 +532,29 @@ void parse_related_video(cJSON* lockupViewModel, SearchResult* related_vid)
     }
 }
 
-void parse_channel_result(cJSON* channelRenderer, SearchResult* channel)
+void parse_channel_result(cJSON* channelRenderer, SearchResult* dest)
 {
-    if ((channelRenderer == NULL) || (channel == NULL)) return;
+    if (!channelRenderer || !dest)
+        return;
 
     const char* id_path = ".channelId";
 
-    if (!assign_string_from_path(channelRenderer, id_path, channel->id, sizeof(channel->id))) {
+    SearchResultType* type = &dest->type;
+
+    Channel* channel = &dest->data.channel;
+    ResultData* result_data = &dest->base;
+
+    if (!assign_string_from_path(channelRenderer, id_path, result_data->id, sizeof(result_data->id))) {
         printf("parse_channel: id assign fail (json path: \"%s\")\n", id_path);
-        channel->search_result_type = SEARCH_RESULT_TYPE_UNDF;
+        (*type) = SEARCH_RESULT_TYPE_UNDF;
         return;
     }
 
-    channel->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
+    (*type) = SEARCH_RESULT_TYPE_CHANNEL;
 
     const char* title_path = ".title.simpleText";
 
-    if (!assign_string_from_path(channelRenderer, title_path, channel->title, sizeof(channel->title))) {
+    if (!assign_string_from_path(channelRenderer, title_path, result_data->title, sizeof(result_data->title))) {
         printf("parse_channel: title assign fail (json path: \"%s\")\n", title_path);
     }
 
@@ -526,26 +569,31 @@ void parse_channel_result(cJSON* channelRenderer, SearchResult* channel)
         // the path either starts with '/ytc', or just '/'
         const char* path1 = strstr(channelThumbnailLink->valuestring, "/ytc");
         const char* path2 = strrchr(channelThumbnailLink->valuestring, '/');
-        snprintf(channel->thumbnail_path, sizeof(channel->thumbnail_path), "%s", (path1 ? path1 : path2));
+        snprintf(result_data->thumbnail_path, sizeof(result_data->thumbnail_path), "%s", (path1 ? path1 : path2));
     }
 }
 
-bool parse_highlighted_channel(cJSON* json, SearchResult* channel)
+bool parse_highlighted_channel(cJSON* json, SearchResult* dest)
 {
-    if ((json == NULL) || (channel == NULL)) return false;
+    if (!json || !dest)
+        return false;
 
     const char* id_path = ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.endpoint.browseEndpoint.browseId";
     
-    if (assign_string_from_path(json, id_path, channel->id, sizeof(channel->id)) == false) {
+    SearchResultType* type = &dest->type;
+    Channel* channel = &dest->data.channel;
+    ResultData*result_data = &dest->base;
+
+    if (assign_string_from_path(json, id_path, result_data->id, sizeof(result_data->id)) == false) {
         fprintf(stderr, "parse_highlighted_channel: failed to assign id\n");
         return false;
     }
 
-    channel->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
+    (*type) = SEARCH_RESULT_TYPE_CHANNEL;
 
     const char* title_path = ".header.pageHeaderRenderer.pageTitle";
     
-    if (assign_string_from_path(json, title_path, channel->title, sizeof(channel->title)) == false) {
+    if (assign_string_from_path(json, title_path, result_data->title, sizeof(result_data->title)) == false) {
         fprintf(stderr, "parse_highlighted_channel: failed to assign channel title\n");
         return false;
     }
@@ -573,28 +621,34 @@ bool parse_highlighted_channel(cJSON* json, SearchResult* channel)
         return false;
     }
 
-    snprintf(channel->thumbnail_path, sizeof(channel->thumbnail_path), "%s", path1 ? path1 : path2);
+    snprintf(result_data->thumbnail_path, sizeof(result_data->thumbnail_path), "%s", path1 ? path1 : path2);
 
     return true;
 }
 
-void parse_playlist_result(cJSON *lockupViewModel, SearchResult *playlist)
+void parse_playlist_result(cJSON *lockupViewModel, SearchResult* dest)
 {
-    if ((lockupViewModel == NULL) || (playlist == NULL)) return;
+    if (!lockupViewModel || !dest)
+        return;
+
+    SearchResultType* type = &dest->type;
+
+    Playlist* playlist = &dest->data.playlist;
+    ResultData* result_data = &dest->base;
 
     const char* id_path = ".contentId";
 
-    if (!assign_string_from_path(lockupViewModel, id_path, playlist->id, sizeof(playlist->id))) {
+    if (!assign_string_from_path(lockupViewModel, id_path, result_data->id, sizeof(result_data->id))) {
         printf("parse_playlist: id assign fail (json path: \"%s\")\n", id_path);
-        playlist->search_result_type = SEARCH_RESULT_TYPE_UNDF;
+        (*type) = SEARCH_RESULT_TYPE_UNDF;
         return;
     }
     
-    playlist->search_result_type = SEARCH_RESULT_TYPE_PLAYLIST;
+    (*type) = SEARCH_RESULT_TYPE_PLAYLIST;
 
     const char* title_path = ".metadata.lockupMetadataViewModel.title.content";
 
-    if (!assign_string_from_path(lockupViewModel, title_path, playlist->title, sizeof(playlist->title))) {
+    if (!assign_string_from_path(lockupViewModel, title_path, result_data->title, sizeof(result_data->title))) {
         printf("parse_playlist: title assign fail (json path: \"%s\")\n", title_path);
     }
 
@@ -602,7 +656,7 @@ void parse_playlist_result(cJSON *lockupViewModel, SearchResult *playlist)
 
     char video_id[16];
     if (assign_string_from_path(lockupViewModel, first_video_id_path, video_id, sizeof(video_id))) {
-        if (!assign_video_thumbnail_path(video_id, playlist->thumbnail_path, sizeof(playlist->thumbnail_path))) {
+        if (!assign_video_thumbnail_path(video_id, result_data->thumbnail_path, sizeof(result_data->thumbnail_path))) {
             printf("parse_playlist: thumbnail path assign fail\n");
         }
     }
@@ -678,8 +732,8 @@ int create_results_from_json(cJSON* json, List* results, const QueryType query_t
 
     cJSON *item;
     cJSON_ArrayForEach (item, results_array) {
-        Node* node = node_init((void*) search_result_init, NULL, (void*) search_result_free, NULL);
-        if (node == NULL) {
+        Node* node = node_init(better_search_result_init, NULL, better_search_result_free, NULL);
+        if (!node) {
             fprintf(stderr, "create_results_from_json: failed to create node\n");
             return 0;
         }
@@ -692,11 +746,11 @@ int create_results_from_json(cJSON* json, List* results, const QueryType query_t
         cJSON* channelRenderer = cjson_pointer_get(item, ".channelRenderer");  
         cJSON* lockupViewModel = cjson_pointer_get(item, ".lockupViewModel");   
         
-        if (videoRenderer)             
+        if (videoRenderer) 
             parse_video(videoRenderer, author_id, allow_shorts, search_result);
         
         else if (richItemRenderer)
-            parse_video(richItemRenderer, author_id, allow_shorts,search_result);
+            parse_video(richItemRenderer, author_id, allow_shorts, search_result);
         
         else if (playlistVideoRenderer)     
             parse_playlist_video(playlistVideoRenderer, search_result);
@@ -711,7 +765,7 @@ int create_results_from_json(cJSON* json, List* results, const QueryType query_t
                 parse_playlist_result(lockupViewModel, search_result);
         }
 
-        if (search_result->search_result_type != SEARCH_RESULT_TYPE_UNDF) {
+        if (search_result->type != SEARCH_RESULT_TYPE_UNDF) {
             elements_added++; 
             list_append(results, node);
         }
@@ -1453,28 +1507,35 @@ cJSON* init_search_result_json(const SearchResult* result)
         return NULL;
     }
 
-    cJSON_AddStringToObject(result_json, OBJ_ID_PATH, result->id);
-    cJSON_AddStringToObject(result_json, OBJ_TITLE_PATH, result->title);
-    cJSON_AddNumberToObject(result_json, OBJ_search_result_type_PATH, result->search_result_type);
-    cJSON_AddStringToObject(result_json, OBJ_THUMBNAIL_PATH, result->thumbnail_path);
+    const ResultData* result_data = &result->base;
+    cJSON_AddStringToObject(result_json, OBJ_ID_PATH, result_data->id);
+    cJSON_AddStringToObject(result_json, OBJ_TITLE_PATH, result_data->title);
+    cJSON_AddNumberToObject(result_json, OBJ_search_result_type_PATH, result->type);
+    cJSON_AddStringToObject(result_json, OBJ_THUMBNAIL_PATH, result_data->thumbnail_path);
     
-    switch (result->search_result_type) {
+    switch (result->type) {
         case SEARCH_RESULT_TYPE_LIVE:
         case SEARCH_RESULT_TYPE_SHORT:
-        case SEARCH_RESULT_TYPE_VIDEO:
-            cJSON_AddStringToObject(result_json, OBJ_AUTHOR_ID_PATH, result->authorId);
-            cJSON_AddStringToObject(result_json, OBJ_VIEW_COUNT_PATH, result->view_count);
-            cJSON_AddStringToObject(result_json, OBJ_VIDEO_LENGTH_PATH, result->duration);
-            cJSON_AddStringToObject(result_json, OBJ_UPLOAD_DATE_PATH, result->date_published);
+        case SEARCH_RESULT_TYPE_VIDEO: {
+            const Video* video = &result->data.video;
+            cJSON_AddStringToObject(result_json, OBJ_AUTHOR_ID_PATH, video->authorId);
+            cJSON_AddStringToObject(result_json, OBJ_VIEW_COUNT_PATH, video->view_count);
+            cJSON_AddStringToObject(result_json, OBJ_VIDEO_LENGTH_PATH, video->duration);
+            cJSON_AddStringToObject(result_json, OBJ_UPLOAD_DATE_PATH, video->date_published);
             break;
-        case SEARCH_RESULT_TYPE_CHANNEL:  
-            cJSON_AddStringToObject(result_json, OBJ_SUB_COUNT_PATH, result->subscriber_count); 
+        }
+        case SEARCH_RESULT_TYPE_CHANNEL: {
+            const Channel* channel = &result->data.channel;
+            cJSON_AddStringToObject(result_json, OBJ_SUB_COUNT_PATH, channel->subscriber_count); 
             break;
-        case SEARCH_RESULT_TYPE_PLAYLIST: 
-            cJSON_AddStringToObject(result_json, OBJ_VIDEO_COUNT_PATH, result->video_count);
+        } 
+        case SEARCH_RESULT_TYPE_PLAYLIST: {
+            const Playlist* playlist = &result->data.playlist;
+            cJSON_AddStringToObject(result_json, OBJ_VIDEO_COUNT_PATH, playlist->video_count);
             break;
+        }
         default: 
-            fprintf(stderr, "init_search_result_json: SearchResultType %d not supported\n", result->search_result_type);
+            fprintf(stderr, "init_search_result_json: SearchResultType %d not supported\n", result->type);
             return NULL;
     }
 
@@ -1500,7 +1561,8 @@ void delete_user_data(cJSON* user_data, const char* id)
 
 void add_user_data(cJSON* user_data, const SearchResult* interacted_result)
 {
-    if ((user_data == NULL) || (interacted_result == NULL)) return;
+    if (!user_data || !interacted_result)
+        return;
 
     cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
     if (cJSON_IsArray(array) == false) {
@@ -1510,7 +1572,8 @@ void add_user_data(cJSON* user_data, const SearchResult* interacted_result)
 
     cJSON* add = NULL;
 
-    const int i = find_user_data_index(array, interacted_result->id, OBJ_ID_PATH);
+    const char* id = interacted_result->base.id;
+    const int i = find_user_data_index(array, id, OBJ_ID_PATH);
 
     if (i >= 0) 
         add = cJSON_DetachItemFromArray(array, i);
@@ -1539,29 +1602,37 @@ void parse_user_data(cJSON* user_data, SearchResult* dest)
 {
     if ((user_data == NULL) || (dest == NULL)) return;
 
-    assign_number_from_path(user_data, OBJ_search_result_type_PATH, (int*) &dest->search_result_type);
-    if (dest->search_result_type == SEARCH_RESULT_TYPE_UNDF) 
+    assign_number_from_path(user_data, OBJ_search_result_type_PATH, (int*) &dest->type);
+    if (dest->type == SEARCH_RESULT_TYPE_UNDF) 
         return;
     
-    assign_string_from_path(user_data, OBJ_ID_PATH, dest->id, sizeof(dest->id));
-    assign_string_from_path(user_data, OBJ_TITLE_PATH, dest->title, sizeof(dest->title));
-    assign_string_from_path(user_data, OBJ_THUMBNAIL_PATH, dest->thumbnail_path, sizeof(dest->thumbnail_path));
 
-    switch (dest->search_result_type) {
+    ResultData* result_data = &dest->base;
+    assign_string_from_path(user_data, OBJ_ID_PATH, result_data->id, sizeof(result_data->id));
+    assign_string_from_path(user_data, OBJ_TITLE_PATH, result_data->title, sizeof(result_data->title));
+    assign_string_from_path(user_data, OBJ_THUMBNAIL_PATH, result_data->thumbnail_path, sizeof(result_data->thumbnail_path));
+
+    switch (dest->type) {
         case SEARCH_RESULT_TYPE_LIVE:
         case SEARCH_RESULT_TYPE_SHORT:
-        case SEARCH_RESULT_TYPE_VIDEO:
-            assign_string_from_path(user_data, OBJ_AUTHOR_ID_PATH, dest->authorId, sizeof(dest->authorId));
-            assign_string_from_path(user_data, OBJ_VIDEO_LENGTH_PATH, dest->duration, sizeof(dest->duration));
-            assign_string_from_path(user_data, OBJ_VIEW_COUNT_PATH, dest->view_count, sizeof(dest->view_count));
-            assign_string_from_path(user_data, OBJ_UPLOAD_DATE_PATH, dest->date_published, sizeof(dest->date_published));
+        case SEARCH_RESULT_TYPE_VIDEO: {
+            Video* video_dest = &dest->data.video; 
+            assign_string_from_path(user_data, OBJ_AUTHOR_ID_PATH, video_dest->authorId, sizeof(video_dest->authorId));
+            assign_string_from_path(user_data, OBJ_VIDEO_LENGTH_PATH, video_dest->duration, sizeof(video_dest->duration));
+            assign_string_from_path(user_data, OBJ_VIEW_COUNT_PATH, video_dest->view_count, sizeof(video_dest->view_count));
+            assign_string_from_path(user_data, OBJ_UPLOAD_DATE_PATH, video_dest->date_published, sizeof(video_dest->date_published));
             break;
-        case SEARCH_RESULT_TYPE_CHANNEL:
-            assign_string_from_path(user_data, OBJ_SUB_COUNT_PATH, dest->subscriber_count, sizeof(dest->subscriber_count));
+        }
+        case SEARCH_RESULT_TYPE_CHANNEL: {
+            Channel* channel_dest = &dest->data.channel;
+            assign_string_from_path(user_data, OBJ_SUB_COUNT_PATH, channel_dest->subscriber_count, sizeof(channel_dest->subscriber_count));
             break;
-        case SEARCH_RESULT_TYPE_PLAYLIST:
-            assign_string_from_path(user_data, OBJ_VIDEO_COUNT_PATH, dest->video_count, sizeof(dest->video_count));
+        }
+        case SEARCH_RESULT_TYPE_PLAYLIST: {
+            Playlist* playlist_dest = &dest->data.playlist;
+            assign_string_from_path(user_data, OBJ_VIDEO_COUNT_PATH, playlist_dest->video_count, sizeof(playlist_dest->video_count));
             break;
+        }
         case SEARCH_RESULT_TYPE_ANY:
         case SEARCH_RESULT_TYPE_UNDF:
             break;
@@ -1584,13 +1655,13 @@ void load_user_data(List* results, cJSON* user_data)
 
     cJSON* item;
     cJSON_ArrayForEach(item, array) {
-        Node* node = node_init((void*) search_result_init, NULL, (void*) search_result_free, NULL);
+        Node* node = node_init((void*) better_search_result_init, NULL,  better_search_result_free, NULL);
         if (node) {
             SearchResult* dest = (SearchResult*) node->content;
             if (dest) {
                 parse_user_data(item, dest);
                 
-                if (dest->search_result_type != SEARCH_RESULT_TYPE_UNDF) 
+                if (dest->type != SEARCH_RESULT_TYPE_UNDF) 
                     list_append(results, node);
                 else 
                     node_free(node);
@@ -1812,7 +1883,10 @@ void* get_channel_metadata(ThreadArgs args)
         return NULL;
     }
 
-    targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, targs->channel->info.id);
+    const ResultData* result_data = &targs->channel->info.base;
+
+    const char* id = result_data->id;
+    targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, id);
 
     LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
     if (!thumb_args) {
@@ -1823,8 +1897,8 @@ void* get_channel_metadata(ThreadArgs args)
     thumb_args->ssl_ctx = targs->ssl_ctx;
     thumb_args->loader = targs->thumbnail_loader;
     thumb_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
-    strncpy(thumb_args->id, targs->channel->info.id, sizeof(thumb_args->id));
-    strncpy(thumb_args->path, targs->channel->info.thumbnail_path, sizeof(thumb_args->path));
+    strncpy(thumb_args->id, result_data->id, sizeof(thumb_args->id));
+    strncpy(thumb_args->path, result_data->thumbnail_path, sizeof(thumb_args->path));
 
     load_thumbnail(thumb_args);
 
@@ -2157,7 +2231,7 @@ void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
     }
 }
 
-void draw_search_result(SearchResult *search_result, const Texture thumbnail, const Rectangle container,  const Color color, const Ui ui)
+void draw_search_result(SearchResult* search_result, const Texture thumbnail, const Rectangle container, const Color color, const Ui ui)
 {
     DrawRectangleRec(container, color);
 
@@ -2179,8 +2253,10 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
         .height = thumbnail_area.height * 0.70f
     };
 
-    if (search_result->title[0] != '\0') {
-        DrawTextBoxed(search_result->title, get_padded_rectangle(ui.padding, title_area), ui, font_size, BLACK);                            
+    ResultData* result_data = &search_result->base;
+
+    if (result_data->title[0] != '\0') {
+        DrawTextBoxed(result_data->title, get_padded_rectangle(ui.padding, title_area), ui, font_size, BLACK);                            
     }
 
     const Rectangle subtext_area = {
@@ -2190,25 +2266,27 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
         .height = container.height - title_area.height,
     };
 
-    switch (search_result->search_result_type) {
+    switch (search_result->type) {
         case SEARCH_RESULT_TYPE_SHORT:
         case SEARCH_RESULT_TYPE_VIDEO: {
             const Vector2 date_published_pos = {
                 .x = subtext_area.x + ui.padding,
                 .y = subtext_area.y + ui.padding,
             };
+            
+            const Video* video = &search_result->data.video;
 
-            DrawTextEx(ui.font, search_result->date_published, date_published_pos, font_size, ui.spacing, BLACK);
+            DrawTextEx(ui.font, video->date_published, date_published_pos, font_size, ui.spacing, BLACK);
             
             const Vector2 view_count_pos = {
-                .x = subtext_area.x + subtext_area.width - MeasureTextEx(ui.font, search_result->view_count, font_size, ui.spacing).x - ui.padding,
+                .x = subtext_area.x + subtext_area.width - MeasureTextEx(ui.font, video->view_count, font_size, ui.spacing).x - ui.padding,
                 .y = subtext_area.y + ui.padding,
             };
 
-            DrawTextEx(ui.font, search_result->view_count, view_count_pos, font_size, ui.spacing, BLACK);
-            
+            DrawTextEx(ui.font, video->view_count, view_count_pos, font_size, ui.spacing, BLACK);
+
             DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
-            draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, font_size, search_result->duration);
+            draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, font_size, video->duration);
             break;
         }
         case SEARCH_RESULT_TYPE_LIVE: {
@@ -2217,24 +2295,32 @@ void draw_search_result(SearchResult *search_result, const Texture thumbnail, co
                 .y = subtext_area.y + ui.padding,
             };
 
-            DrawTextEx(ui.font, TextFormat("%s watching", search_result->view_count), view_count_pos, font_size, ui.spacing, BLACK);
+            const Video* video = &search_result->data.video;
+
+            DrawTextEx(ui.font, TextFormat("%s watching", video->view_count), view_count_pos, font_size, ui.spacing, BLACK);
             
             DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, "LIVE");
             break;
         }
         case SEARCH_RESULT_TYPE_CHANNEL: {
+            const Channel* channel = &search_result->data.channel;
+
+            DrawTextBoxed(channel->subscriber_count, get_padded_rectangle(ui.padding, subtext_area), ui, 12, BLACK);
+            
             const float x_padding = thumbnail.width / 2.0f;
             const float y_padding = (container.height - thumbnail.height) / 2.0f;
+            
             DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x + x_padding, thumbnail_area.y + y_padding}, 0.0f, 1.0f, WHITE);
-            DrawTextBoxed(search_result->subscriber_count, get_padded_rectangle(ui.padding, subtext_area), ui, 12, BLACK);
             draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, "Channel");
             break;
         }
-        case SEARCH_RESULT_TYPE_PLAYLIST:
+        case SEARCH_RESULT_TYPE_PLAYLIST: {
+            const Playlist* playlist = &search_result->data.playlist;
             DrawTextureEx(thumbnail, (Vector2){thumbnail_area.x, thumbnail_area.y}, 0.0f, 1.0f, WHITE);
-            draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, search_result->video_count);
+            draw_thumbnail_subtext(thumbnail_area, ui, RAYWHITE, 12, playlist->video_count);
             break;
+        }
         default:    
             break;
     }
@@ -2340,7 +2426,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
     const float font_size = 17;
     const float title_size = 25;
 
-    if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->cached == NULL) || (highlighted_channel->info.id[0] == '\0')) return;
+    if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->cached == NULL) || (highlighted_channel->info.base.id[0] == '\0')) return;
 
     const float thumbnail_w = search_result_type_to_thumbnail_width(SEARCH_RESULT_TYPE_CHANNEL);
     
@@ -2352,14 +2438,17 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
         .y = container.y + (container.height / 3.0f) - (title_size / 2.0f),
     };
 
-    DrawTextEx(ui->font, highlighted_channel->info.title, title_pos, title_size, ui->spacing, BLACK);
+    const ResultData* result_data = &highlighted_channel->info.base;
+    const Channel* channel = &highlighted_channel->info.data.channel; 
+
+    DrawTextEx(ui->font, result_data->title, title_pos, title_size, ui->spacing, BLACK);
     
     const Vector2 sub_count_pos = {
         .x = container.x + thumbnail_w + (ui->padding * 2),
-        .y = container.y + container.height - MeasureTextEx(ui->font, highlighted_channel->info.subscriber_count, font_size, ui->spacing).y - ui->padding,
+        .y = container.y + container.height - MeasureTextEx(ui->font, channel->subscriber_count, font_size, ui->spacing).y - ui->padding,
     };
 
-    DrawTextEx(ui->font, highlighted_channel->info.subscriber_count, sub_count_pos, font_size, ui->spacing, BLACK);
+    DrawTextEx(ui->font, channel->subscriber_count, sub_count_pos, font_size, ui->spacing, BLACK);
 
     const float button_width = 75;
     const float widget_height = 25;
@@ -2374,7 +2463,7 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
 
     if (GuiButton(subscribe_button_bounds, button_text)) {
         if (highlighted_channel->is_subscribed)
-            delete_user_data(subscribed_channels_json, highlighted_channel->info.id);
+            delete_user_data(subscribed_channels_json, result_data->id);
         else
             add_user_data(subscribed_channels_json, &highlighted_channel->info);
         
@@ -2397,14 +2486,17 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
         .height = container.height,
     };
 
-    if (!valid_string(selected_video->info.id) || update_flags->is_playing_video) 
+    const ResultData* result_data = &selected_video->info.base;
+    const Video* video = &selected_video->info.data.video;
+
+    if (!valid_string(result_data->id) || update_flags->is_playing_video) 
         GuiSetState(STATE_DISABLED);
 
     if (GuiButton(play_video_button_bounds, "Play Video")) {
         PlayVideoArgs* targs = malloc(sizeof(PlayVideoArgs));
         if (targs) {
             targs->playing_video = &update_flags->is_playing_video;
-            snprintf(targs->video_id, sizeof(targs->video_id), "%s", selected_video->info.id);
+            snprintf(targs->video_id, sizeof(targs->video_id), "%s", result_data->id);
             thread_task_launch(&thread_context->task_queue, targs, play_video);
             add_user_data(user_data->watched_videos, &selected_video->info);
         }
@@ -2435,7 +2527,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
         update_flags->load_query_results = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_RELATED;
-        strncpy(query->focused_id, selected_video->info.id, sizeof(query->focused_id) - 1);
+        strncpy(query->focused_id, result_data->id, sizeof(query->focused_id) - 1);
         query->focused_id[sizeof(query->focused_id) - 1] = '\0';
     }
     
@@ -2451,7 +2543,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_CHANNEL;
 
-        strncpy(query->focused_id, selected_video->info.authorId, sizeof(query->focused_id) - 1);
+        strncpy(query->focused_id, video->authorId, sizeof(query->focused_id) - 1);
         query->focused_id[sizeof(query->focused_id) - 1] = '\0';
     }
 
@@ -2822,8 +2914,8 @@ int main()
         
             // bottom left portion
             {  
-                if (!highlighted_channel.cached || (strcmp(highlighted_channel.info.id, highlighted_channel.cached->id) != 0))
-                    highlighted_channel.cached = texture_cache_find_entry(&texture_cache, highlighted_channel.info.id);
+                if (!highlighted_channel.cached || (strcmp(highlighted_channel.info.base.id, highlighted_channel.cached->id) != 0))
+                    highlighted_channel.cached = texture_cache_find_entry(&texture_cache, highlighted_channel.info.base.id);
                 else
                     timer_start(&highlighted_channel.cached->timer, CACHED_TEXTURE_LIFETIME);
 
@@ -2895,9 +2987,10 @@ int main()
                     };
 
                     SearchResult* search_result = (SearchResult*) node->content;
+                    const ResultData* result_data = &search_result->base;
 
                     Texture thumbnail = {0};
-                    TextureCacheEntry* entry = texture_cache_find_entry(&texture_cache, search_result->id);
+                    TextureCacheEntry* entry = texture_cache_find_entry(&texture_cache, result_data->id);
                     if (texture_cache_entry_is_ready(entry)) {
                         timer_start(&entry->timer, CACHED_TEXTURE_LIFETIME);
                         thumbnail = entry->texture;
@@ -2906,12 +2999,12 @@ int main()
                     if (!CheckCollisionRecs(scissor_rect, container)) 
                         continue;
 
-                    if (valid_string(search_result->thumbnail_path) && !search_result->thumbnail_loaded) {
+                    if (valid_string(result_data->thumbnail_path) && !search_result->thumbnail_loaded) {
                         search_result->thumbnail_loaded = true;
-                        queue_load_thumbnail(ssl_ctx, &thumbnail_loader, &thread_context.task_queue, search_result->search_result_type, search_result->id, search_result->thumbnail_path);
+                        queue_load_thumbnail(ssl_ctx, &thumbnail_loader, &thread_context.task_queue, search_result->type, result_data->id, result_data->thumbnail_path);
                     }
 
-                    const bool result_is_highlighted = strcmp(search_result->id, highlighted_video.info.id) == 0;
+                    const bool result_is_highlighted = (strcmp(result_data->id, highlighted_video.info.base.id) == 0);
                     const Color container_color = result_is_highlighted ? 
                                                   BLUE : 
                                                   i % 2 ? WHITE : RAYWHITE;
@@ -2923,10 +3016,10 @@ int main()
                         (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
                         query.attr = QUERY_ATTR_REPLACE;
 
-                        strncpy(query.focused_id, search_result->id, sizeof(query.focused_id) - 1);
+                        strncpy(query.focused_id, result_data->id, sizeof(query.focused_id) - 1);
                         query.focused_id[sizeof(query.focused_id) - 1] = '\0';
 
-                        switch (search_result->search_result_type) {
+                        switch (search_result->type) {
                             case SEARCH_RESULT_TYPE_LIVE:
                             case SEARCH_RESULT_TYPE_SHORT:
                             case SEARCH_RESULT_TYPE_VIDEO:
@@ -2944,7 +3037,7 @@ int main()
                                 update_flags.load_query_results = true;
                                 query.type = QUERY_TYPE_VIEW_CHANNEL;
                                 memcpy(&highlighted_channel.info, search_result, sizeof(SearchResult));
-                                highlighted_channel.is_subscribed = is_subbed_to_channel(user_data.subscribed_channels, highlighted_channel.info.id);
+                                highlighted_channel.is_subscribed = is_subbed_to_channel(user_data.subscribed_channels, highlighted_channel.info.base.id);
                                 break;
                             case SEARCH_RESULT_TYPE_ANY:
                             case SEARCH_RESULT_TYPE_UNDF:
