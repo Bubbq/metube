@@ -176,10 +176,8 @@ void get_http_header_tag_value(const char* header, const char* tag, char* dest, 
         return;
 
     const char* header_line = strstr(header, tag);
-    if (!header_line) {
-        fprintf(stderr, "get_http_header_value: \"%s\" was not found in response header\n", tag);
+    if (!header_line) 
         return;
-    }
 
     char* start = strchr(header_line, ':');
     if (start) {

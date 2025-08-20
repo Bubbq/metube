@@ -73,14 +73,12 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
             ret = cJSON_GetObjectItem(ret, array_name);
             if (!ret) {
-                fprintf(stderr, "cjson_pointer_get: failed to add array object \"%s\"\n", elements[i]);
                 free(copy_output); copy_output = NULL;
                 free(elements); elements = NULL;
                 return NULL;
             }
 
             if (!cJSON_IsArray(ret)) {
-                fprintf(stderr, "cjson_pointer_get: accessing element in non-array object (%s)\n", elements[i]);
                 free(copy_output); copy_output = NULL;
                 free(elements); elements = NULL;
                 return NULL;
@@ -88,7 +86,6 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
             const char* closing_brace = strchr(opening_brace, ']');
             if (!closing_brace) {
-                printf("cjson_pointer_get: \"%s\" is an unbalanced array\n", elements[i]);
                 free(copy_output); copy_output = NULL;
                 free(elements); elements = NULL;
                 return NULL;
@@ -109,7 +106,6 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
                               index_buffer_val;
 
             if (index >= array_size) {
-                fprintf(stderr, "cjson_pointer_get: accessing element %d in %zu size array (%s)\n", index, array_size, elements[i]);
                 free(copy_output); copy_output = NULL;
                 free(elements); elements = NULL;
                 return NULL;

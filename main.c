@@ -2994,6 +2994,8 @@ int main()
                     if (texture_cache_entry_is_ready(entry)) {
                         timer_start(&entry->timer, CACHED_TEXTURE_LIFETIME);
                         thumbnail = entry->texture;
+                        if (!search_result->thumbnail_loaded)
+                            search_result->thumbnail_loaded = true;
                     }
 
                     if (!CheckCollisionRecs(scissor_rect, container)) 
