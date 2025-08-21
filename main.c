@@ -3,6 +3,7 @@
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
+#include <stdio.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -218,9 +219,9 @@ const char* query_attr_to_text(const QueryAttribute query_attr)
 {
     switch (query_attr) {
         case QUERY_ATTR_REPLACE: 
-            return "NEW";
+            return "replace";
         case QUERY_ATTR_APPEND: 
-            return "APPENDING";
+            return "append";
         default:
             fprintf(stderr, "query_attr_to_text: QueryAttribute %d is invalid\n", query_attr);
             return NULL;
@@ -263,17 +264,17 @@ const char* query_type_to_text(const QueryType query_type)
 {
     switch (query_type) {
         case QUERY_TYPE_USER_INPUT: 
-            return "QUERIED";
+            return "user_input";
         case QUERY_TYPE_VIEW_RELATED: 
-            return "RELATED";
+            return "view_related";
         case QUERY_TYPE_VIEW_TRENDING: 
-            return "TRENDING";
+            return "view_trending";
         case QUERY_TYPE_VIEW_VIDEO: 
-            return "VIDEO FOCUS";
+            return "view_video";
         case QUERY_TYPE_VIEW_CHANNEL: 
-            return "VIEW CHANNEL";
+            return "view_channel";
         case QUERY_TYPE_VIEW_PLAYLIST: 
-            return "VIEW PLAYLIST";
+            return "view_playlist";
         default:
             fprintf(stderr, "query_type_to_text: QueryType %d is invalid\n", query_type);
             return NULL;
@@ -700,87 +701,6 @@ const char* get_results_list_path(const QueryType query_type, const QueryAttribu
             fprintf(stderr, "get_results_list_path: QueryType %d is not supported\n", query_type);
             return NULL;
     }
-}
-
-int create_results_from_json(cJSON* json, List* results, const QueryType query_type, const QueryAttribute query_attr, const bool allow_shorts)
-{
-    if (!json || !results)
-        return -1;
-
-    const char* path = get_results_list_path(query_type, query_attr); 
-
-    cJSON* results_array = cjson_pointer_get(json, path);
-    if (cJSON_IsArray(results_array) == false) {
-        printf("create_results_from_json: invalid results array from path %s\n", path);
-        write_json_to_file(json, "results.json");
-        return -1;
-    }
-
-    char author_id[64] = {0};
-    if (query_type == QUERY_TYPE_VIEW_CHANNEL) {
-        const char* author_id_path = (query_attr == QUERY_ATTR_REPLACE) 
-                                     ? ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId"
-                                     : ".responseContext.serviceTrackingParams[0].params[3].value";
-
-        if (assign_string_from_path(json, author_id_path, author_id, sizeof(author_id)) == false) {
-            printf("create_results_from_json: failed to parse author id from the path %s\n", author_id_path);
-        }
-    }
-
-    int elements_added = 0;
-    const int old_size = results->count;
-
-    cJSON *item;
-    cJSON_ArrayForEach (item, results_array) {
-        Node* node = node_init(better_search_result_init, NULL, better_search_result_free, NULL);
-        if (!node) {
-            fprintf(stderr, "create_results_from_json: failed to create node\n");
-            return 0;
-        }
-
-        SearchResult* search_result = (SearchResult*) node->content;
-        
-        cJSON* videoRenderer = cjson_pointer_get(item, ".videoRenderer");     
-        cJSON* richItemRenderer = cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
-        cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer");
-        cJSON* channelRenderer = cjson_pointer_get(item, ".channelRenderer");  
-        cJSON* lockupViewModel = cjson_pointer_get(item, ".lockupViewModel");   
-        
-        if (videoRenderer) 
-            parse_video(videoRenderer, author_id, allow_shorts, search_result);
-        
-        else if (richItemRenderer)
-            parse_video(richItemRenderer, author_id, allow_shorts, search_result);
-        
-        else if (playlistVideoRenderer)     
-            parse_playlist_video(playlistVideoRenderer, search_result);
-
-        else if (channelRenderer)
-            parse_channel_result(channelRenderer, search_result);
-        
-        else if (lockupViewModel) {
-            if (query_type == QUERY_TYPE_VIEW_RELATED) 
-                parse_related_video(lockupViewModel, search_result);
-            else 
-                parse_playlist_result(lockupViewModel, search_result);
-        }
-
-        if (search_result->type != SEARCH_RESULT_TYPE_UNDF) {
-            elements_added++; 
-            list_append(results, node);
-        }
-
-        else 
-            node_free(node);
-    }
-
-    if (query_attr == QUERY_ATTR_REPLACE) {
-        for (int i = 0; results->head && (i < old_size); i++) {
-            node_free(list_dequeue(results));
-        }
-    }
-
-    return elements_added;
 }
 
 const char* get_continuation_token_path(const QueryType search_type, const QueryAttribute search_attr)
@@ -1708,13 +1628,93 @@ cJSON* get_youtube_json(SSL_CTX* ssl_ctx, ClientContext* client_context, Query* 
     return youtube_json;
 }
 
+const char* get_view_channel_author_id_path(const QueryAttribute query_attr)
+{
+    switch (query_attr) {
+        case QUERY_ATTR_REPLACE:
+            return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId";
+        case QUERY_ATTR_APPEND:
+            return ".responseContext.serviceTrackingParams[0].params[3].value";
+    }
+}
+
 void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Query* query, List* dest)
 {
     if (!youtube_json || !client_context || !query || !dest)
         return;
     
     pthread_mutex_lock(&dest->mutex);
-    create_results_from_json(youtube_json, dest, query->type, query->attr, query->allow_youtube_shorts);
+
+    const char* results_array_path = get_results_list_path(query->type, query->attr); 
+    if (!results_array_path)
+        return;
+
+    const cJSON* results_array = cjson_pointer_get(youtube_json, results_array_path);
+    if (!cJSON_IsArray(results_array)) {
+        fprintf(stderr, "get_youtube_json: the path \"%s\" did not give a valid array\n", results_array_path);
+        char error_filename[32] = {0};
+        snprintf(error_filename, sizeof(error_filename), "%s_(%s).json", query_type_to_text(query->type), query_attr_to_text(query->attr));
+        write_json_to_file(youtube_json, error_filename);
+        return;
+    }
+
+    char author_id[64] = {0};
+    if (query->type == QUERY_TYPE_VIEW_CHANNEL) {
+        const char* author_id_path = get_view_channel_author_id_path(query->attr);
+
+        if (!assign_string_from_path(youtube_json, author_id_path, author_id, sizeof(author_id))) 
+            fprintf(stderr, "create_results_from_json: failed to parse author id from the path %s\n", author_id_path);
+    }
+
+    int elements_added = 0;
+    const size_t old_size = dest->count;
+
+    cJSON *item;
+    cJSON_ArrayForEach (item, results_array) {
+        Node* node = node_init(better_search_result_init, NULL, better_search_result_free, NULL);
+        if (!node) 
+            return;
+
+        SearchResult* search_result = (SearchResult*) node->content;
+        
+        cJSON* videoRenderer = cjson_pointer_get(item, ".videoRenderer");     
+        cJSON* channelRenderer = cjson_pointer_get(item, ".channelRenderer");  
+        cJSON* lockupViewModel = cjson_pointer_get(item, ".lockupViewModel");   
+        cJSON* playlistVideoRenderer = cjson_pointer_get(item, ".playlistVideoRenderer");
+        cJSON* richItemRenderer = cjson_pointer_get(item, ".richItemRenderer.content.videoRenderer");
+        
+        if (videoRenderer) 
+            parse_video(videoRenderer, author_id, query->allow_youtube_shorts, search_result);
+        
+        else if (richItemRenderer)
+            parse_video(richItemRenderer, author_id, query->allow_youtube_shorts, search_result);
+        
+        else if (playlistVideoRenderer)     
+            parse_playlist_video(playlistVideoRenderer, search_result);
+
+        else if (channelRenderer)
+            parse_channel_result(channelRenderer, search_result);
+        
+        else if (lockupViewModel) {
+            if (query->type == QUERY_TYPE_VIEW_RELATED) 
+                parse_related_video(lockupViewModel, search_result);
+            else 
+                parse_playlist_result(lockupViewModel, search_result);
+        }
+
+        if (search_result->type != SEARCH_RESULT_TYPE_UNDF) {
+            elements_added++; 
+            list_append(dest, node);
+        }
+
+        else 
+            node_free(node);
+    }
+
+    if (query->attr == QUERY_ATTR_REPLACE) 
+        for (size_t i = 0; dest->head && (i < old_size); i++) 
+            node_free(list_dequeue(dest));
+
     pthread_mutex_unlock(&dest->mutex);
     
     char** continuation_token = &client_context->continuation_token;
@@ -1844,37 +1844,29 @@ typedef struct
 
 typedef struct
 {
-    Query query;
-    List* results;
-    SSL_CTX* ssl_ctx;
-    HighlightedChannel* channel;
-    ClientContext* client_context;
-    cJSON* subscribed_channels_json;
-    ThumbnailLoader* thumbnail_loader;
+    SearchThreadArgs search_args;
+    LoadThumbnailArgs thumbnail_args;
+    HighlightedChannel* highlighted_channel;
+    cJSON* subscribed_channels;
 } ChannelMetadataArgs;
 
 void* get_channel_metadata(ThreadArgs args)
 {
     ChannelMetadataArgs* targs = (ChannelMetadataArgs*) args;
-
-    if (!targs || !targs->subscribed_channels_json || !targs->channel || !targs->client_context || !targs->ssl_ctx || !targs->thumbnail_loader || !targs->results) 
+    if (!targs || !targs->highlighted_channel || !targs->subscribed_channels)
         return NULL;
 
-    Query* query = &targs->query;
-    SSL_CTX* ssl_ctx = targs->ssl_ctx;
-    ClientContext* client_context = targs->client_context;
-
-    cJSON* json;
-    if ((json = get_youtube_json(ssl_ctx, client_context, query)) == NULL) {
+    cJSON* json = get_youtube_json(targs->search_args.ssl_ctx, targs->search_args.client_context, &targs->search_args.query);
+    if (!json) {
         fprintf(stderr, "get_channel_metadata: youtube json is null\n");
         return NULL;
     }
 
-    List* results = targs->results;
+    List* results = targs->search_args.results;
     
-    get_youtube_results(json, client_context, query, results);
+    get_youtube_results(json, targs->search_args.client_context, &targs->search_args.query, results);
 
-    const bool channel_parse_status = parse_highlighted_channel(json, &targs->channel->info);
+    const bool channel_parse_status = parse_highlighted_channel(json, &targs->highlighted_channel->info);
     
     cJSON_Delete(json); 
 
@@ -1883,26 +1875,15 @@ void* get_channel_metadata(ThreadArgs args)
         return NULL;
     }
 
-    const ResultData* result_data = &targs->channel->info.base;
+    const ResultData* result_data = &targs->highlighted_channel->info.base;
 
     const char* id = result_data->id;
-    targs->channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels_json, id);
+    targs->highlighted_channel->is_subscribed = is_subbed_to_channel(targs->subscribed_channels, id);
 
-    LoadThumbnailArgs* thumb_args = malloc(sizeof(LoadThumbnailArgs));
-    if (!thumb_args) {
-        fprintf(stderr, "get_channel_metadata: malloc returned null\n");
-        return NULL;
-    }
+    strncpy(targs->thumbnail_args.id, result_data->id, sizeof(targs->thumbnail_args.id));
+    strncpy(targs->thumbnail_args.path, result_data->thumbnail_path, sizeof(targs->thumbnail_args.path));
 
-    thumb_args->ssl_ctx = targs->ssl_ctx;
-    thumb_args->loader = targs->thumbnail_loader;
-    thumb_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
-    strncpy(thumb_args->id, result_data->id, sizeof(thumb_args->id));
-    strncpy(thumb_args->path, result_data->thumbnail_path, sizeof(thumb_args->path));
-
-    load_thumbnail(thumb_args);
-
-    free(thumb_args); thumb_args = NULL;
+    load_thumbnail(&targs->thumbnail_args);
 
     return NULL;
 }
@@ -2815,13 +2796,19 @@ int main()
 
             ChannelMetadataArgs* targs = malloc(sizeof(ChannelMetadataArgs));
             if (targs) {
-                targs->query = query;
-                targs->results = &results;
-                targs->ssl_ctx = ssl_ctx;
-                targs->client_context = &client_context;
-                targs->channel = &highlighted_channel;
-                targs->thumbnail_loader = &thumbnail_loader;
-                targs->subscribed_channels_json = user_data.subscribed_channels;
+                targs->highlighted_channel = &highlighted_channel;
+                targs->subscribed_channels = user_data.subscribed_channels;
+
+                SearchThreadArgs* search_args = &targs->search_args;
+                search_args->client_context = &client_context;
+                search_args->query = query;
+                search_args->results = &results;
+                search_args->ssl_ctx = ssl_ctx;
+
+                LoadThumbnailArgs* thumbnail_args = &targs->thumbnail_args;
+                thumbnail_args->loader = &thumbnail_loader;
+                thumbnail_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
+                thumbnail_args->ssl_ctx = ssl_ctx;
 
                 if (!thread_task_launch(&thread_context.task_queue, targs, get_channel_metadata)) {
                     fprintf(stderr, "failed to launch get_channel_metadata task\n");
