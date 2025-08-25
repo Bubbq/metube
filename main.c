@@ -3,7 +3,6 @@
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
-#include <stdio.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -1635,6 +1634,9 @@ const char* get_view_channel_author_id_path(const QueryAttribute query_attr)
             return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.endpoint.browseEndpoint.browseId";
         case QUERY_ATTR_APPEND:
             return ".responseContext.serviceTrackingParams[0].params[3].value";
+        default:    
+            fprintf(stderr, "QueryAttribute %d is not valid\n", query_attr);
+            return NULL;
     }
 }
 
@@ -1760,7 +1762,7 @@ void* get_results_from_query(ThreadArgs args)
 
 void queue_search_task(SSL_CTX* ssl_ctx, ClientContext* client_context, List* task_queue, List* results, Query query)
 {
-    if (!ssl_ctx || !client_context || !task_queue || !results)
+    if (!ssl_ctx || !client_context || !task_queue || !results) 
         return;
 
     SearchThreadArgs* targs = malloc(sizeof(SearchThreadArgs));
@@ -1928,12 +1930,7 @@ void* play_video(ThreadArgs args)
 typedef struct
 {
     bool is_playing_video;
-    bool load_query_results;
-    bool load_video_metadata;
-    bool load_channel_metadata;
-    bool load_liked_videos;
-    bool load_watch_history;
-    bool load_subscribed_channels;
+    bool is_task_set;
 } UpdateFlags;
 
 void init_app()
@@ -2505,7 +2502,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
     };
 
     if (GuiButton(related_videos_button_bounds, "Related Videos")) {
-        update_flags->load_query_results = true;
+        update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_RELATED;
         strncpy(query->focused_id, result_data->id, sizeof(query->focused_id) - 1);
@@ -2520,7 +2517,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
     };
 
     if (GuiButton(users_videos_button_bounds, "User's Videos")) {
-        update_flags->load_channel_metadata = true;
+       update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_CHANNEL;
 
@@ -2547,7 +2544,7 @@ void draw_user_data_buttons(const Rectangle container, Query* query, UpdateFlags
     };
 
     if (GuiButton(subscriptions_button_bounds, "Subscribed Channels")) {
-        update_flags->load_subscribed_channels = true;
+        update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
     }
@@ -2560,7 +2557,9 @@ void draw_user_data_buttons(const Rectangle container, Query* query, UpdateFlags
     };
 
     if (GuiButton(liked_videos_button_bounds, "Liked Videos")) {
-        update_flags->load_liked_videos = true;
+        update_flags->is_task_set = true;
+        query->attr = QUERY_ATTR_REPLACE;
+        query->type = QUERY_TYPE_VIEW_LIKED_VIDEOS;
     }
     
     const Rectangle watch_history_button_bounds = {
@@ -2571,7 +2570,7 @@ void draw_user_data_buttons(const Rectangle container, Query* query, UpdateFlags
     };
 
     if (GuiButton(watch_history_button_bounds, "Watch History")) {
-        update_flags->load_watch_history = true;
+        update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_WATCH_HISTORY;
     }
@@ -2614,7 +2613,7 @@ void draw_search_bar(const Rectangle container, const Ui* ui, Query* query, Upda
     };
 
     if (GuiButton(trending_button_bounds, trending_button_text)) {
-        update_flags->load_query_results = true;
+        update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_TRENDING;
     }
@@ -2638,7 +2637,7 @@ void draw_search_bar(const Rectangle container, const Ui* ui, Query* query, Upda
 
     if ((GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) && 
        (trim_whitespace(query->string) > 0)) {
-        update_flags->load_query_results = true;
+        update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_USER_INPUT;
     }
@@ -2656,12 +2655,10 @@ void draw_search_bar(const Rectangle container, const Ui* ui, Query* query, Upda
         (*show_filter_window) = !(*show_filter_window);
 }
 
-void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** continuation_token, cJSON* user_data, bool* update_flag)
+void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** continuation_token, cJSON* user_data)
 {
-    if (!results || !token_mutex || !continuation_token || !user_data || !update_flag)
+    if (!results || !token_mutex || !continuation_token || !user_data)
         return;
-
-    (*update_flag) = false;
 
     pthread_mutex_lock(token_mutex);
 
@@ -2674,8 +2671,29 @@ void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** c
     load_user_data(results, user_data);
 }
 
+cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_type)
+{
+    if (!user_data)
+        return NULL;
+
+    switch (query_type) {
+        case QUERY_TYPE_VIEW_LIKED_VIDEOS:
+            return user_data->liked_videos;
+        case QUERY_TYPE_VIEW_WATCH_HISTORY:
+            return user_data->watched_videos;
+        case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS:
+            return user_data->subscribed_channels;
+        default:
+            fprintf(stderr, "query_type_to_user_data: QueryType %d is invalid\n", query_type);
+            return NULL;
+    }
+}
+
 // dont search for cached thumbnail every frame
 // ssl connection times out after 30-60s 
+
+// remove info from HighlightedVideo struct? 
+    // only really need the video id 
 
 int main()
 {
@@ -2698,7 +2716,6 @@ int main()
     HighlightedVideo highlighted_video = {0};
     HighlightedChannel highlighted_channel = {0};
     
-    char last_search_query[512] = {0};
     QueryType last_query_type = -1;
     
     Query query = {
@@ -2763,57 +2780,55 @@ int main()
             get_video_metadata_output = NULL;
         }
 
-        if (update_flags.load_video_metadata) {
-            update_flags.load_video_metadata = false;
-            queue_video_metadata_task(ssl_ctx, &client_context, &thread_context, &get_video_metadata_output, query);
-        }
+        if (update_flags.is_task_set) {
+            update_flags.is_task_set = false;
 
-        if (update_flags.load_query_results) {
-            update_flags.load_query_results = false;
+            switch (query.type) {
+                case QUERY_TYPE_USER_INPUT:
+                case QUERY_TYPE_VIEW_RELATED:
+                case QUERY_TYPE_VIEW_TRENDING:
+                case QUERY_TYPE_VIEW_PLAYLIST:
+                    last_query_type = query.type;
+                    queue_search_task(ssl_ctx, &client_context, &thread_context.task_queue, &results, query);
+                    break;
+                case QUERY_TYPE_VIEW_VIDEO:
+                    queue_video_metadata_task(ssl_ctx, &client_context, &thread_context, &get_video_metadata_output, query);
+                    break;
+                case QUERY_TYPE_VIEW_CHANNEL: {
+                    last_query_type = query.type;
+                    ChannelMetadataArgs* targs = malloc(sizeof(ChannelMetadataArgs));
+                    if (targs) {
+                        targs->highlighted_channel = &highlighted_channel;
+                        targs->subscribed_channels = user_data.subscribed_channels;
 
-            // evade bot detection
-            if (strcmp(last_search_query, query.string) == 0) 
-                cycle_connection(&client_context.youtube_api_pool);
+                        SearchThreadArgs* search_args = &targs->search_args;
+                        search_args->client_context = &client_context;
+                        search_args->query = query;
+                        search_args->results = &results;
+                        search_args->ssl_ctx = ssl_ctx;
 
-            last_query_type = query.type;
-            strncpy(last_search_query, query.string, sizeof(last_search_query));
+                        LoadThumbnailArgs* thumbnail_args = &targs->thumbnail_args;
+                        thumbnail_args->loader = &thumbnail_loader;
+                        thumbnail_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
+                        thumbnail_args->ssl_ctx = ssl_ctx;
 
-            queue_search_task(ssl_ctx, &client_context, &thread_context.task_queue, &results, query);
-        }
-
-        if (update_flags.load_liked_videos) 
-            handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.liked_videos, &update_flags.load_liked_videos);
-
-        if (update_flags.load_watch_history) 
-            handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.watched_videos, &update_flags.load_watch_history);
-
-        if (update_flags.load_subscribed_channels) 
-            handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, user_data.subscribed_channels, &update_flags.load_subscribed_channels);
-        
-        if (update_flags.load_channel_metadata) {
-            update_flags.load_channel_metadata = false;
-            last_query_type = query.type;
-
-            ChannelMetadataArgs* targs = malloc(sizeof(ChannelMetadataArgs));
-            if (targs) {
-                targs->highlighted_channel = &highlighted_channel;
-                targs->subscribed_channels = user_data.subscribed_channels;
-
-                SearchThreadArgs* search_args = &targs->search_args;
-                search_args->client_context = &client_context;
-                search_args->query = query;
-                search_args->results = &results;
-                search_args->ssl_ctx = ssl_ctx;
-
-                LoadThumbnailArgs* thumbnail_args = &targs->thumbnail_args;
-                thumbnail_args->loader = &thumbnail_loader;
-                thumbnail_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
-                thumbnail_args->ssl_ctx = ssl_ctx;
-
-                if (!thread_task_launch(&thread_context.task_queue, targs, get_channel_metadata)) {
-                    fprintf(stderr, "failed to launch get_channel_metadata task\n");
-                    free(targs); targs = NULL;
+                        if (!thread_task_launch(&thread_context.task_queue, targs, get_channel_metadata)) {
+                            fprintf(stderr, "failed to launch get_channel_metadata task\n");
+                            free(targs); targs = NULL;
+                        }
+                    }
+                    break;
                 }
+                case QUERY_TYPE_VIEW_LIKED_VIDEOS:
+                case QUERY_TYPE_VIEW_WATCH_HISTORY:
+                case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS: {
+                    cJSON* data = query_type_to_user_data(&user_data, query.type);
+                    if (data) 
+                        handle_view_user_data(&results, &client_context.token_mutex, &client_context.continuation_token, data);
+                    break;
+                }
+                default:
+                    fprintf(stderr, "QueryType %d is invalid\n", query.type);
             }
         }
 
@@ -2847,7 +2862,7 @@ int main()
                 };
 
                 if (GuiButton(trending_button_bounds, trending_button_text)) {
-                    update_flags.load_query_results = true;
+                    update_flags.is_task_set = true;
                     query.attr = QUERY_ATTR_REPLACE;
                     query.type = QUERY_TYPE_VIEW_TRENDING;
                 }
@@ -2871,7 +2886,7 @@ int main()
 
                 if ((GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) && 
                    (trim_whitespace(query.string) > 0)) {
-                    update_flags.load_query_results = true;
+                    update_flags.is_task_set = true;
                     query.attr = QUERY_ATTR_REPLACE;
                     query.type = QUERY_TYPE_USER_INPUT;
                 }
@@ -2926,7 +2941,7 @@ int main()
                     GuiSetState(STATE_DISABLED);
             
                 if (GuiButton(load_more_button_bounds, "<< LOAD MORE >> ")) {
-                    update_flags.load_query_results = true;
+                    update_flags.is_task_set = true;
                     query.type = last_query_type;
                     query.attr = QUERY_ATTR_APPEND;
                 }
@@ -3003,30 +3018,25 @@ int main()
                     if ((CheckCollisionPointRec(GetMousePosition(), container)) && 
                         (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) &&
                         (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
-                        query.attr = QUERY_ATTR_REPLACE;
+                        update_flags.is_task_set = true;
 
+                        query.attr = QUERY_ATTR_REPLACE;
                         strncpy(query.focused_id, result_data->id, sizeof(query.focused_id) - 1);
-                        query.focused_id[sizeof(query.focused_id) - 1] = '\0';
 
                         switch (search_result->type) {
                             case SEARCH_RESULT_TYPE_LIVE:
                             case SEARCH_RESULT_TYPE_SHORT:
                             case SEARCH_RESULT_TYPE_VIDEO:
                                 if (!result_is_highlighted) {
-                                    update_flags.load_video_metadata = true;
                                     query.type = QUERY_TYPE_VIEW_VIDEO;
                                     memcpy(&highlighted_video.info, search_result, sizeof(SearchResult));
                                 }
                                 break;
                             case SEARCH_RESULT_TYPE_PLAYLIST:
-                                update_flags.load_query_results = true;
                                 query.type = QUERY_TYPE_VIEW_PLAYLIST;
                                 break;
                             case SEARCH_RESULT_TYPE_CHANNEL:
-                                update_flags.load_query_results = true;
                                 query.type = QUERY_TYPE_VIEW_CHANNEL;
-                                memcpy(&highlighted_channel.info, search_result, sizeof(SearchResult));
-                                highlighted_channel.is_subscribed = is_subbed_to_channel(user_data.subscribed_channels, highlighted_channel.info.base.id);
                                 break;
                             case SEARCH_RESULT_TYPE_ANY:
                             case SEARCH_RESULT_TYPE_UNDF:
