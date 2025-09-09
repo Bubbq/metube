@@ -1,8 +1,12 @@
+#include "include/raylib.h"
 #include "include/utils.h"
 #include "include/json_utils.h"
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
+#include <math.h>
+#include <pthread.h>
+#include <stddef.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -1648,15 +1652,13 @@ void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Qu
     pthread_mutex_lock(&dest->mutex);
 
     const char* results_array_path = get_results_list_path(query->type, query->attr); 
-    if (!results_array_path)
-        return;
-
     const cJSON* results_array = cjson_pointer_get(youtube_json, results_array_path);
     if (!cJSON_IsArray(results_array)) {
         fprintf(stderr, "get_youtube_json: the path \"%s\" did not give a valid array\n", results_array_path);
         char error_filename[32] = {0};
         snprintf(error_filename, sizeof(error_filename), "%s_(%s).json", query_type_to_text(query->type), query_attr_to_text(query->attr));
         write_json_to_file(youtube_json, error_filename);
+        pthread_mutex_unlock(&dest->mutex);
         return;
     }
 
@@ -1954,6 +1956,40 @@ typedef struct
     bool word_wrap;
 } Ui;
 
+Rectangle get_padded_rectangle(const float padding, const Rectangle rect)
+{
+    return (Rectangle) { rect.x + padding, rect.y + padding, rect.width - (padding * 2), rect.height - (padding * 2) };
+}
+
+void layout_dynamic_bar(const Rectangle container, const float padding, const float min_width, Rectangle* recs, const size_t nrecs)
+{
+    if (!recs || (nrecs == 0))
+        return;
+
+    // padd the rectangle
+    const Rectangle padded_container = get_padded_rectangle(padding, container);
+
+    // find the width availible for the widgets
+    const float availible_width = padded_container.width - (padding * (nrecs - 1));
+
+    // get dimensions of the widget
+    const float widget_width = fmaxf(availible_width / nrecs, min_width);
+    const float widget_height = padded_container.height;
+    
+    float widget_x = padded_container.x;
+    const float widget_y = padded_container.y;
+    
+    for (size_t i = 0; i < nrecs; i++, widget_x += widget_width + padding) {
+        // assign the dimensions of the rectangle
+        recs[i] = (Rectangle) {
+            .x = widget_x,
+            .y = widget_y,
+            .width = widget_width,
+            .height = widget_height
+        };
+    }
+}
+
 void DrawTextBoxedSelectable(Ui ui, const char *text, Rectangle rec, float fontSize, Color tint, int selectStart, int selectLength, Color selectTint, Color selectBackTint)
 {
     int length = TextLength(text);  // Total length in bytes of the text, scanned by codepoints in loop
@@ -2086,11 +2122,6 @@ void DrawTextBoxedSelectable(Ui ui, const char *text, Rectangle rec, float fontS
 void DrawTextBoxed(const char *text, Rectangle rec, Ui ui, float fontSize, Color tint)
 {
     DrawTextBoxedSelectable(ui, text, rec, fontSize, tint, 0, 0, WHITE, WHITE);
-}
-
-Rectangle get_padded_rectangle(const float padding, const Rectangle rect)
-{
-    return (Rectangle) { rect.x + padding, rect.y + padding, rect.width - (padding * 2), rect.height - (padding * 2) };
 }
 
 void draw_thumbnail_subtext(const Rectangle container, Ui ui, const Color text_color, const int font_size, const char* text)
@@ -2451,26 +2482,19 @@ void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* su
 
 void draw_video_management_buttons(const Rectangle container, Query* query, HighlightedVideo* selected_video, cJSON* liked_video_data, UpdateFlags* update_flags, ThreadContext* thread_context, UserData* user_data)
 {
-    const int padding = 5;
-
-    const int nbuttons = 4;
-    const int min_button_width = 5;
-    const float button_width = (container.width - (padding * (nbuttons - 1))) / nbuttons; 
-
-    const Rectangle play_video_button_bounds = {
-        .x = container.x,
-        .y = container.y,
-        .width = fmax(min_button_width, button_width),
-        .height = container.height,
-    };
-
     const ResultData* result_data = &selected_video->info.base;
     const Video* video = &selected_video->info.data.video;
 
-    if (!valid_string(result_data->id) || update_flags->is_playing_video) 
-        GuiSetState(STATE_DISABLED);
+    const int padding = 5;
+    const size_t nbuttons = 4;
+    const int min_button_width = 10;
+    const bool is_button_active = valid_string(result_data->id);
 
-    if (GuiButton(play_video_button_bounds, "Play Video")) {
+    Rectangle button_areas[nbuttons];
+    layout_dynamic_bar(container, padding, min_button_width, button_areas, nbuttons);
+
+    // TODO: launch task in update section in main loop render
+    if (GuiButton(button_areas[0], "Play Video") && is_button_active && !update_flags->is_playing_video) {
         PlayVideoArgs* targs = malloc(sizeof(PlayVideoArgs));
         if (targs) {
             targs->playing_video = &update_flags->is_playing_video;
@@ -2480,96 +2504,53 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
         }
     } 
 
-    if (update_flags->is_playing_video)
-        GuiSetState(STATE_NORMAL);
-
-    const Rectangle like_video_button_bounds = {
-        .x = play_video_button_bounds.x + play_video_button_bounds.width + padding,
-        .y = padding,
-        .width = fmax(min_button_width, button_width),
-        .height = container.height,
-    };
-
-    if (GuiButton(like_video_button_bounds, "Like Video")) {
+    if (GuiButton(button_areas[1], "Like") && is_button_active) 
         add_user_data(liked_video_data, &selected_video->info);
-    }
 
-    const Rectangle related_videos_button_bounds = {
-        .x = like_video_button_bounds.x + like_video_button_bounds.width + padding,
-        .y = container.y,
-        .width = fmax(min_button_width, button_width),
-        .height = container.height,
-    };
-
-    if (GuiButton(related_videos_button_bounds, "Related Videos")) {
+    if (GuiButton(button_areas[2], "Related Videos") && is_button_active) {
         update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_RELATED;
+
         strncpy(query->focused_id, result_data->id, sizeof(query->focused_id) - 1);
         query->focused_id[sizeof(query->focused_id) - 1] = '\0';
     }
     
-    const Rectangle users_videos_button_bounds = {
-        .x = related_videos_button_bounds.x + related_videos_button_bounds.width + padding,
-        .y = container.y,
-        .width = fmax(min_button_width, button_width),
-        .height = container.height,
-    };
-
-    if (GuiButton(users_videos_button_bounds, "User's Videos")) {
-       update_flags->is_task_set = true;
+    if (GuiButton(button_areas[3], "View Channel") && is_button_active) {
+        update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_CHANNEL;
 
         strncpy(query->focused_id, video->authorId, sizeof(query->focused_id) - 1);
         query->focused_id[sizeof(query->focused_id) - 1] = '\0';
     }
-
-    GuiSetState(STATE_NORMAL);
 }
 
 void draw_user_data_buttons(const Rectangle container, Query* query, UpdateFlags* update_flags)
 {
+    if (!query || !update_flags)
+        return;
+
     const int padding = 5;
-    const int nbuttons = 3;
-    
-    const int min_button_width = 5;
-    const float button_width = (container.width - (padding * (nbuttons - 1))) / nbuttons;
+    const size_t nbuttons = 3;
+    const int min_button_width = 10;
 
-    const Rectangle subscriptions_button_bounds = {
-        .x = container.x,
-        .y = container.y,
-        .width = fmax(min_button_width, button_width),
-        .height = container.height,
-    };
+    Rectangle button_areas[nbuttons];
+    layout_dynamic_bar(container, padding, min_button_width, button_areas, nbuttons);
 
-    if (GuiButton(subscriptions_button_bounds, "Subscribed Channels")) {
+    if (GuiButton(button_areas[0], "Subscribed Channels")) {
         update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS;
     }
 
-    const Rectangle liked_videos_button_bounds = {
-        .x = subscriptions_button_bounds.x + subscriptions_button_bounds.width + padding,
-        .y = container.y,
-        .width = fmax(min_button_width, button_width),
-        .height = container.height,
-    };
-
-    if (GuiButton(liked_videos_button_bounds, "Liked Videos")) {
+    if (GuiButton(button_areas[1], "Liked Videos")) {
         update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_LIKED_VIDEOS;
     }
     
-    const Rectangle watch_history_button_bounds = {
-        .x = liked_videos_button_bounds.x + liked_videos_button_bounds.width + padding,
-        .y = container.y,
-        .width = fmax(min_button_width, button_width),
-        .height = container.height,
-    };
-
-    if (GuiButton(watch_history_button_bounds, "Watch History")) {
+    if (GuiButton(button_areas[2], "Watch History")) {
         update_flags->is_task_set = true;
         query->attr = QUERY_ATTR_REPLACE;
         query->type = QUERY_TYPE_VIEW_WATCH_HISTORY;
@@ -2693,7 +2674,19 @@ cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_
 // ssl connection times out after 30-60s 
 
 // remove info from HighlightedVideo struct? 
-    // only really need the video id 
+    // only really need the video and author id 
+
+// TODO: revamp the right section of the application
+    // rewrite the video desciption output
+// TODO: revamp left side of the applcation
+    // have base rectnagle containing the search bar w buttons, results window, and the highlighted channel area
+
+// TODO: be able to exit the player when video is playing or force the user to close the video first
+// TODO: struct containing all paths for videos, channels, and playlists see grok chat: 'JSON Parsing:...'
+// TODO: handle mixes, is currently treated as a playlist
+// BUGS
+    // error header on some thumbnail get requests
+    // trending path needs to be updated/removed
 
 int main()
 {
@@ -2983,7 +2976,7 @@ int main()
                 for (Node* node = results.head; node; node = node->next, i++, container_y += container_height) {
                     const Rectangle container = { 
                         .x = result_window_bounds.x, 
-                        .y = container_y + result_scrollbar.y, 
+                        .y = (result_window_bounds.y + (container_height * i)) + result_scrollbar.y, 
                         .width = result_window_bounds.width - (vertical_scrollbar_visible ? SCROLLBAR_WIDTH: 0),
                         .height = container_height 
                     };
@@ -3032,15 +3025,9 @@ int main()
                                     memcpy(&highlighted_video.info, search_result, sizeof(SearchResult));
                                 }
                                 break;
-                            case SEARCH_RESULT_TYPE_PLAYLIST:
-                                query.type = QUERY_TYPE_VIEW_PLAYLIST;
-                                break;
-                            case SEARCH_RESULT_TYPE_CHANNEL:
-                                query.type = QUERY_TYPE_VIEW_CHANNEL;
-                                break;
-                            case SEARCH_RESULT_TYPE_ANY:
-                            case SEARCH_RESULT_TYPE_UNDF:
-                            break;
+                            case SEARCH_RESULT_TYPE_PLAYLIST: query.type = QUERY_TYPE_VIEW_PLAYLIST; break;
+                            case SEARCH_RESULT_TYPE_CHANNEL:  query.type = QUERY_TYPE_VIEW_CHANNEL;  break;
+                            default: break;
                         }
                     }
                 }
@@ -3050,35 +3037,44 @@ int main()
                 EndScissorMode(); 
             }
 
-            const float button_bar_height = 25.0f;
+            // right half of app
+            {
+                const Rectangle area = {
+                    .x = search_bar_bounds.x + search_bar_bounds.width + ui.padding,
+                    .y = 0,
+                    .width = GetScreenWidth() - area.x,
+                    .height = GetScreenHeight()
+                };
 
-            const Rectangle video_management_button_bar = {
-                .x = search_bar_bounds.x + search_bar_bounds.width + (ui.padding * 2),
-                .y = ui.padding,
-                .width = GetScreenWidth() - video_management_button_bar.x - ui.padding,
-                .height = button_bar_height, 
-            };
+                const float button_bar_height = 35;
 
-            draw_video_management_buttons(video_management_button_bar, &query, &highlighted_video, user_data.liked_videos, &update_flags, &thread_context, &user_data);
+                const Rectangle video_management_button_bar = {
+                    .x = area.x,
+                    .y = 0,
+                    .width = GetScreenWidth() - video_management_button_bar.x,
+                    .height = button_bar_height, 
+                };
 
-            const Rectangle user_data_button_bar = {
-                .x = search_bar_bounds.x + search_bar_bounds.width + (ui.padding * 2),
-                .y = GetScreenHeight() - button_bar_height - ui.padding,
-                .width = GetScreenWidth() - user_data_button_bar.x - ui.padding,
-                .height = button_bar_height,
-            };
+                const Rectangle user_data_button_bar = {
+                    .x = area.x,
+                    .y = area.y + area.height - button_bar_height,
+                    .width = GetScreenWidth() - user_data_button_bar.x,
+                    .height = button_bar_height,
+                };
 
-            draw_user_data_buttons(user_data_button_bar, &query, &update_flags);
-            
-            const Rectangle focused_video_bounds = {
-                .x = search_bar_bounds.x + search_bar_bounds.width + (ui.padding * 2),
-                .y = video_management_button_bar.y + video_management_button_bar.height + ui.padding,
-                .width = GetScreenWidth() - focused_video_bounds.x - ui.padding,
-                .height = GetScreenHeight() - focused_video_bounds.y - user_data_button_bar.height - (ui.padding * 2),
-            };
+                // TODO: remove padding dependency
+                const Rectangle focused_video_bounds = {
+                    .x = area.x + ui.padding,
+                    .y = video_management_button_bar.y + video_management_button_bar.height,
+                    .width = area.width - (ui.padding * 2),
+                    .height = GetScreenHeight() - (button_bar_height * 2),
+                };
 
-            draw_text_scrollable(focused_video_bounds, false, ui, &description_scrollbar, highlighted_video.description);
-            
+                draw_video_management_buttons(video_management_button_bar, &query, &highlighted_video, user_data.liked_videos, &update_flags, &thread_context, &user_data);
+                draw_user_data_buttons(user_data_button_bar, &query, &update_flags);
+                draw_text_scrollable(focused_video_bounds, false, ui, &description_scrollbar, highlighted_video.description);
+            }
+
         EndDrawing();
     }
 
