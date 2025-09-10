@@ -4,4 +4,3 @@ all:
 clean:
 	rm metube
 	rm *.json
-	rm *.txt

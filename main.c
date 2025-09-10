@@ -4,9 +4,7 @@
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
-#include <math.h>
-#include <pthread.h>
-#include <stddef.h>
+#include <stdio.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -238,7 +236,6 @@ typedef enum
     QUERY_TYPE_VIEW_RELATED,  
     QUERY_TYPE_VIEW_CHANNEL,
     QUERY_TYPE_VIEW_PLAYLIST,
-    QUERY_TYPE_VIEW_TRENDING, 
     QUERY_TYPE_VIEW_WATCH_HISTORY,
     QUERY_TYPE_VIEW_LIKED_VIDEOS,
     QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS,
@@ -255,7 +252,6 @@ const char* query_type_to_endpoint(const QueryType query_type)
             return "next";
         case QUERY_TYPE_VIEW_CHANNEL:
         case QUERY_TYPE_VIEW_PLAYLIST:
-        case QUERY_TYPE_VIEW_TRENDING: 
             return "browse";
         default:    
             fprintf(stderr, "query_type_to_endpoint: QueryType %d is invalid\n", query_type);
@@ -270,8 +266,6 @@ const char* query_type_to_text(const QueryType query_type)
             return "user_input";
         case QUERY_TYPE_VIEW_RELATED: 
             return "view_related";
-        case QUERY_TYPE_VIEW_TRENDING: 
-            return "view_trending";
         case QUERY_TYPE_VIEW_VIDEO: 
             return "view_video";
         case QUERY_TYPE_VIEW_CHANNEL: 
@@ -697,9 +691,6 @@ const char* get_results_list_path(const QueryType query_type, const QueryAttribu
                 return ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents";
             if (query_attr == QUERY_ATTR_APPEND) 
                 return ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems";
-        case QUERY_TYPE_VIEW_TRENDING:             
-            return ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[2].itemSectionRenderer.contents[0].shelfRenderer.content.expandedShelfContentsRenderer.items";
-       
         default:
             fprintf(stderr, "get_results_list_path: QueryType %d is not supported\n", query_type);
             return NULL;
@@ -822,13 +813,6 @@ cJSON* configure_base_payload()
     return root; 
 }
 
-bool add_view_trending_videos_payload(cJSON* root)
-{
-    if (root == NULL) return false;
-
-    return cJSON_AddStringToObject(root, "browseId", YT_API_TRENDING_BROWSE_ID);
-}
-
 bool add_view_related_videos_payload(cJSON* root, const char* video_id)
 {
     if ((root == NULL) || (valid_string(video_id) == false)) return false;
@@ -915,7 +899,6 @@ cJSON* configure_post_payload(const Query* query, const char* continuation_token
             case QUERY_TYPE_USER_INPUT:    success = add_view_user_input_payload(root, query->string, query->sort, query->media); break;
             case QUERY_TYPE_VIEW_CHANNEL:  success = add_view_channel_videos_payload(root, query->focused_id);  break;
             case QUERY_TYPE_VIEW_PLAYLIST: success = add_view_playlist_videos_payload(root, query->focused_id); break;
-            case QUERY_TYPE_VIEW_TRENDING: success = add_view_trending_videos_payload(root); break;
             default:    
                 fprintf(stderr, "configure_post_payload: QueryType %d does not have a payload\n", query->type);
         }
@@ -1946,6 +1929,8 @@ void init_app()
 
 // ui stuff
 
+#define MIN_BUTTON_WIDTH 10
+
 typedef struct
 {
     Font font;
@@ -2487,11 +2472,10 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
 
     const int padding = 5;
     const size_t nbuttons = 4;
-    const int min_button_width = 10;
     const bool is_button_active = valid_string(result_data->id);
 
     Rectangle button_areas[nbuttons];
-    layout_dynamic_bar(container, padding, min_button_width, button_areas, nbuttons);
+    layout_dynamic_bar(container, padding, MIN_BUTTON_WIDTH, button_areas, nbuttons);
 
     // TODO: launch task in update section in main loop render
     if (GuiButton(button_areas[0], "Play Video") && is_button_active && !update_flags->is_playing_video) {
@@ -2533,10 +2517,9 @@ void draw_user_data_buttons(const Rectangle container, Query* query, UpdateFlags
 
     const int padding = 5;
     const size_t nbuttons = 3;
-    const int min_button_width = 10;
 
     Rectangle button_areas[nbuttons];
-    layout_dynamic_bar(container, padding, min_button_width, button_areas, nbuttons);
+    layout_dynamic_bar(container, padding, MIN_BUTTON_WIDTH, button_areas, nbuttons);
 
     if (GuiButton(button_areas[0], "Subscribed Channels")) {
         update_flags->is_task_set = true;
@@ -2579,63 +2562,6 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-void draw_search_bar(const Rectangle container, const Ui* ui, Query* query, UpdateFlags* update_flags, bool* text_box_focused, bool* show_filter_window)
-{
-    const int button_w = 25;
-    const int widget_h = 25;
-
-    const char* trending_button_text = "T";
-
-    const Rectangle trending_button_bounds = {
-        .x = ui->padding,
-        .y = ui->padding,
-        .width = button_w,
-        .height = widget_h,
-    };
-
-    if (GuiButton(trending_button_bounds, trending_button_text)) {
-        update_flags->is_task_set = true;
-        query->attr = QUERY_ATTR_REPLACE;
-        query->type = QUERY_TYPE_VIEW_TRENDING;
-    }
-
-    const Rectangle text_bar_bounds = {
-        .x = trending_button_bounds.x + trending_button_bounds.width + ui->padding, 
-        .y = ui->padding, 
-        .width = (container.width * 0.75f), 
-        .height = widget_h, 
-    };
-
-    if (GuiTextBox(text_bar_bounds, query->string, sizeof(query->string), (*text_box_focused))) 
-        (*text_box_focused) = !(*text_box_focused);
-
-    const Rectangle search_button_bounds = {
-        .x = text_bar_bounds.x + text_bar_bounds.width + ui->padding, 
-        .y = ui->padding, 
-        .width = button_w, 
-        .height = widget_h
-    };
-
-    if ((GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) && 
-       (trim_whitespace(query->string) > 0)) {
-        update_flags->is_task_set = true;
-        query->attr = QUERY_ATTR_REPLACE;
-        query->type = QUERY_TYPE_USER_INPUT;
-    }
-
-    const char* filter_button_text = "Fil";
-
-    const Rectangle filter_button_bounds = {
-        .x = search_button_bounds.x + search_button_bounds.width + ui->padding,
-        .y = ui->padding,
-        .width = button_w,
-        .height = widget_h,
-    };
-
-    if (GuiButton(filter_button_bounds, filter_button_text)) 
-        (*show_filter_window) = !(*show_filter_window);
-}
-
 void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** continuation_token, cJSON* user_data)
 {
     if (!results || !token_mutex || !continuation_token || !user_data)
@@ -2676,8 +2602,6 @@ cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_
 // remove info from HighlightedVideo struct? 
     // only really need the video and author id 
 
-// TODO: revamp the right section of the application
-    // rewrite the video desciption output
 // TODO: revamp left side of the applcation
     // have base rectnagle containing the search bar w buttons, results window, and the highlighted channel area
 
@@ -2686,7 +2610,9 @@ cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_
 // TODO: handle mixes, is currently treated as a playlist
 // BUGS
     // error header on some thumbnail get requests
-    // trending path needs to be updated/removed
+    // trending path needs to be updated
+    // no video descripton outputted
+        // youtube thinks im a bot
 
 int main()
 {
@@ -2779,7 +2705,6 @@ int main()
             switch (query.type) {
                 case QUERY_TYPE_USER_INPUT:
                 case QUERY_TYPE_VIEW_RELATED:
-                case QUERY_TYPE_VIEW_TRENDING:
                 case QUERY_TYPE_VIEW_PLAYLIST:
                     last_query_type = query.type;
                     queue_search_task(ssl_ctx, &client_context, &thread_context.task_queue, &results, query);
@@ -2842,58 +2767,34 @@ int main()
 
             // search bar elements
             {
-                const int button_w = 25;
-                const int widget_h = 25;
-
-                const char* trending_button_text = "T";
-
-                const Rectangle trending_button_bounds = {
-                    .x = search_bar_bounds.x + ui.padding,
-                    .y = search_bar_bounds.y + ui.padding,
-                    .width = button_w,
-                    .height = widget_h,
-                };
-
-                if (GuiButton(trending_button_bounds, trending_button_text)) {
-                    update_flags.is_task_set = true;
-                    query.attr = QUERY_ATTR_REPLACE;
-                    query.type = QUERY_TYPE_VIEW_TRENDING;
-                }
-
                 const Rectangle text_bar_bounds = {
-                    .x = trending_button_bounds.x + trending_button_bounds.width + ui.padding, 
+                    .x = search_bar_bounds.x + ui.padding, 
                     .y = search_bar_bounds.y + ui.padding, 
                     .width = 285, 
-                    .height = widget_h, 
+                    .height = search_bar_bounds.height - (ui.padding * 2) 
                 };
 
                 if (GuiTextBox(text_bar_bounds, query.string, sizeof(query.string), text_box_focused)) 
                     text_box_focused = !text_box_focused;
-
-                 const Rectangle search_button_bounds = {
-                    .x = text_bar_bounds.x + text_bar_bounds.width + ui.padding, 
-                    .y = search_bar_bounds.y + ui.padding, 
-                    .width = button_w, 
-                    .height = widget_h
+                
+                const Rectangle button_container = {
+                    .x = text_bar_bounds.x + text_bar_bounds.width,
+                    .y = search_bar_bounds.y,
+                    .width = search_bar_bounds.width - text_bar_bounds.width,
+                    .height = search_bar_bounds.height
                 };
 
-                if ((GuiButton(search_button_bounds, "S") || IsKeyPressed(KEY_ENTER)) && 
-                   (trim_whitespace(query.string) > 0)) {
+                const size_t nbuttons = 2;
+                Rectangle button_areas[nbuttons];
+                layout_dynamic_bar(button_container, ui.padding, MIN_BUTTON_WIDTH, button_areas, nbuttons);
+
+                if ((GuiButton(button_areas[0], "S") || IsKeyPressed(KEY_ENTER)) && (trim_whitespace(query.string) > 0)) {
                     update_flags.is_task_set = true;
                     query.attr = QUERY_ATTR_REPLACE;
                     query.type = QUERY_TYPE_USER_INPUT;
                 }
 
-                const char* filter_button_text = "Fil";
-
-                const Rectangle filter_button_bounds = {
-                    .x = search_button_bounds.x + search_button_bounds.width + ui.padding,
-                    .y = search_bar_bounds.y + ui.padding,
-                    .width = button_w,
-                    .height = widget_h,
-                };
-
-                if (GuiButton(filter_button_bounds, filter_button_text)) 
+                if (GuiButton(button_areas[1], "Fil")) 
                     show_filter_window = !show_filter_window;
 
                 const Rectangle filter_window_bounds = {
@@ -2902,7 +2803,7 @@ int main()
                     .width = search_bar_bounds.width - ui.padding,
                     .height = filter_window_height,
                 };
-            
+
                 if (show_filter_window)
                     draw_filter_window(filter_window_bounds, ui, &query);
             }
@@ -2942,15 +2843,15 @@ int main()
                 GuiSetState(STATE_NORMAL);
             }
 
-            const Rectangle result_window_bounds = {
-                .x = ui.padding,
-                .y = search_bar_bounds.y + search_bar_bounds.height + (show_filter_window ? (filter_window_height + (ui.padding * 2)) : 0),
-                .width = search_bar_bounds.width - ui.padding,
-                .height = GetScreenHeight() - result_window_bounds.y - focused_channel_height - load_more_button_height - (ui.padding * 3),
-            };
-
             // search window elements
             {
+                const Rectangle result_window_bounds = {
+                    .x = ui.padding,
+                    .y = search_bar_bounds.y + search_bar_bounds.height + (show_filter_window ? (filter_window_height + (ui.padding * 2)) : 0),
+                    .width = search_bar_bounds.width - ui.padding,
+                    .height = GetScreenHeight() - result_window_bounds.y - focused_channel_height - load_more_button_height - (ui.padding * 3),
+                };
+
                 const int container_height = 80;
            
                 const Rectangle content_area = {
@@ -3062,7 +2963,6 @@ int main()
                     .height = button_bar_height,
                 };
 
-                // TODO: remove padding dependency
                 const Rectangle focused_video_bounds = {
                     .x = area.x + ui.padding,
                     .y = video_management_button_bar.y + video_management_button_bar.height,
