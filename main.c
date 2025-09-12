@@ -1,115 +1,12 @@
-#include "include/raylib.h"
+#include "include/query.h"
 #include "include/utils.h"
 #include "include/json_utils.h"
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
-#include <stdio.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
-
-typedef enum
-{
-    SEARCH_RESULT_TYPE_LIVE,
-    SEARCH_RESULT_TYPE_SHORT,
-    SEARCH_RESULT_TYPE_VIDEO,
-    SEARCH_RESULT_TYPE_CHANNEL,
-    SEARCH_RESULT_TYPE_PLAYLIST,
-    SEARCH_RESULT_TYPE_ANY,
-    SEARCH_RESULT_TYPE_UNDF,
-} SearchResultType;
-
-const char* search_result_type_to_search_param(SearchResultType search_result_type)
-{
-    switch (search_result_type) {
-        case SEARCH_RESULT_TYPE_SHORT:
-        case SEARCH_RESULT_TYPE_VIDEO: 
-            return "SAhAB";
-        case SEARCH_RESULT_TYPE_CHANNEL: 
-            return "SAhAC";
-        case SEARCH_RESULT_TYPE_PLAYLIST: 
-            return "SAhAD";
-        case SEARCH_RESULT_TYPE_LIVE: 
-            return "SBBABQAE";
-        case SEARCH_RESULT_TYPE_ANY: 
-            return "%253D";
-        default:
-            fprintf(stderr, "search_result_type_to_search_param: SearchResultType %d is invalid\n", search_result_type);
-            return NULL;
-    }
-}
-
-const char* search_result_type_to_thumbnail_host(const SearchResultType search_result_type)
-{
-    switch (search_result_type) {
-        case SEARCH_RESULT_TYPE_LIVE:
-        case SEARCH_RESULT_TYPE_SHORT:
-        case SEARCH_RESULT_TYPE_VIDEO: 
-        case SEARCH_RESULT_TYPE_PLAYLIST: 
-            return "i.ytimg.com";
-        case SEARCH_RESULT_TYPE_CHANNEL: 
-            return "yt3.ggpht.com";
-        default:
-            fprintf(stderr, "search_result_type_to_thumbnail_host: SearchResultType %d is invalid\n", search_result_type);
-            return NULL;
-    }
-}
-
-const char* search_result_type_to_text(const SearchResultType search_result_type)
-{
-    switch (search_result_type) {
-        case SEARCH_RESULT_TYPE_ANY: 
-            return "ANY";
-        case SEARCH_RESULT_TYPE_UNDF: 
-            return "UNDF";
-        case SEARCH_RESULT_TYPE_LIVE: 
-            return "LIVE";
-        case SEARCH_RESULT_TYPE_SHORT: 
-            return "SHORT";
-        case SEARCH_RESULT_TYPE_VIDEO: 
-            return "VIDEO";
-        case SEARCH_RESULT_TYPE_CHANNEL: 
-            return "CHANNEL";
-        case SEARCH_RESULT_TYPE_PLAYLIST: 
-            return "PLAYLIST";
-        default:
-            fprintf(stderr, "search_result_type_to_text: SearchResultType %d is invalid\n", search_result_type);
-            return NULL;
-    }
-}
-
-const float search_result_type_to_thumbnail_width(const SearchResultType search_result_type)
-{
-    switch (search_result_type) {
-        case SEARCH_RESULT_TYPE_LIVE:
-        case SEARCH_RESULT_TYPE_SHORT:
-        case SEARCH_RESULT_TYPE_VIDEO:
-        case SEARCH_RESULT_TYPE_PLAYLIST: 
-            return 150.0f;
-        case SEARCH_RESULT_TYPE_CHANNEL: 
-            return 75.0f;
-        default:
-            fprintf(stderr, "search_result_type_to_thumbnail_width: SearchResultType %d is invalid\n", search_result_type);
-            return 0;
-    }
-}
-
-const float search_result_type_to_thumbnail_height(const SearchResultType search_result_type)
-{
-    switch (search_result_type) {
-        case SEARCH_RESULT_TYPE_LIVE:
-        case SEARCH_RESULT_TYPE_SHORT:
-        case SEARCH_RESULT_TYPE_VIDEO:
-        case SEARCH_RESULT_TYPE_PLAYLIST: 
-            return 80.0f;
-        case SEARCH_RESULT_TYPE_CHANNEL: 
-            return 70.0f;
-        default:
-            fprintf(stderr, "search_result_type_to_thumbnail_height: SearchResultType %d is invalid\n", search_result_type);
-            return 0;
-    }
-}
 
 typedef struct
 {
@@ -167,127 +64,6 @@ void better_search_result_free(void* better_search_result)
         free(better_search_result); better_search_result = NULL;
     }
 }
-
-typedef enum 
-{
-    SORT_TYPE_RATING,
-    SORT_TYPE_RELEVANCE,
-    SORT_TYPE_VIEW_COUNT,
-    SORT_TYPE_UPLOAD_DATE,
-} SortType; 
-
-const char* sort_type_to_search_param(const SortType sort_type)
-{
-    switch (sort_type) {
-        case SORT_TYPE_RATING: 
-            return "CAE";
-        case SORT_TYPE_RELEVANCE: 
-            return "CAA";
-        case SORT_TYPE_VIEW_COUNT: 
-            return "CAM";
-        case SORT_TYPE_UPLOAD_DATE: 
-            return "CAI";
-        default:
-            fprintf(stderr, "sort_type_to_search_param: SortType %d is invalid\n", sort_type);
-            return NULL;
-    }
-}
-
-const char* sort_type_to_text(const SortType sort_type)
-{
-    switch (sort_type) {
-        case SORT_TYPE_RATING: 
-            return "RATING";
-        case SORT_TYPE_VIEW_COUNT: 
-            return "VIEWS"; 
-        case SORT_TYPE_RELEVANCE: 
-            return "RELEVENCE";
-        case SORT_TYPE_UPLOAD_DATE: 
-            return "UPLOAD DATE";
-        default:
-            fprintf(stderr, "sort_type_to_text: SortType %d is invalid\n", sort_type);
-            return NULL;
-    }
-}
-
-typedef enum
-{
-    QUERY_ATTR_REPLACE,
-    QUERY_ATTR_APPEND,
-} QueryAttribute;
-
-const char* query_attr_to_text(const QueryAttribute query_attr)
-{
-    switch (query_attr) {
-        case QUERY_ATTR_REPLACE: 
-            return "replace";
-        case QUERY_ATTR_APPEND: 
-            return "append";
-        default:
-            fprintf(stderr, "query_attr_to_text: QueryAttribute %d is invalid\n", query_attr);
-            return NULL;
-    }
-}
-
-typedef enum
-{
-    QUERY_TYPE_USER_INPUT,  
-    QUERY_TYPE_VIEW_VIDEO,
-    QUERY_TYPE_VIEW_RELATED,  
-    QUERY_TYPE_VIEW_CHANNEL,
-    QUERY_TYPE_VIEW_PLAYLIST,
-    QUERY_TYPE_VIEW_WATCH_HISTORY,
-    QUERY_TYPE_VIEW_LIKED_VIDEOS,
-    QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS,
-} QueryType;
-
-const char* query_type_to_endpoint(const QueryType query_type)
-{
-    switch (query_type) {
-        case QUERY_TYPE_USER_INPUT: 
-            return "search";
-        case QUERY_TYPE_VIEW_VIDEO: 
-            return "player";
-        case QUERY_TYPE_VIEW_RELATED: 
-            return "next";
-        case QUERY_TYPE_VIEW_CHANNEL:
-        case QUERY_TYPE_VIEW_PLAYLIST:
-            return "browse";
-        default:    
-            fprintf(stderr, "query_type_to_endpoint: QueryType %d is invalid\n", query_type);
-            return NULL;
-    }
-}
-
-const char* query_type_to_text(const QueryType query_type)
-{
-    switch (query_type) {
-        case QUERY_TYPE_USER_INPUT: 
-            return "user_input";
-        case QUERY_TYPE_VIEW_RELATED: 
-            return "view_related";
-        case QUERY_TYPE_VIEW_VIDEO: 
-            return "view_video";
-        case QUERY_TYPE_VIEW_CHANNEL: 
-            return "view_channel";
-        case QUERY_TYPE_VIEW_PLAYLIST: 
-            return "view_playlist";
-        default:
-            fprintf(stderr, "query_type_to_text: QueryType %d is invalid\n", query_type);
-            return NULL;
-    }
-}
-
-typedef struct
-{
-    char string[256];        
-    char focused_id[64];     
-    SortType sort;
-    QueryType type;
-    SearchResultType media;          
-    QueryAttribute attr;    
-    bool allow_youtube_shorts; 
-} Query;
 
 // youtube parsing
 
@@ -855,10 +631,14 @@ bool add_view_user_input_payload(cJSON* root, const char* user_input, const Sort
     if ((root == NULL) || (valid_string(user_input) == false)) return false;
 
     const char* sort_param = sort_type_to_search_param(sort_type);
-    const char* media_param = search_result_type_to_search_param(search_result_type);
+    if (!sort_param) {
+        fprintf(stderr, "add_view_user_input_payload: SortType %d is invalid\n", sort_type);
+        return false;
+    }
 
-    if ((sort_param == NULL) || (media_param == NULL)) {
-        fprintf(stderr, "add_view_user_input_payload: SortType (%d) or SearchResultType (%d) returned invalid search param\n", sort_type, search_result_type);
+    const char* media_param = search_result_type_to_search_param(search_result_type);
+    if (!media_param) {
+        fprintf(stderr, "add_view_user_input_payload: SearchResultType %d is invalid\n", search_result_type);
         return false;
     }
 
@@ -915,8 +695,13 @@ cJSON* configure_post_payload(const Query* query, const char* continuation_token
 bool configure_youtube_internal_api_path(char* dest, const size_t dest_size, QueryType query_type, const char* key)
 {
     const char* endpoint = query_type_to_endpoint(query_type);
+    if (!endpoint) {
+        fprintf(stderr, "configure_youtube_internal_api_path: QueryType %d is invalid\n", query_type);
+        return false;
+    }
 
-    if ((endpoint == NULL) || (dest == NULL) || (valid_string(key) == false)) return false;
+    if (!dest || !valid_string(key)) 
+        return false;
 
     const size_t written = snprintf(dest, dest_size, "/youtubei/v1/%s?key=%s", endpoint, key);
 
@@ -2183,6 +1968,10 @@ void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
     };
 
     const char* sort_text = sort_type_to_text(query->sort);
+    if (!sort_text) {
+        fprintf(stderr, "draw_filter_window: SortType %d is invalid\n", query->sort);
+        return;
+    }
 
     if (draw_toggle_filter(sort_type_bounds, ui, "ORDER", sort_text)) {
         query->sort = bound_index_to_array((query->sort + 1), nsorts);
@@ -2206,6 +1995,10 @@ void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
     };
 
     const char* media_text = search_result_type_to_text(query->media);
+    if (!media_text) {
+        fprintf(stderr, "draw_filter_window: SearchResultType %d is invalid\n", query->media);
+        return;
+    }
 
     if (draw_toggle_filter(search_result_type_bounds, ui, "TYPE", media_text)) {
         query->media = bound_index_to_array((query->media + 1), nmedias);
