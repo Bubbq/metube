@@ -20,21 +20,21 @@ void thread_task_free(ThreadTask* task)
     free(task); task = NULL;
 }
 
-bool thread_task_launch(List* task_queue, const ThreadArgs targs, const ThreadFunction tfunct)
+bool thread_task_launch(LinkedList* task_queue, const ThreadArgs targs, const ThreadFunction tfunct)
 {
     if (!task_queue || !targs || !tfunct) 
         return false;
 
-    Node* node = node_init((void*) thread_task_init, NULL, (void*) thread_task_free, NULL);
+    ThreadTask * task = thread_task_init() ;
+    Node* node = node_init(task, sizeof(ThreadTask), (void*) thread_task_free, NULL);
     if (!node) 
         return false;
 
-    ThreadTask* task = (ThreadTask*) node->content;
     task->targs = targs;
     task->tfunct = tfunct;
 
     pthread_mutex_lock(&task_queue->mutex);
-    list_append(task_queue, node);
+    linked_list_append(task_queue, node);
     pthread_cond_signal(&task_queue->cond);
     pthread_mutex_unlock(&task_queue->mutex);
 
@@ -74,7 +74,7 @@ void* worker(ThreadArgs targs)
     if (!wargs) 
         return NULL;
     
-    List* task_queue = wargs->task_queue;
+    LinkedList* task_queue = wargs->task_queue;
 
     bool* is_application_running = wargs->is_application_running; 
 
@@ -94,11 +94,11 @@ void* worker(ThreadArgs targs)
             break;
         }
 
-        Node* node = list_dequeue(task_queue);
+        Node* node = linked_list_dequeue(task_queue);
 
         pthread_mutex_unlock(&task_queue->mutex);
          
-        ThreadTask* task = (ThreadTask*) node->content;
+        ThreadTask* task = (ThreadTask*) node->data;
         if (task) 
             task->tfunct(task->targs); 
 
@@ -109,7 +109,7 @@ void* worker(ThreadArgs targs)
     return NULL;
 }
 
-WorkerArgs* worker_args_init(List* task_queue, bool* app_running)
+WorkerArgs* worker_args_init(LinkedList* task_queue, bool* app_running)
 {
     if (!task_queue|| !app_running) return NULL;
 
@@ -122,7 +122,7 @@ WorkerArgs* worker_args_init(List* task_queue, bool* app_running)
     return wargs;
 }
 
-bool launch_workers(List* task_queue, ThreadPool* thread_pool, bool* application_is_running)
+bool launch_workers(LinkedList* task_queue, ThreadPool* thread_pool, bool* application_is_running)
 {
     if (!task_queue || !thread_pool || !application_is_running)
         return false;
@@ -142,7 +142,7 @@ bool thread_context_init(ThreadContext* thread_context, const size_t nthreads)
         return false;
 
     thread_context->application_is_running = true;
-    thread_context->task_queue = list_init();
+    thread_context->task_queue = linked_list_init();
 
     return launch_workers(&thread_context->task_queue, &thread_context->thread_pool, &thread_context->application_is_running);
 }
@@ -155,7 +155,7 @@ void thread_context_free(ThreadContext* thread_context)
     thread_context->application_is_running = false;
     pthread_cond_broadcast(&thread_context->task_queue.cond);
     thread_pool_free(&thread_context->thread_pool);
-    list_free(&thread_context->task_queue);
+    linked_list_free(&thread_context->task_queue);
 }
 
 bool thread_context_add_task(ThreadContext *thread_context, const ThreadArgs targs, const ThreadFunction tfunct)

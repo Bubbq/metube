@@ -854,7 +854,7 @@ void raw_thumbnail_process(RawThumbnail* raw_thumbnail, TextureCache* texture_ca
 
 typedef struct
 {
-    List thumbail_queue;   
+    LinkedList thumbail_queue;   
     pthread_mutex_t pool_mutex; // MIGHT NOT NEED, TEST FURTHER
     ConnectionPool video_thumbnail_pool;
     ConnectionPool channel_thumbnail_pool;
@@ -868,7 +868,7 @@ bool thumbnail_loader_init(ThumbnailLoader* thumbnail_loader, const size_t nconn
     const char* video_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_VIDEO);
     const char* channel_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_CHANNEL);
     
-    thumbnail_loader->thumbail_queue = list_init();
+    thumbnail_loader->thumbail_queue = linked_list_init();
     
     if (!connection_pool_init(&thumbnail_loader->video_thumbnail_pool, video_thumb_host, HTTPS_PORT, nconns))
         return false;
@@ -886,7 +886,7 @@ void thumbnail_loader_free(ThumbnailLoader* loader)
     if (!loader) 
         return;
 
-    list_free(&loader->thumbail_queue);
+    linked_list_free(&loader->thumbail_queue);
     pthread_mutex_destroy(&loader->pool_mutex);
     connection_pool_free(&loader->video_thumbnail_pool);
     connection_pool_free(&loader->channel_thumbnail_pool);
@@ -897,13 +897,13 @@ void thumbnail_loader_process_raw_images(ThumbnailLoader* loader, TextureCache* 
     if (!loader) 
         return;
 
-    List* queue = &loader->thumbail_queue;
+    LinkedList* queue = &loader->thumbail_queue;
 
     pthread_mutex_lock(&queue->mutex);
     
     while(queue->head) {
-        Node* node = list_dequeue(queue);
-        RawThumbnail* raw = (RawThumbnail*) node->content;
+        Node* node = linked_list_dequeue(queue);
+        RawThumbnail* raw = (RawThumbnail*) node->data;
         raw_thumbnail_process(raw, texture_cache);
         node_free(node);
     }
@@ -970,30 +970,29 @@ void* load_thumbnail(ThreadArgs args)
         return NULL;
     }
     
-    Node* node = node_init((void*) raw_thumbnail_init, NULL, (void*) raw_thumbnail_free, NULL);
+    RawThumbnail* raw_image = raw_thumbnail_init() ;
+    Node* node = node_init(raw_image, sizeof(RawThumbnail), (void*) raw_thumbnail_free, NULL);
     if (!node) {
         fprintf(stderr, "load_thumbnail: failed to initalize node\n");
         buffer_free(&image_data);
         return NULL;
     }
 
-    RawThumbnail* raw_image = (RawThumbnail*) node->content;
-
     raw_image->next = NULL;
     raw_image->data = image_data;
     raw_image->search_result_type = targs->search_result_type;
     strncpy(raw_image->id, targs->id, sizeof(raw_image->id));
 
-    List* thumbail_queue = &targs->loader->thumbail_queue;
+    LinkedList* thumbail_queue = &targs->loader->thumbail_queue;
 
     pthread_mutex_lock(&thumbail_queue->mutex);
-    list_append(thumbail_queue, node);
+    linked_list_append(thumbail_queue, node);
     pthread_mutex_unlock(&thumbail_queue->mutex);
 
     return NULL;
 }
 
-bool queue_load_thumbnail(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, List* task_queue, SearchResultType search_result_type, const char* id, const char* path)
+bool queue_load_thumbnail(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, LinkedList* task_queue, SearchResultType search_result_type, const char* id, const char* path)
 {
     if ((!ssl_ctx) || 
         (!loader) || 
@@ -1330,7 +1329,7 @@ void parse_user_data(cJSON* user_data, SearchResult* dest)
     }
 }
 
-void load_user_data(List* results, cJSON* user_data)
+void load_user_data(LinkedList* results, cJSON* user_data)
 {
     if ((results == NULL) || (user_data == NULL)) return;
 
@@ -1346,14 +1345,15 @@ void load_user_data(List* results, cJSON* user_data)
 
     cJSON* item;
     cJSON_ArrayForEach(item, array) {
-        Node* node = node_init((void*) better_search_result_init, NULL,  better_search_result_free, NULL);
+        SearchResult* search_result = better_search_result_init(NULL);
+        Node* node = node_init(search_result, sizeof(SearchResult), better_search_result_free, NULL) ;
         if (node) {
-            SearchResult* dest = (SearchResult*) node->content;
+            SearchResult* dest = (SearchResult*) node->data;
             if (dest) {
                 parse_user_data(item, dest);
                 
                 if (dest->type != SEARCH_RESULT_TYPE_UNDF) 
-                    list_append(results, node);
+                    linked_list_append(results, node);
                 else 
                     node_free(node);
             }
@@ -1361,7 +1361,7 @@ void load_user_data(List* results, cJSON* user_data)
     }
 
     for (int i = 0; i < old_size; i++) {
-        node_free(list_dequeue(results));
+        node_free(linked_list_dequeue(results));
     }
 
     pthread_mutex_unlock(&results->mutex);
@@ -1412,7 +1412,7 @@ const char* get_view_channel_author_id_path(const QueryAttribute query_attr)
     }
 }
 
-void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Query* query, List* dest)
+void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Query* query, LinkedList* dest)
 {
     if (!youtube_json || !client_context || !query || !dest)
         return;
@@ -1443,12 +1443,11 @@ void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Qu
 
     cJSON *item;
     cJSON_ArrayForEach (item, results_array) {
-        Node* node = node_init(better_search_result_init, NULL, better_search_result_free, NULL);
+        SearchResult * search_result = better_search_result_init(NULL) ;
+        Node* node = node_init(search_result, sizeof(SearchResult), better_search_result_free, NULL);
         if (!node) 
             return;
 
-        SearchResult* search_result = (SearchResult*) node->content;
-        
         cJSON* videoRenderer = cjson_pointer_get(item, ".videoRenderer");     
         cJSON* channelRenderer = cjson_pointer_get(item, ".channelRenderer");  
         cJSON* lockupViewModel = cjson_pointer_get(item, ".lockupViewModel");   
@@ -1476,7 +1475,7 @@ void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Qu
 
         if (search_result->type != SEARCH_RESULT_TYPE_UNDF) {
             elements_added++; 
-            list_append(dest, node);
+            linked_list_append(dest, node);
         }
 
         else 
@@ -1485,7 +1484,7 @@ void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Qu
 
     if (query->attr == QUERY_ATTR_REPLACE) 
         for (size_t i = 0; dest->head && (i < old_size); i++) 
-            node_free(list_dequeue(dest));
+            node_free(linked_list_dequeue(dest));
 
     pthread_mutex_unlock(&dest->mutex);
     
@@ -1499,7 +1498,7 @@ void get_youtube_results(cJSON* youtube_json, ClientContext* client_context,  Qu
 typedef struct
 {
     Query query;
-    List* results;
+    LinkedList* results;
     SSL_CTX* ssl_ctx;
     ClientContext* client_context;
 } SearchThreadArgs;
@@ -1521,7 +1520,7 @@ void* get_results_from_query(ThreadArgs args)
         return NULL;
     }
     
-    List* results = targs->results;
+    LinkedList* results = targs->results;
 
     get_youtube_results(json, client_context, query, results);
     
@@ -1530,7 +1529,7 @@ void* get_results_from_query(ThreadArgs args)
     return NULL;
 }
 
-void queue_search_task(SSL_CTX* ssl_ctx, ClientContext* client_context, List* task_queue, List* results, Query query)
+void queue_search_task(SSL_CTX* ssl_ctx, ClientContext* client_context, LinkedList* task_queue, LinkedList* results, Query query)
 {
     if (!ssl_ctx || !client_context || !task_queue || !results) 
         return;
@@ -1634,7 +1633,7 @@ void* get_channel_metadata(ThreadArgs args)
         return NULL;
     }
 
-    List* results = targs->search_args.results;
+    LinkedList* results = targs->search_args.results;
     
     get_youtube_results(json, targs->search_args.client_context, &targs->search_args.query, results);
 
@@ -2355,7 +2354,7 @@ void draw_load_more_button(const Rectangle container, const Font font, Query* qu
     }
 }
 
-void handle_view_user_data(List* results, pthread_mutex_t* token_mutex, char** continuation_token, cJSON* user_data)
+void handle_view_user_data(LinkedList* results, pthread_mutex_t* token_mutex, char** continuation_token, cJSON* user_data)
 {
     if (!results || !token_mutex || !continuation_token || !user_data)
         return;
@@ -2389,6 +2388,9 @@ cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_
     }
 }
 
+// TODO : IMPLEMENT LINKEDLIST_C
+// TODO : INTEGRATE LINKEDLIST_HC WITH CODE
+
 // dont search for cached thumbnail every frame
 // ssl connection times out after 30-60s 
 
@@ -2406,6 +2408,8 @@ cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_
     // trending path needs to be updated
     // no video descripton outputted
         // youtube thinks im a bot
+
+// TODO: new parsing logic, seperate from main.c
 
 int main()
 {
@@ -2439,7 +2443,7 @@ int main()
         .allow_youtube_shorts = true,
     };
     
-    List results = list_init();
+    LinkedList results = linked_list_init();
 
     TextureCache texture_cache = NULL;
     
@@ -2675,7 +2679,7 @@ int main()
                         .height = container_height 
                     };
 
-                    SearchResult* search_result = (SearchResult*) node->content;
+                    SearchResult* search_result = (SearchResult*) node->data;
                     const ResultData* result_data = &search_result->base;
 
                     Texture thumbnail = {0};
@@ -2776,7 +2780,7 @@ int main()
     client_context_free(&client_context);
 
     UnloadFont(ui.font);
-    list_free(&results);
+    linked_list_free(&results);
     texture_cache_free(&texture_cache);
     
     user_data_free(&user_data);
