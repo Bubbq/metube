@@ -5,49 +5,29 @@
 
 #include <stdbool.h>
 
-#define MAX_THREADS 4
-
-typedef void* ThreadArgs;
-typedef void* (*ThreadFunction)(void*);
+typedef void * (*ThreadFunction) (void *) ; // routine that thread will execute 
+typedef void   (*ThreadArgFree)  (void *) ; // routine to deallocate thread argument(s) 
 
 typedef struct
 {
-    ThreadFunction tfunct;
-    ThreadArgs targs;
-} ThreadTask;
+    void * targs ;
+    ThreadArgFree tfreef ;
+    ThreadFunction tfunct ;
+} Task ;
 
-ThreadTask* thread_task_init();
-void thread_task_free(ThreadTask* task);
-bool thread_task_launch(LinkedList* task_queue, const ThreadArgs targs, const ThreadFunction tfunct); // rename to thread_task_launch?
-
-typedef struct
-{
-    size_t nthreads;
-    pthread_t* threads;
-} ThreadPool;
-
-bool thread_pool_init(ThreadPool* thread_pool, const size_t nthreads);
-void thread_pool_free(ThreadPool* thread_pool);
+Task * task_init (void * targs, ThreadArgFree tfreef, ThreadFunction tfunct) ;
+void   task_free (Task * task) ;
 
 typedef struct
 {
-    LinkedList* task_queue;
-    bool* is_application_running;
-} WorkerArgs;
-
-void* worker(ThreadArgs wargs);
-WorkerArgs* worker_args_init(LinkedList* task_queue, bool* app_running);
-bool launch_workers(LinkedList* task_queue, ThreadPool* thread_pool, bool* application_is_running);
-
-typedef struct
-{
-    LinkedList task_queue;
-    ThreadPool thread_pool;
-    bool application_is_running;
+    LinkedList task_queue ;
+    pthread_t * threads ;
+    size_t nthreads ;
+    bool is_application_running ;
 } ThreadContext;
 
-void thread_context_free(ThreadContext* thread_context);
-bool thread_context_init(ThreadContext* thread_context, const size_t nthreads);
-bool thread_context_add_task(ThreadContext* thread_context, const ThreadArgs targs, const ThreadFunction tfunct);
+void thread_context_free     (ThreadContext * thread_context) ;
+bool thread_context_init     (ThreadContext * thread_context, const size_t thread_count) ;
+bool thread_context_add_task (ThreadContext * thread_context, void * targs, ThreadArgFree tfreef, const ThreadFunction tfunct) ;
 
 #endif

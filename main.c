@@ -1,12 +1,18 @@
+#include "include/connection.h"
 #include "include/query.h"
 #include "include/utils.h"
 #include "include/json_utils.h"
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
+#include <pthread.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
+
+#define THREADS 4
+#define YOUTUBE_HOST "www.youtube.com"
+#define INTERNAL_YOUTUBE_API_KEY "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
 typedef struct
 {
@@ -855,30 +861,25 @@ void raw_thumbnail_process(RawThumbnail* raw_thumbnail, TextureCache* texture_ca
 typedef struct
 {
     LinkedList thumbail_queue;   
-    pthread_mutex_t pool_mutex; // MIGHT NOT NEED, TEST FURTHER
     ConnectionPool video_thumbnail_pool;
     ConnectionPool channel_thumbnail_pool;
 } ThumbnailLoader;
 
-bool thumbnail_loader_init(ThumbnailLoader* thumbnail_loader, const size_t nconns)
+bool thumbnail_loader_init (ThumbnailLoader * thumbnail_loader, const size_t nconns)
 {
-    if (!thumbnail_loader)
-        return false;
+    if ( !thumbnail_loader)
+        return false ;
 
-    const char* video_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_VIDEO);
-    const char* channel_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_CHANNEL);
+    const char * video_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_VIDEO) ;
+    const char * channel_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_CHANNEL) ;
     
-    thumbnail_loader->thumbail_queue = linked_list_init();
+    thumbnail_loader->thumbail_queue = linked_list_init() ;
     
-    if (!connection_pool_init(&thumbnail_loader->video_thumbnail_pool, video_thumb_host, HTTPS_PORT, nconns))
-        return false;
+    if ( !connection_pool_init(&thumbnail_loader->video_thumbnail_pool, video_thumb_host, HTTPS_PORT, nconns) || 
+         !connection_pool_init(&thumbnail_loader->channel_thumbnail_pool, channel_thumb_host, HTTPS_PORT, nconns))
+        return false ;
 
-    if (!connection_pool_init(&thumbnail_loader->channel_thumbnail_pool, channel_thumb_host, HTTPS_PORT, nconns))
-        return false;
-
-    pthread_mutex_init(&thumbnail_loader->pool_mutex, NULL);
-
-    return true;
+    return true ;
 }
 
 void thumbnail_loader_free(ThumbnailLoader* loader)
@@ -887,7 +888,6 @@ void thumbnail_loader_free(ThumbnailLoader* loader)
         return;
 
     linked_list_free(&loader->thumbail_queue);
-    pthread_mutex_destroy(&loader->pool_mutex);
     connection_pool_free(&loader->video_thumbnail_pool);
     connection_pool_free(&loader->channel_thumbnail_pool);
 }
@@ -911,24 +911,24 @@ void thumbnail_loader_process_raw_images(ThumbnailLoader* loader, TextureCache* 
     pthread_mutex_unlock(&queue->mutex);
 }
 
-Connection* thumbnail_loader_get_connection(ThumbnailLoader* loader, const SearchResultType search_result_type)
+Connection * thumbnail_loader_get_connection (ThumbnailLoader * loader, const SearchResultType search_result_type)
 {
-    if (!loader)
-        return NULL;
+    if ( !loader)
+        return NULL ;
 
-    pthread_mutex_lock(&loader->pool_mutex);
+    ConnectionPool * pool = (search_result_type == SEARCH_RESULT_TYPE_CHANNEL) ? 
+                            &loader->channel_thumbnail_pool : 
+                            &loader->video_thumbnail_pool ;
+
+    pthread_mutex_lock(&pool->mutex) ;
     
-    ConnectionPool* pool = (search_result_type == SEARCH_RESULT_TYPE_CHANNEL) ? 
-                           &loader->channel_thumbnail_pool : 
-                           &loader->video_thumbnail_pool;
+    Connection* conn = &pool->connections[pool->current_conn] ;
 
-    Connection* conn = &pool->connections[pool->current_conn];
+    cycle_connection(pool) ;
 
-    cycle_connection(pool);
+    pthread_mutex_unlock(&pool->mutex) ;
 
-    pthread_mutex_unlock(&loader->pool_mutex);
-
-    return conn;
+    return conn ;
 }
 
 typedef struct 
@@ -940,7 +940,7 @@ typedef struct
     SearchResultType search_result_type;
 } LoadThumbnailArgs;
 
-void* load_thumbnail(ThreadArgs args)
+void* load_thumbnail(void * args)
 {
     LoadThumbnailArgs* targs = (LoadThumbnailArgs*) args;
     if ((!targs) || 
@@ -992,11 +992,11 @@ void* load_thumbnail(ThreadArgs args)
     return NULL;
 }
 
-bool queue_load_thumbnail(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, LinkedList* task_queue, SearchResultType search_result_type, const char* id, const char* path)
+bool queue_load_thumbnail(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, ThreadContext * thread_context, SearchResultType search_result_type, const char* id, const char* path)
 {
     if ((!ssl_ctx) || 
         (!loader) || 
-        (!task_queue) || 
+        (!thread_context) || 
         (!valid_string(id)) || 
         (!valid_string(path))) {
         fprintf(stderr, "queue_load_thumbnail: invalid args\n");
@@ -1015,68 +1015,7 @@ bool queue_load_thumbnail(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, LinkedList*
     strncpy(targs->id, id, sizeof(targs->id));
     strncpy(targs->path, path, sizeof(targs->path));
 
-    return thread_task_launch(task_queue, targs, load_thumbnail);
-}
-
-// api manager
-
-typedef struct
-{
-    pthread_mutex_t token_mutex; 
-    pthread_mutex_t pool_mutex; 
-    ConnectionPool youtube_api_pool;
-    char* continuation_token;
-    char* api_key;
-} ClientContext;
-
-bool client_context_init(ClientContext* client_context, const size_t nconns)
-{
-    if (!client_context)
-        return false;
-
-    client_context->continuation_token = NULL;
-    client_context->api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-
-    if (!connection_pool_init(&client_context->youtube_api_pool, "www.youtube.com", HTTPS_PORT, nconns))
-        return false;
-
-    pthread_mutex_init(&client_context->pool_mutex, NULL);
-    pthread_mutex_init(&client_context->token_mutex, NULL);
-
-    return true;
-}
-
-void client_context_free(ClientContext* client)
-{
-    if (!client)
-        return;
-
-    connection_pool_free(&client->youtube_api_pool);
-
-    if (client->continuation_token) {
-        free(client->continuation_token); client->continuation_token = NULL;
-    }
-
-    pthread_mutex_destroy(&client->token_mutex);
-    pthread_mutex_destroy(&client->pool_mutex);
-}
-
-Connection* client_context_get_connection(ClientContext* client_context)
-{
-    if (!client_context)
-        return NULL;
-
-    pthread_mutex_lock(&client_context->pool_mutex);
-
-    ConnectionPool* pool = &client_context->youtube_api_pool;
-
-    Connection* conn = &pool->connections[pool->current_conn];
-    
-    cycle_connection(pool);
-
-    pthread_mutex_unlock(&client_context->pool_mutex);
-
-    return conn;
+    return thread_context_add_task(thread_context, targs, free, load_thumbnail) ;
 }
 
 // user data management
@@ -1503,7 +1442,7 @@ typedef struct
     ClientContext* client_context;
 } SearchThreadArgs;
 
-void* get_results_from_query(ThreadArgs args)
+void* get_results_from_query(void * args)
 {
     SearchThreadArgs* targs = (SearchThreadArgs*) args;
 
@@ -1529,9 +1468,9 @@ void* get_results_from_query(ThreadArgs args)
     return NULL;
 }
 
-void queue_search_task(SSL_CTX* ssl_ctx, ClientContext* client_context, LinkedList* task_queue, LinkedList* results, Query query)
+void queue_search_task(SSL_CTX* ssl_ctx, ClientContext* client_context, ThreadContext * thread_context, LinkedList* results, Query query)
 {
-    if (!ssl_ctx || !client_context || !task_queue || !results) 
+    if (!ssl_ctx || !client_context || !thread_context || !results) 
         return;
 
     SearchThreadArgs* targs = malloc(sizeof(SearchThreadArgs));
@@ -1545,7 +1484,7 @@ void queue_search_task(SSL_CTX* ssl_ctx, ClientContext* client_context, LinkedLi
     targs->ssl_ctx = ssl_ctx;
     targs->client_context = client_context;
 
-    thread_task_launch(task_queue, targs, get_results_from_query);
+    thread_context_add_task(thread_context, targs, free, get_results_from_query) ;
 }
 
 typedef struct
@@ -1562,7 +1501,7 @@ typedef struct
     char** description_out;
 } VideoMetadataArgs;
 
-void* get_video_metadata(ThreadArgs args)
+void* get_video_metadata(void * args)
 {
     VideoMetadataArgs* targs = (VideoMetadataArgs*) args;
     if (!targs || !targs->ssl_ctx || !targs->client_context || !targs->description_out) 
@@ -1584,9 +1523,9 @@ void* get_video_metadata(ThreadArgs args)
     return NULL;
 }
 
-void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_context, ThreadContext* thread_ctx, char** description_out, Query query)
+void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_context, ThreadContext * thread_context, char** description_out, Query query)
 {
-    if (!ssl_ctx || !client_context || !thread_ctx || !description_out)
+    if (!ssl_ctx || !client_context || !thread_context || !description_out)
         return;
 
     VideoMetadataArgs* targs = malloc(sizeof(VideoMetadataArgs));
@@ -1600,7 +1539,7 @@ void queue_video_metadata_task(SSL_CTX* ssl_ctx, ClientContext* client_context, 
     targs->client_context = client_context;
     targs->description_out = description_out;
     
-    if (!thread_task_launch(&thread_ctx->task_queue, targs, get_video_metadata)) {
+    if ( !thread_context_add_task(thread_context, targs, free, get_video_metadata)) {
         fprintf(stderr, "queue_video_metadata_task: failed to queue task\n");
         free(targs); targs = NULL;
     }
@@ -1621,7 +1560,7 @@ typedef struct
     cJSON* subscribed_channels;
 } ChannelMetadataArgs;
 
-void* get_channel_metadata(ThreadArgs args)
+void* get_channel_metadata(void * args)
 {
     ChannelMetadataArgs* targs = (ChannelMetadataArgs*) args;
     if (!targs || !targs->highlighted_channel || !targs->subscribed_channels)
@@ -1675,7 +1614,7 @@ bool configure_watch_url(const char* video_id, char* dest, const size_t dest_siz
     return (0 < written) && (written < dest_size);
 }
 
-void* play_video(ThreadArgs args)
+void* play_video(void * args)
 {
     PlayVideoArgs* targs = (PlayVideoArgs*) args;
 
@@ -2275,7 +2214,7 @@ void draw_video_management_buttons(const Rectangle container, Query* query, High
         if (targs) {
             targs->playing_video = &update_flags->is_playing_video;
             snprintf(targs->video_id, sizeof(targs->video_id), "%s", result_data->id);
-            thread_task_launch(&thread_context->task_queue, targs, play_video);
+            thread_context_add_task(thread_context, targs, free, play_video) ;
             add_user_data(user_data->watched_videos, &selected_video->info);
         }
     } 
@@ -2388,9 +2327,9 @@ cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_
     }
 }
 
-// TODO : IMPLEMENT LINKEDLIST_C
-// TODO : INTEGRATE LINKEDLIST_HC WITH CODE
-
+// TODO : seperate thumbnail loader logic
+// TODO : seperate parse logic
+// TODO : fix race conditions (if any)
 // dont search for cached thumbnail every frame
 // ssl connection times out after 30-60s 
 
@@ -2449,6 +2388,7 @@ int main()
     
     UpdateFlags update_flags = {false};
   
+
     UserData user_data;
     if (!user_data_init(&user_data)) {
         fprintf(stderr, "CRITICAL: failed to create UserData object\n");
@@ -2456,19 +2396,19 @@ int main()
     }
     
     ClientContext client_context;
-    if (!client_context_init(&client_context, MAX_THREADS)) {
+    if ( !client_context_init(&client_context, THREADS, YOUTUBE_HOST, INTERNAL_YOUTUBE_API_KEY)) {
         fprintf(stderr, "CRITICAL: failed to initialize ClientContext object\n");
         return 1;
     }
 
     ThumbnailLoader thumbnail_loader;
-    if (!thumbnail_loader_init(&thumbnail_loader, MAX_THREADS)) {
+    if (!thumbnail_loader_init(&thumbnail_loader, THREADS)) {
         fprintf(stderr, "CRITICAL: failed to initialize ThumbnailLoader object\n");
         return 1;
     }
 
-    ThreadContext thread_context;
-    if (!thread_context_init(&thread_context, MAX_THREADS)) {
+    ThreadContext thread_context ;
+    if (!thread_context_init(&thread_context, THREADS)) {
         fprintf(stderr, "CRITICAL: failed to initialize ThreadContext object\n");
         return 1;
     }
@@ -2478,7 +2418,7 @@ int main()
         fprintf(stderr, "CRITICAL: failed to create SSL_CTX object\n");
         return 1;
     }
-    
+
     char* get_video_metadata_output = NULL;
 
     while (!WindowShouldClose())
@@ -2504,7 +2444,7 @@ int main()
                 case QUERY_TYPE_VIEW_RELATED:
                 case QUERY_TYPE_VIEW_PLAYLIST:
                     last_query_type = query.type;
-                    queue_search_task(ssl_ctx, &client_context, &thread_context.task_queue, &results, query);
+                    queue_search_task(ssl_ctx, &client_context, &thread_context, &results, query);
                     break;
                 case QUERY_TYPE_VIEW_VIDEO:
                     queue_video_metadata_task(ssl_ctx, &client_context, &thread_context, &get_video_metadata_output, query);
@@ -2527,7 +2467,7 @@ int main()
                         thumbnail_args->search_result_type = SEARCH_RESULT_TYPE_CHANNEL;
                         thumbnail_args->ssl_ctx = ssl_ctx;
 
-                        if (!thread_task_launch(&thread_context.task_queue, targs, get_channel_metadata)) {
+                        if ( !thread_context_add_task(&thread_context, targs, free, get_channel_metadata)) {
                             fprintf(stderr, "failed to launch get_channel_metadata task\n");
                             free(targs); targs = NULL;
                         }
@@ -2696,7 +2636,7 @@ int main()
 
                     if (valid_string(result_data->thumbnail_path) && !search_result->thumbnail_loaded) {
                         search_result->thumbnail_loaded = true;
-                        queue_load_thumbnail(ssl_ctx, &thumbnail_loader, &thread_context.task_queue, search_result->type, result_data->id, result_data->thumbnail_path);
+                        queue_load_thumbnail(ssl_ctx, &thumbnail_loader, &thread_context, search_result->type, result_data->id, result_data->thumbnail_path);
                     }
 
                     const bool result_is_highlighted = (strcmp(result_data->id, highlighted_video.info.base.id) == 0);
