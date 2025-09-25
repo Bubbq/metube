@@ -6,6 +6,7 @@
 #include "include/thread_utils.h"
 #include "include/texture_cache.h"
 #include <pthread.h>
+#include <stdio.h>
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -911,26 +912,6 @@ void thumbnail_loader_process_raw_images(ThumbnailLoader* loader, TextureCache* 
     pthread_mutex_unlock(&queue->mutex);
 }
 
-Connection * thumbnail_loader_get_connection (ThumbnailLoader * loader, const SearchResultType search_result_type)
-{
-    if ( !loader)
-        return NULL ;
-
-    ConnectionPool * pool = (search_result_type == SEARCH_RESULT_TYPE_CHANNEL) ? 
-                            &loader->channel_thumbnail_pool : 
-                            &loader->video_thumbnail_pool ;
-
-    pthread_mutex_lock(&pool->mutex) ;
-    
-    Connection* conn = &pool->connections[pool->current_conn] ;
-
-    cycle_connection(pool) ;
-
-    pthread_mutex_unlock(&pool->mutex) ;
-
-    return conn ;
-}
-
 typedef struct 
 {
     char path[256];
@@ -952,19 +933,23 @@ void* load_thumbnail(void * args)
         return NULL;
     }
     
-    Connection* thumb_conn = thumbnail_loader_get_connection(targs->loader, targs->search_result_type);
-    if (!thumb_conn) {
+    ConnectionPool * pool = targs->search_result_type == SEARCH_RESULT_TYPE_CHANNEL ? 
+                                                        &targs->loader->channel_thumbnail_pool : 
+                                                        &targs->loader->video_thumbnail_pool ;
+    
+    Connection * thumbnail_conn = connection_pool_get_current_conn(pool) ;
+    if ( !thumbnail_conn) {
         fprintf(stderr, "load_thumbnail: thumbnail connection is null\n");
         return NULL;
     }
 
     HttpsRequest req = {0};
-    if (!configure_get_header(req.header, sizeof(req.header), thumb_conn->host, targs->path)) {
+    if (!configure_get_header(req.header, sizeof(req.header), thumbnail_conn->host, targs->path)) {
         fprintf(stderr, "load_thumbnail: failed to resolve request header\n");
         return NULL;
     }
 
-    Buffer image_data = get_https_response(req, targs->ssl_ctx, thumb_conn, HTTP_PROTOCOL_VER);
+    Buffer image_data = get_https_response(req, targs->ssl_ctx, thumbnail_conn, HTTP_PROTOCOL_VER);
     if (!buffer_is_ready(&image_data)) {
         fprintf(stderr, "load_thumbnail: image data is invalid\n");
         return NULL;
@@ -1313,8 +1298,8 @@ cJSON* get_youtube_json(SSL_CTX* ssl_ctx, ClientContext* client_context, Query* 
     if (!ssl_ctx || !client_context || !query)
         return NULL;
 
-    Connection* conn = client_context_get_connection(client_context);
-    if (!conn) {
+    Connection * conn = connection_pool_get_current_conn(&client_context->conn_pool) ;
+    if ( !conn) {
         fprintf(stderr, "get_youtube_json: failed to retrieve connection\n");
         return NULL;
     }

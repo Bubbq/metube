@@ -129,12 +129,28 @@ void connection_pool_free (ConnectionPool * pool)
     pthread_mutex_destroy(&pool->mutex) ;
 }
 
-void cycle_connection (ConnectionPool * pool)
+static void cycle_connection (ConnectionPool * pool)
 {
     if ( !pool) 
-        return;
+        return ;
 
-    pool->current_conn = bound_index_to_array((++pool->current_conn), pool->nconn) ;
+    pool->current_conn = bound_index_to_array((pool->current_conn + 1), pool->nconn) ;
+}
+
+Connection * connection_pool_get_current_conn (ConnectionPool * pool) 
+{
+    if ( !pool)
+        return NULL ;
+    
+    pthread_mutex_lock(&pool->mutex) ;
+
+    Connection * conn = &pool->connections[pool->current_conn] ;
+    
+    cycle_connection(pool) ;
+    
+    pthread_mutex_unlock(&pool->mutex) ;
+
+    return conn ;
 }
 
 bool client_context_init (ClientContext * client_context, const size_t nconns, const char * host, const char * api_key)
@@ -165,22 +181,4 @@ void client_context_free (ClientContext * client)
     }
 
     pthread_mutex_destroy(&client->token_mutex) ;
-}
-
-Connection * client_context_get_connection (ClientContext * client_context)
-{
-    if ( !client_context)
-        return NULL ;
-
-    pthread_mutex_lock(&client_context->conn_pool.mutex) ;
-
-    ConnectionPool * pool = &client_context->conn_pool ;
-
-    Connection * conn = &pool->connections[pool->current_conn] ;
-    
-    cycle_connection(pool) ;
-
-    pthread_mutex_unlock(&client_context->conn_pool.mutex) ;
-
-    return conn ;
 }

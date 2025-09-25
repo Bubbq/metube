@@ -47,7 +47,7 @@ int ssl_read_n(SSL* ssl, Buffer* buffer, const size_t n)
         bytes_read += read;
         bytes_remaining -= read; 
 
-        buffer_write_data(buffer, data, read);
+        write_to_buffer(buffer, data, read);
     }      
 
     return bytes_read;

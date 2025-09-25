@@ -31,7 +31,7 @@ typedef struct
 
 bool connection_pool_init (ConnectionPool * pool, const char * host, const char * port, const size_t n_conn) ;
 void connection_pool_free (ConnectionPool * pool) ;
-void cycle_connection     (ConnectionPool * pool) ;
+Connection * connection_pool_get_current_conn (ConnectionPool * pool) ;
 
 typedef struct
 {
@@ -43,6 +43,5 @@ typedef struct
 
 bool client_context_init (ClientContext * client_context, const size_t nconns, const char * host, const char * api_key) ;
 void client_context_free (ClientContext * client) ;
-Connection * client_context_get_connection (ClientContext * client_context) ;
 
 #endif

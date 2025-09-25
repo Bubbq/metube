@@ -6,13 +6,13 @@
 
 typedef struct
 {
-    size_t size;
-    char* data;
-} Buffer;
+    size_t size ;
+    char * data ;
+} Buffer ;
 
-Buffer buffer_init();
-void buffer_free(Buffer* buffer);
-bool buffer_is_ready(const Buffer* buffer);
-bool buffer_write_data(Buffer* buffer, const char* data, const size_t data_size);
+Buffer buffer_init   () ;
+void buffer_free     (Buffer * buffer) ;
+bool buffer_is_ready (const Buffer * buffer) ;
+bool write_to_buffer (Buffer * buffer, const char * data, const size_t data_size) ;
 
 #endif
