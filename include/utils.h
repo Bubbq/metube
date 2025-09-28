@@ -13,7 +13,6 @@ size_t trim_whitespace(char* string);
 int filter_non_numeric_chars(char* string, const size_t string_size);
 bool valid_string(const char* string);
 bool connected_to_internet();
-char** text_split(const char* text, const char delim, int* count, char** copy_output);
 void format_view_count(char* dest, const size_t dest_size);
 
 #endif

@@ -1,6 +1,7 @@
 #include "include/json_utils.h"
 
 #include "include/utils.h"
+#include "include/raylib.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -51,10 +52,9 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
     if (!root || !valid_string(path)) 
         return root;
 
-    int n = 0;
-    char* copy_output = NULL;
-    char** elements = text_split(path, '.', &n,&copy_output);
-    if (!elements) 
+    int n = 0 ;
+    const char ** elements = TextSplit(path, '.', &n) ;
+    if ( !elements) 
         return NULL;
 
     cJSON* ret = root;
@@ -73,21 +73,15 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
             ret = cJSON_GetObjectItem(ret, array_name);
             if (!ret) {
-                free(copy_output); copy_output = NULL;
-                free(elements); elements = NULL;
                 return NULL;
             }
 
             if (!cJSON_IsArray(ret)) {
-                free(copy_output); copy_output = NULL;
-                free(elements); elements = NULL;
                 return NULL;
             }
 
             const char* closing_brace = strchr(opening_brace, ']');
             if (!closing_brace) {
-                free(copy_output); copy_output = NULL;
-                free(elements); elements = NULL;
                 return NULL;
             }
 
@@ -106,8 +100,6 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
                               index_buffer_val;
 
             if (index >= array_size) {
-                free(copy_output); copy_output = NULL;
-                free(elements); elements = NULL;
                 return NULL;
             }
 
@@ -116,9 +108,6 @@ cJSON* cjson_pointer_get(cJSON* root, const char* path)
 
         else ret = cJSON_GetObjectItem(ret, elements[i]);
     }
-
-    free(copy_output); copy_output = NULL;
-    free(elements); elements = NULL;
 
     return ret;
 }
