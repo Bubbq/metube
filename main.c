@@ -1,10 +1,8 @@
-#include "include/connection.h"
-#include "include/query.h"
 #include "include/utils.h"
+#include "include/thumbnails.h"
 #include "include/json_utils.h"
 #include "include/https_utils.h"
 #include "include/thread_utils.h"
-#include "include/texture_cache.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "include/raygui.h"
@@ -466,10 +464,6 @@ void get_continuation_token(cJSON* json, char** dest, const QueryType query_type
 
 // youtube request configuration
 
-#define HTTP_PROTOCOL_VER "1.1"
-#define CONNECTION_STATUS "keep-alive"
-#define USER_AGENT "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-
 #define CLIENT_NAME "WEB"
 #define CLIENT_VER "2.20250730"
 #define YT_API_PLAYLIST_BROWSE_ID_PREFIX "VL"    
@@ -649,41 +643,6 @@ bool configure_youtube_internal_api_path(char* dest, const size_t dest_size, Que
     return (written > 0) && (written < dest_size);
 }
 
-bool configure_get_header(char* dest, const size_t dest_size, const char* host, const char* path)
-{
-    if ((dest == NULL) || (!valid_string(host)) || (!valid_string(path)))
-        return false;
-
-    const int written =  snprintf(dest, dest_size,
-                "GET %s HTTP/%s\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: %s\r\n"
-                        "Connection: %s\r\n"
-                        "\r\n",
-                        path, HTTP_PROTOCOL_VER, host, USER_AGENT, CONNECTION_STATUS);
-    
-    return (written > 0) && (written < dest_size);
-}
-
-bool configure_post_header(char* dest, const size_t dest_size, const char* host, const char* path, const size_t content_length)
-{
-    if ((dest == NULL) || (!valid_string(host)) || (!valid_string(path)))
-        return false;
-
-    const int written = snprintf(dest, dest_size,
-                        "POST %s HTTP/%s\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: %s\r\n"
-                        "Content-Type: */*\r\n"
-                        "Accept: */*\r\n"
-                        "Content-Length: %zu\r\n"
-                        "Connection: %s\r\n"
-                        "\r\n",
-                        path, HTTP_PROTOCOL_VER, host, USER_AGENT, content_length, CONNECTION_STATUS);
-    
-    return (written > 0) && (written < dest_size);
-}
-
 bool post_request_is_ready(const HttpsRequest post)
 {
     return valid_string(post.header) && valid_string(post.payload);
@@ -717,198 +676,6 @@ HttpsRequest configure_post_request(const Query query, const char* host, const c
     cJSON_Delete(payload); payload = NULL;
     
     return post;
-}
-
-// thumbnail loading
-
-typedef struct RawThumbnail
-{
-    char id[64];     
-    Buffer data;              
-    struct RawThumbnail *next;
-    SearchResultType search_result_type;
-} RawThumbnail;
-
-RawThumbnail* raw_thumbnail_init()
-{
-    RawThumbnail* raw_thumbnail = malloc(sizeof(RawThumbnail));
-    if (!raw_thumbnail) {
-        fprintf(stderr, "raw_thumbnail_init: malloc returned null\n");
-        return NULL;
-    }
-
-    raw_thumbnail->next = NULL;
-    raw_thumbnail->data = buffer_init();
-    raw_thumbnail->search_result_type = SEARCH_RESULT_TYPE_UNDF;
-    memset(raw_thumbnail->id, 0, sizeof(raw_thumbnail->id));
-
-    return raw_thumbnail;
-}
-
-void raw_thumbnail_free(RawThumbnail* raw_thumbnail)
-{
-    if (!raw_thumbnail)
-        return;
-
-    if (buffer_is_ready(&raw_thumbnail->data)) 
-        buffer_free(&raw_thumbnail->data);
-
-    free(raw_thumbnail); raw_thumbnail = NULL;
-}
-
-bool raw_thumbnail_is_ready(const RawThumbnail* raw)
-{
-    return (raw) && (valid_string(raw->id)) && (buffer_is_ready(&raw->data)) && (raw->search_result_type != SEARCH_RESULT_TYPE_UNDF);
-}
-
-const Texture load_texture_from_memory(const Buffer* image_buffer, const char* image_extension, const float width, const float height)
-{
-    Texture texture = {0};
-
-    if (!buffer_is_ready(image_buffer) || !valid_string(image_extension)) 
-        return texture;
-
-    Image image = LoadImageFromMemory(image_extension, (const unsigned char*) image_buffer->data, image_buffer->size);
-    if (IsImageReady(image)) {
-        ImageResize(&image, width, height);
-        texture = LoadTextureFromImage(image);
-        UnloadImage(image);
-    }
-
-    return texture;
-}
-
-void raw_thumbnail_process(RawThumbnail* raw_thumbnail, TextureCache* texture_cache)
-{
-    if (!raw_thumbnail_is_ready(raw_thumbnail))
-        return;   
-
-    const float thumbnail_w = search_result_type_to_thumbnail_width(raw_thumbnail->search_result_type);
-    const float thumbnail_h = search_result_type_to_thumbnail_height(raw_thumbnail->search_result_type);
-
-    Texture thumbnail = load_texture_from_memory(&raw_thumbnail->data, ".jpeg", thumbnail_w, thumbnail_h);
-
-    TextureCacheEntry* entry = texture_cache_entry_init(thumbnail, raw_thumbnail->id);
-    if (texture_cache_entry_is_ready(entry) ) 
-        texture_cache_add_entry(texture_cache, entry);
-}
-
-typedef struct
-{
-    LinkedList thumbail_queue;   
-    ConnectionPool video_thumbnail_pool;
-    ConnectionPool channel_thumbnail_pool;
-} ThumbnailLoader;
-
-bool thumbnail_loader_init (ThumbnailLoader * thumbnail_loader, const size_t nconns)
-{
-    if ( !thumbnail_loader)
-        return false ;
-
-    const char * video_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_VIDEO) ;
-    const char * channel_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_CHANNEL) ;
-    
-    thumbnail_loader->thumbail_queue = linked_list_init() ;
-    
-    if ( !connection_pool_init(&thumbnail_loader->video_thumbnail_pool, video_thumb_host, HTTPS_PORT, nconns) || 
-         !connection_pool_init(&thumbnail_loader->channel_thumbnail_pool, channel_thumb_host, HTTPS_PORT, nconns))
-        return false ;
-
-    return true ;
-}
-
-void thumbnail_loader_free(ThumbnailLoader* loader)
-{
-    if (!loader) 
-        return;
-
-    linked_list_free(&loader->thumbail_queue);
-    connection_pool_free(&loader->video_thumbnail_pool);
-    connection_pool_free(&loader->channel_thumbnail_pool);
-}
-
-void thumbnail_loader_process_raw_images(ThumbnailLoader* loader, TextureCache* texture_cache)
-{
-    if (!loader) 
-        return;
-
-    LinkedList* queue = &loader->thumbail_queue;
-
-    pthread_mutex_lock(&queue->mutex);
-    
-    while(queue->head) {
-        Node* node = linked_list_dequeue(queue);
-        RawThumbnail* raw = (RawThumbnail*) node->data;
-        raw_thumbnail_process(raw, texture_cache);
-        node_free(node);
-    }
-
-    pthread_mutex_unlock(&queue->mutex);
-}
-
-typedef struct 
-{
-    char path[256];
-    char id[64];
-    ThumbnailLoader* loader;
-    SSL_CTX* ssl_ctx;
-    SearchResultType search_result_type;
-} LoadThumbnailArgs;
-
-void* load_thumbnail(void * args)
-{
-    LoadThumbnailArgs* targs = (LoadThumbnailArgs*) args;
-    if ((!targs) || 
-        (!targs->loader) || 
-        (!targs->ssl_ctx) || 
-        (!valid_string(targs->path) || 
-        (!valid_string(targs->id)))) {
-        fprintf(stderr, "load_thumbnail: invalid args\n");
-        return NULL;
-    }
-    
-    ConnectionPool * pool = targs->search_result_type == SEARCH_RESULT_TYPE_CHANNEL ? 
-                                                        &targs->loader->channel_thumbnail_pool : 
-                                                        &targs->loader->video_thumbnail_pool ;
-    
-    Connection * thumbnail_conn = connection_pool_get_current_conn(pool) ;
-    if ( !thumbnail_conn) {
-        fprintf(stderr, "load_thumbnail: thumbnail connection is null\n");
-        return NULL;
-    }
-
-    HttpsRequest req = {0};
-    if (!configure_get_header(req.header, sizeof(req.header), thumbnail_conn->host, targs->path)) {
-        fprintf(stderr, "load_thumbnail: failed to resolve request header\n");
-        return NULL;
-    }
-
-    Buffer image_data = get_https_response(req, targs->ssl_ctx, thumbnail_conn, HTTP_PROTOCOL_VER);
-    if (!buffer_is_ready(&image_data)) {
-        fprintf(stderr, "load_thumbnail: image data is invalid\n");
-        return NULL;
-    }
-    
-    RawThumbnail* raw_image = raw_thumbnail_init() ;
-    Node* node = node_init(raw_image, sizeof(RawThumbnail), (void*) raw_thumbnail_free, NULL);
-    if (!node) {
-        fprintf(stderr, "load_thumbnail: failed to initalize node\n");
-        buffer_free(&image_data);
-        return NULL;
-    }
-
-    raw_image->next = NULL;
-    raw_image->data = image_data;
-    raw_image->search_result_type = targs->search_result_type;
-    strncpy(raw_image->id, targs->id, sizeof(raw_image->id));
-
-    LinkedList* thumbail_queue = &targs->loader->thumbail_queue;
-
-    pthread_mutex_lock(&thumbail_queue->mutex);
-    linked_list_append(thumbail_queue, node);
-    pthread_mutex_unlock(&thumbail_queue->mutex);
-
-    return NULL;
 }
 
 bool queue_load_thumbnail(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, ThreadContext * thread_context, SearchResultType search_result_type, const char* id, const char* path)
@@ -2226,6 +1993,7 @@ cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_
 // TODO : seperate thumbnail loader logic
 // TODO : seperate parse logic
 // TODO : fix race conditions (if any)
+// TODO : have hash of youtube ids, and if one is encountered when parsing, disregard the parse?
 // dont search for cached thumbnail every frame
 // ssl connection times out after 30-60s 
 

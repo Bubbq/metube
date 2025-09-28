@@ -4,6 +4,41 @@
 
 #include <ctype.h>
 
+bool configure_get_header (char* dest, const size_t dest_size, const char* host, const char* path)
+{
+    if ((dest == NULL) || (!valid_string(host)) || (!valid_string(path)))
+        return false;
+
+    const int written =  snprintf(dest, dest_size,
+                "GET %s HTTP/%s\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: %s\r\n"
+                        "Connection: %s\r\n"
+                        "\r\n",
+                        path, HTTP_PROTOCOL_VER, host, USER_AGENT, CONNECTION_STATUS);
+    
+    return (written > 0) && (written < dest_size);
+}
+
+bool configure_post_header (char* dest, const size_t dest_size, const char* host, const char* path, const size_t content_length)
+{ 
+    if ((dest == NULL) || (!valid_string(host)) || (!valid_string(path)))
+        return false;
+
+    const int written = snprintf(dest, dest_size,
+                        "POST %s HTTP/%s\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: %s\r\n"
+                        "Content-Type: */*\r\n"
+                        "Accept: */*\r\n"
+                        "Content-Length: %zu\r\n"
+                        "Connection: %s\r\n"
+                        "\r\n",
+                        path, HTTP_PROTOCOL_VER, host, USER_AGENT, content_length, CONNECTION_STATUS);
+    
+    return (written > 0) && (written < dest_size);
+}
+
 bool ssl_write_request(SSL* ssl, const HttpsRequest req)
 {
     if (!ssl) 

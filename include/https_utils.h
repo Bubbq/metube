@@ -6,6 +6,10 @@
 
 #include <cjson/cJSON.h>
 
+#define HTTP_PROTOCOL_VER "1.1"
+#define CONNECTION_STATUS "keep-alive"
+#define USER_AGENT "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
 #define CRLF "\r\n"
 #define VALID_HTTPS_RESPONSE_CODE "200"
 #define CONTENT_LENGTH_HEADER_TAG "Content-Length:"
@@ -18,6 +22,9 @@ typedef struct
     char path[256];
     char* payload;
 } HttpsRequest;
+
+bool configure_get_header  (char * dest, const size_t dest_size, const char * host, const char * path) ;
+bool configure_post_header (char * dest, const size_t dest_size, const char * host, const char * path, const size_t content_length) ;
 
 // ssl communication
 bool ssl_write_request(SSL* ssl, const HttpsRequest req);
