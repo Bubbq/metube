@@ -1,7 +1,6 @@
 #include "include/innertube.h"
 
 #include "../include/utils.h"
-#include "include/query.h"
 
 SearchThreadArgs * create_search_thread_args (Query query, SSL_CTX * ssl, LinkedList * results, ClientContext * client, YoutubeParseContext * parse) 
 {
@@ -61,7 +60,7 @@ void free_channel_metadata_args (ChannelMetadataArgs * cargs)
     }
 }
 
-static cJSON * get_json_response (const HttpsRequest * req, SSL_CTX * ssl, Connection * conn, const char * protocol_ver)
+static json * get_json_response (const HttpsRequest * req, SSL_CTX * ssl, Connection * conn, const char * protocol_ver)
 {
     if ( !req || !ssl || !conn || !valid_string(protocol_ver)) 
         return NULL ;
@@ -73,14 +72,14 @@ static cJSON * get_json_response (const HttpsRequest * req, SSL_CTX * ssl, Conne
         return NULL;
     }
 
-    cJSON * ret = cJSON_Parse(res.data) ;
+    json * ret = json_create_from_mem(res.data) ;
 
     buffer_free(&res) ;
     
     return ret ;
 }
 
-cJSON * get_innertube_response (SSL_CTX * ssl, ClientContext * client, Query * query)
+json * get_innertube_response (SSL_CTX * ssl, ClientContext * client, Query * query)
 {
     if ( !ssl || !client || !query)
         return NULL ;
@@ -103,7 +102,7 @@ cJSON * get_innertube_response (SSL_CTX * ssl, ClientContext * client, Query * q
         return NULL ;
     }
 
-    cJSON * response = get_json_response(&req, ssl, conn, HTTP_PROTOCOL_VER) ;
+    json * response = get_json_response(&req, ssl, conn, HTTP_PROTOCOL_VER) ;
 
     if (req.payload) {
         free(req.payload) ; req.payload = NULL ;
@@ -119,7 +118,7 @@ void * get_results_from_query (void * args)
     if ( !targs || !targs->ssl || !targs->results || !targs->client || !targs->parse)
         return NULL ;
 
-    cJSON * response = get_innertube_response(targs->ssl, targs->client, &targs->query) ;
+    json * response = get_innertube_response(targs->ssl, targs->client, &targs->query) ;
 
     if ( !response) {
         fprintf(stderr, "get_results_from_query: failed to retrieve youtube response\n") ;
@@ -134,7 +133,7 @@ void * get_results_from_query (void * args)
 
     pthread_mutex_unlock(token_mutex) ;
 
-    cJSON_Delete(response) ; 
+    json_free(response) ; 
 
     return NULL ;
 }
@@ -146,7 +145,7 @@ void * get_channel_metadata (void * args)
     if ( !targs || !targs->sargs || !targs->dest)
         return NULL ;
 
-    cJSON * response = get_innertube_response(targs->sargs->ssl, targs->sargs->client, &targs->sargs->query) ;
+    json * response = get_innertube_response(targs->sargs->ssl, targs->sargs->client, &targs->sargs->query) ;
 
      if ( !response) {
         fprintf(stderr, "get_channel_metadata: failed to retrieve youtube response\n") ;
@@ -164,10 +163,10 @@ void * get_channel_metadata (void * args)
     PathTemplate * template = find_path_template(&targs->sargs->parse->template_list, response) ;
 
     if ( !template) {
-        cJSON * unknown_object = response->child ;
+        json * unknown_object = response->child ;
         char * name = unknown_object ? unknown_object->string : "" ;
         fprintf(stderr, "get_channel_metadata: unknown json result object: \"%s\"\n", name) ;
-        cJSON_Delete(response) ;
+        json_free(response) ;
         return NULL ;
     }
 
@@ -175,13 +174,13 @@ void * get_channel_metadata (void * args)
 
     if ( !parse_youtube_search_result(dest, response, template)) {
         fprintf(stderr, "get_channel_metadata: failed to parse highlighted channel\n") ;
-        cJSON_Delete(response) ; 
+        json_free(response) ; 
         return NULL ;
     }
 
     // TODO : copy the id to the highlighted channel as well as all the search results
 
-    cJSON_Delete(response) ; 
+    json_free(response) ; 
 
     return NULL ;
 }
@@ -201,7 +200,7 @@ void * get_video_metadata (void * args)
     
     query.focused_id[sizeof(query.focused_id) - 1] = '\0' ;
 
-    cJSON * response = get_innertube_response(targs->ssl, targs->client, &query) ;
+    json * response = get_innertube_response(targs->ssl, targs->client, &query) ;
 
     if ( !response) {
         fprintf(stderr, "get_video_metadata: failed to retrieve innertube response\n") ;
@@ -213,10 +212,10 @@ void * get_video_metadata (void * args)
     PathTemplate * template = find_path_template(list, response) ;
 
     if ( !template) {
-        cJSON * unknown_object = response->child ;
+        json * unknown_object = response->child ;
         char * name = unknown_object ? unknown_object->string : "" ;
         fprintf(stderr, "parse_youtube_search_result: unknown json result object: \"%s\"\n", name) ;
-        cJSON_Delete(response) ;
+        json_free(response) ;
         return NULL ;
     }
 
@@ -229,7 +228,7 @@ void * get_video_metadata (void * args)
     if ( !parse_youtube_search_result(dest, response, template)) 
         fprintf(stderr, "get_video_metadata: failed to parse highligted video\n") ;
 
-    cJSON_Delete(response) ;
+    json_free(response) ;
     
     return NULL ;
 }

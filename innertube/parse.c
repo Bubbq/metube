@@ -1,117 +1,27 @@
 #include <ctype.h>
 
 #include "include/parse.h"
-#include "include/data.h"
-#include "include/query.h"
 
 #include "../include/utils.h"
-#include "../include/raylib.h"
 
-static cJSON * parse_json_file (const char * filename)
+static bool json_string_equals (json * root, const char * path, const char * expected)
 {
-    if ( !valid_string(filename)) 
-        return NULL ;
-
-    char * buffer = get_file_content(filename);
-    
-    if ( !buffer) 
-        return NULL ;
-
-    cJSON * json = cJSON_Parse(buffer) ;
-
-    free(buffer) ; buffer = NULL ;
-
-    return json;
-}
-
-static bool json_string_is_valid (const cJSON * json_string)
-{
-    return json_string &&
-           cJSON_IsString(json_string) && 
-           valid_string(json_string->valuestring) ;
-}
-
-static cJSON * get_cjson_ptr (cJSON * root, const char * path)
-{
-    if ( !root || !valid_string(path)) 
-        return root ;
-
-    int n = 0 ;
-    const char ** elements = TextSplit(path, '.', &n) ;
-    
-    if ( !elements) 
-        return NULL;
-
-    cJSON * ret = root ;
-
-    for(int i = 0; (i < n); i++) {
-        if ( !valid_string(elements[i])) 
-            continue ;
-
-        const char * opening_brace = strchr(elements[i], '[') ;
-        
-        if (opening_brace) {
-            const size_t name_len = (size_t) (opening_brace - elements[i]) ; 
-
-            char array_name[name_len + 1] ; 
-            
-            memcpy(array_name, elements[i], name_len) ;
-            array_name[name_len] = '\0' ;
-
-            ret = cJSON_GetObjectItem(ret, array_name) ;
-            
-            if ( !cJSON_IsArray(ret)) 
-                return NULL;
-
-            const char* closing_brace = strchr(opening_brace, ']') ;
-            
-            if ( !closing_brace) 
-                return NULL ;
-
-            const size_t index_len = (size_t) (closing_brace - (opening_brace + 1)) ; 
-
-            char index_buffer[index_len + 1] ;
-            
-            memcpy(index_buffer, (opening_brace + 1), index_len) ; 
-            index_buffer[index_len] = '\0' ;  
-
-            const size_t array_size = cJSON_GetArraySize(ret) ;
-            
-            const int index_buffer_val = atoi(index_buffer) ;
-            
-            const int index = (index_buffer_val == LAST_ELEMENT_INDEX) ? (array_size - 1) : index_buffer_val ;
-
-            if (index >= array_size) 
-                return NULL ;
-
-            ret = cJSON_GetArrayItem(ret, index) ;
-        } 
-
-        else 
-            ret = cJSON_GetObjectItem(ret, elements[i]) ;
-    }
-
-    return ret ;
-}
-
-static bool json_string_equals (cJSON * json, const char * path, const char * expected)
-{
-    if ( !json || !valid_string(path) || !expected)
+    if ( !root || !valid_string(path) || !expected)
         return false ;
 
-    const cJSON * jstring = get_cjson_ptr(json, path) ;
+    const json * jstring = json_get_via_path(root, path) ;
 
     return (json_string_is_valid(jstring)) && (strcmp(jstring->valuestring, expected) == 0) ;
 }
 
 typedef char * (*EnumToTextRoutine) (const int enumeration) ;
 
-static int extract_enum_from_string (cJSON * root, const char * path, const size_t ne_memb, EnumToTextRoutine routine)
+static int extract_enum_from_string (json * root, const char * path, const size_t ne_memb, EnumToTextRoutine routine)
 {
     if ( !root || !path || !routine)
         return -1 ;
 
-    const cJSON * jstring = cJSON_GetObjectItem(root, path) ;
+    const json * jstring = json_get_via_path(root, path) ;
     
     if ( !json_string_is_valid(jstring)) 
         return false ;
@@ -125,12 +35,12 @@ static int extract_enum_from_string (cJSON * root, const char * path, const size
 
 #define EXTRACT_ROUTINE_BUFFER 256
 
-bool extract_string (cJSON * json, const char * path, void * dest, const size_t dest_size)
+bool extract_string (json * root, const char * path, void * dest, const size_t dest_size)
 {
-    if ( !json || !valid_string(path) || !dest) 
+    if ( !root || !valid_string(path) || !dest) 
         return false ;
 
-    const cJSON * jstring = get_cjson_ptr(json, path) ;
+    const json * jstring = json_get_via_path(root, path) ;
     
     if ( !json_string_is_valid(jstring)) 
         return false ;
@@ -140,14 +50,14 @@ bool extract_string (cJSON * json, const char * path, void * dest, const size_t 
     return (0 < written) && (written < dest_size) ;
 }
 
-bool extract_int_from_string (cJSON * json, const char * path, void * dest, const size_t dest_size)
+bool extract_int_from_string (json * root, const char * path, void * dest, const size_t dest_size)
 {
-    if ( !json || !valid_string(path) || !dest) 
+    if ( !root || !valid_string(path) || !dest) 
         return false ;
     
     char buffer[EXTRACT_ROUTINE_BUFFER] = {0} ;
 
-    if ( !extract_string(json, path, buffer, sizeof(buffer))) {
+    if ( !extract_string(root, path, buffer, sizeof(buffer))) {
         fprintf(stderr, "extract_int_from_string: failed string extraction\n") ;
         return false ;
     } 
@@ -164,24 +74,24 @@ bool extract_int_from_string (cJSON * json, const char * path, void * dest, cons
     return true ;
 }
 
-bool extract_allocated_string (cJSON * root, const char * path, void * char_ptr, const size_t sizeof_dest)
+bool extract_allocated_string (json * root, const char * path, void * char_ptr, const size_t sizeof_dest)
 {
     if ( !root || !path || !char_ptr)
         return false ;
 
-    const cJSON * jstring = get_cjson_ptr(root, path) ;
+    const json * jstring = json_get_via_path(root, path) ;
 
     return (json_string_is_valid(jstring)) && ( (*((char**) char_ptr)) = strdup(jstring->valuestring)) ;
 }
 
-bool extract_video_duration (cJSON * json, const char * path, void * dest, const size_t dest_size)
+bool extract_video_duration (json * root, const char * path, void * dest, const size_t dest_size)
 {
-    if ( !json || !valid_string(path) || !dest) 
+    if ( !root || !valid_string(path) || !dest) 
         return false ;
 
     char duration_buffer[EXTRACT_ROUTINE_BUFFER] = {0} ;
 
-    if ( !extract_string(json, path, duration_buffer, sizeof(duration_buffer))) {
+    if ( !extract_string(root, path, duration_buffer, sizeof(duration_buffer))) {
         fprintf(stderr, "extract_video_duration: failed to extract raw video duration with the path %s\n", path) ;
         return false ;
     }
@@ -211,14 +121,14 @@ static int get_youtube_multiplier (const char multiplier_char)
 
 // token is formatted as "x.xxA ...)", where 'A' is either 'K', 'M', 'B', or ' '
 
-bool extract_youtube_formatted_number (cJSON* json, const char * path, void * dest, const size_t dest_size)
+bool extract_youtube_formatted_number (json * root, const char * path, void * dest, const size_t dest_size)
 {
-    if ( !json || !valid_string(path) || !dest) 
+    if ( !root || !valid_string(path) || !dest) 
         return false ;
 
     char sub_count_buffer[EXTRACT_ROUTINE_BUFFER] = {0} ; 
 
-    if ( !extract_string(json, path, sub_count_buffer, sizeof(sub_count_buffer))) {
+    if ( !extract_string(root, path, sub_count_buffer, sizeof(sub_count_buffer))) {
         fprintf(stderr, "extract_youtube_formatted_number: failed extraction with path \"%s\"\n", path) ;
         return false ;
     }
@@ -249,14 +159,14 @@ static bool get_video_thumbnail_path (const char * video_id, char * dest, const 
     return (0 < written) && (written < dest_size) ;
 }
 
-bool extract_video_thumbnail (cJSON * json, const char * path, void * dest, const size_t dest_size)
+bool extract_video_thumbnail (json * root, const char * path, void * dest, const size_t dest_size)
 {
-    if ( !json || !valid_string(path) || !dest)
+    if ( !root || !valid_string(path) || !dest)
         return false ;
 
     char id_buffer[EXTRACT_ROUTINE_BUFFER] = {0} ;
     
-    if ( !extract_string(json, path, id_buffer, sizeof(id_buffer))) {
+    if ( !extract_string(root, path, id_buffer, sizeof(id_buffer))) {
         fprintf(stderr, "extract_video_thumbnail_path: failed to extract raw id with the path \"%s\"\n", path) ;
         return false ;
     }
@@ -264,14 +174,14 @@ bool extract_video_thumbnail (cJSON * json, const char * path, void * dest, cons
     return get_video_thumbnail_path(id_buffer, dest, dest_size) ;
 }
 
-bool extract_channel_thumbnail (cJSON * json, const char * path, void * dest, const size_t dest_size)
+bool extract_channel_thumbnail (json * root, const char * path, void * dest, const size_t dest_size)
 {
-    if ( !json || !valid_string(path) || !dest)
+    if ( !root || !valid_string(path) || !dest)
         return false ;
 
     char thumbnail_buffer[EXTRACT_ROUTINE_BUFFER] = {0} ;
 
-    if ( !extract_string(json, path, thumbnail_buffer, sizeof(thumbnail_buffer))) {
+    if ( !extract_string(root, path, thumbnail_buffer, sizeof(thumbnail_buffer))) {
         fprintf(stderr, "extract_channel_thumbnail_path: failed extraction with path \"%s\"\n", path) ;
         return false ;
     }
@@ -364,7 +274,7 @@ const ParseToken * find_parse_tokens (const SearchResultType type)
     }
 }
 
-bool parse_profile_init (ParseProfile * profile, cJSON * raw_profile)
+bool parse_profile_init (ParseProfile * profile, json * raw_profile)
 {
     if ( !profile || !raw_profile)
         return false ;
@@ -420,19 +330,22 @@ void parse_profile_print (const ParseProfile * profile)
     }
 }
 
-bool profile_list_init(ProfileList * profile_list, cJSON * config)
+bool profile_list_init(ProfileList * profile_list, json * config)
 {
     if ( !profile_list || !config)
         return false ;
 
-    const cJSON * parseProfiles = get_cjson_ptr(config, PARSE_PROFILES_OBJECT) ;
+    const json * parseProfiles = json_get_via_path(config, PARSE_PROFILES_OBJECT) ;
 
-    if ( !cJSON_IsArray(parseProfiles)) {
+    if ( !json_array_is_valid(parseProfiles)) {
         fprintf(stderr, "profile_list_init: failed to retrieve %s\n", PARSE_PROFILES_OBJECT) ;
         return false ;
     }
 
-    profile_list->count = cJSON_GetArraySize(parseProfiles) ;
+    profile_list->count = json_get_array_size(parseProfiles) ;
+
+    if (profile_list->count < 0)
+        return false ;
 
     profile_list->profiles = calloc(profile_list->count, sizeof(ParseProfile)) ;
 
@@ -443,7 +356,7 @@ bool profile_list_init(ProfileList * profile_list, cJSON * config)
 
     for (size_t i = 0; i < profile_list->count; i++) {
         
-        cJSON * raw_profile = cJSON_GetArrayItem(parseProfiles, i) ;
+        json * raw_profile = json_get_array_item(parseProfiles, i) ;
         
         ParseProfile * profile = profile_list->profiles + i ;
 
@@ -470,7 +383,7 @@ void profile_list_free (ProfileList * profile_list)
     free(profile_list->profiles) ; profile_list->profiles = NULL ;
 }
 
-bool path_template_init (PathTemplate * template, cJSON * raw_template)
+bool path_template_init (PathTemplate * template, json * raw_template)
 {
     if ( !template || !raw_template)
         return false ;
@@ -520,19 +433,19 @@ bool path_template_is_ready (const PathTemplate * template)
            enum_is_valid(template->response_type, RESPONSE_COUNT) ;
 }
 
-bool path_template_list_init (PathTemplateList * template_list, cJSON * config)
+bool path_template_list_init (PathTemplateList * template_list, json * config)
 {
     if ( !template_list || !config)
         return false ;
 
-    const cJSON * pathTemplates = get_cjson_ptr(config, PATH_TEMPLATES_OBJECT) ;
+    const json * pathTemplates = json_get_via_path(config, PATH_TEMPLATES_OBJECT) ;
 
-    if ( !cJSON_IsArray(pathTemplates)) {
+    if ( !json_array_is_valid(pathTemplates)) {
         fprintf(stderr, "path_template_list_init: failed to retrieve %s\n", PATH_TEMPLATES_OBJECT) ;
         return false ;
     }
 
-    template_list->count = cJSON_GetArraySize(pathTemplates) ;
+    template_list->count = json_get_array_size(pathTemplates) ;
 
     template_list->templates = calloc(template_list->count, sizeof(PathTemplate)) ;
 
@@ -543,7 +456,7 @@ bool path_template_list_init (PathTemplateList * template_list, cJSON * config)
 
     for ( size_t i = 0 ; (i < template_list->count); i++) {
         
-        cJSON * raw_template = cJSON_GetArrayItem(pathTemplates, i) ;
+        json * raw_template = json_get_array_item(pathTemplates, i) ;
 
         PathTemplate * template = template_list->templates + i ;
 
@@ -574,7 +487,7 @@ bool youtube_parse_context_init (YoutubeParseContext * context, const char * par
     if ( !context || !valid_string(parse_config_path))
         return false ;
 
-    cJSON * config_json = parse_json_file(parse_config_path) ;
+    json * config_json = json_create_from_file(parse_config_path) ;
 
     if ( !config_json) {
         fprintf(stderr, "youtube_parse_context_init: failed to parse %s\n", parse_config_path) ;
@@ -583,17 +496,17 @@ bool youtube_parse_context_init (YoutubeParseContext * context, const char * par
 
     if ( !profile_list_init(&context->profile_list, config_json)) {
         fprintf(stderr, "youtube_parse_context_init: failed to init ProfileList object\n") ;
-        cJSON_Delete(config_json) ;
+        json_free(config_json) ;
         return false ;
     }
 
     if ( !path_template_list_init(&context->template_list, config_json)) {
         fprintf(stderr, "youtube_parse_context_init: failed to init PathTemplateList object\n") ;
-        cJSON_Delete(config_json) ;
+        json_free(config_json) ;
         return false ;
     }
 
-    cJSON_Delete(config_json) ;
+    json_free(config_json) ;
 
     return true ;
 }
@@ -658,7 +571,7 @@ static ExtractDest get_extract_dest (const YoutubeSearchResult * result, const Y
     return dest ;    
 }
 
-static SearchResultType find_search_result_type (cJSON * response, const YoutubeJSONResponse type)
+static SearchResultType find_search_result_type (json * response, const YoutubeJSONResponse type)
 {
     if ( !response)
         return SEARCH_RESULT_TYPE_UNDF ;
@@ -681,12 +594,12 @@ static SearchResultType find_search_result_type (cJSON * response, const Youtube
     }
 }
 
-bool parse_youtube_search_result (YoutubeSearchResult * dest, cJSON * json, PathTemplate * template)
+bool parse_youtube_search_result (YoutubeSearchResult * dest, json * root, PathTemplate * template)
 {
-    if ( !dest || !json || !path_template_is_ready(template))
+    if ( !dest || !root || !path_template_is_ready(template))
         return false ;
 
-    cJSON * result_json = get_cjson_ptr(json, template->response_path) ;
+    json * result_json = json_get_via_path(root, template->response_path) ;
 
     if ( !result_json) {
         fprintf(stderr, "parse_youtube_search_result: failed to retrieve search result JSON object with path %s\n", template->response_path) ;
@@ -731,13 +644,13 @@ bool parse_youtube_search_result (YoutubeSearchResult * dest, cJSON * json, Path
     return true ;
 }
 
-PathTemplate * find_path_template (PathTemplateList * list, cJSON * item)
+PathTemplate * find_path_template (PathTemplateList * list, json * item)
 {
     if ( !list || !item)
         return NULL ;
 
      for (size_t i = 0; (i < list->count); i++) {
-        if (get_cjson_ptr(item, list->templates[i].response_path))
+        if (json_get_via_path(item, list->templates[i].response_path))
             return &list->templates[i] ;
     }
 
@@ -759,7 +672,7 @@ static ParseProfile * find_parse_profile (ProfileList * list, const QueryAction 
     return profile ;
 }
 
-int get_youtube_search_results (cJSON * response, YoutubeParseContext * context, LinkedList * results_dest, char ** continuation_token, const QueryType type, const QueryAction action)
+int get_youtube_search_results (json * response, YoutubeParseContext * context, LinkedList * results_dest, char ** continuation_token, const QueryType type, const QueryAction action)
 {
     if ( !response || !context || !results_dest || !continuation_token) 
         return -1 ;
@@ -786,9 +699,9 @@ int get_youtube_search_results (cJSON * response, YoutubeParseContext * context,
     else
         printf("EXTRACTED CONTINUATION TOKEN: \"%s\"\n\n", (*continuation_token)) ;
 
-    cJSON * search_results = get_cjson_ptr(response, profile->results_path) ;
+    json * search_results = json_get_via_path(response, profile->results_path) ;
 
-    if ( !cJSON_IsArray(search_results)) {
+    if ( !json_array_is_valid(search_results)) {
         fprintf(stderr, "get_youtube_search_results: %s returned an invalid results array object\n", profile->results_path) ;
         return -1 ;
     }
@@ -801,15 +714,15 @@ int get_youtube_search_results (cJSON * response, YoutubeParseContext * context,
 
     int results_added = 0 ;
     
-    const size_t nelements = cJSON_GetArraySize(search_results) ;
+    const size_t nelements = json_get_array_size(search_results) ;
 
     for (size_t i = 0; i < nelements; i++) {
-        cJSON * item = cJSON_GetArrayItem(search_results, i) ;
+        json * item = json_get_array_item(search_results, i) ;
 
         PathTemplate * template = find_path_template(&context->template_list, item) ;
     
         if ( !template) {
-            cJSON * unknown_object = item->child ;
+            json * unknown_object = item->child ;
             char * name = unknown_object ? unknown_object->string : "" ;
             fprintf(stderr, "get_youtube_search_results: unknown json result object: \"%s\"\n", name) ;
             continue ;

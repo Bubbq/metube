@@ -1,8 +1,7 @@
-#include <cjson/cJSON.h>
-
 #include "include/query.h"
 
 #include "../include/utils.h"
+#include "../include/json_utils.h"
 
 const char * filter_to_text (const FilterBy filter) 
 {
@@ -104,79 +103,79 @@ const char * query_action_to_text (const QueryAction action)
     }
 }
 
-static cJSON * configure_client_object ()
+static json * configure_client_object ()
 {
-    cJSON * client = cJSON_CreateObject() ;
+    json * client = json_create_object() ;
     
     if ( !client) {
         fprintf(stderr, "configure_client_object: failed to create object\n") ;
         return NULL ;
     }
 
-    if ( !cJSON_AddStringToObject(client, "clientName", CLIENT_NAME)) {
+    if ( !json_add_string_to_object(client, "clientName", CLIENT_NAME)) {
         fprintf(stderr, "configure_client_object: failed to add 'clientName'\n") ;
-        cJSON_Delete(client) ;
+        json_free(client) ;
         return NULL ;
     }
 
-    if ( !cJSON_AddStringToObject(client, "clientVersion", CLIENT_VER)) {
+    if ( !json_add_string_to_object(client, "clientVersion", CLIENT_VER)) {
         fprintf(stderr, "configure_client_object: failed to add 'clientVersion'\n") ;
-        cJSON_Delete(client) ;
+        json_free(client) ;
         return NULL ;
     }
 
     return client;
 }
 
-static cJSON * configure_base_payload ()
+static json * configure_base_payload ()
 {
-    cJSON * client = configure_client_object() ;
+    json * client = configure_client_object() ;
 
     if ( !client) {
         fprintf(stderr, "configure_base_payload: 'client' is NULL\n") ;
         return NULL ;
     }
 
-    cJSON * context = cJSON_CreateObject() ;
+    json * context = json_create_object() ;
     
     if ( !context) {
         fprintf(stderr, "configure_base_payload: 'context' is NULL\n") ;
-        cJSON_Delete(client) ;
+        json_free(client) ;
         return NULL ;
     }
     
-    if ( !cJSON_AddItemToObject(context, "client", client)) {
+    if ( !json_add_item_to_object(context, "client", client)) {
         fprintf(stderr, "configure_base_payload: failed to add 'client' to 'context'\n") ;
-        cJSON_Delete(client) ;
-        cJSON_Delete(context) ; 
+        json_free(client) ;
+        json_free(context) ; 
         return NULL ;
     }  
     
-    cJSON * root = cJSON_CreateObject() ;
+    json * root = json_create_object() ;
     
     if ( !root) {
         fprintf(stderr, "configure_base_payload: 'root' is NULL\n");
-        cJSON_Delete(context) ; 
+        json_free(context) ; 
         return NULL ;
     }
 
-    if ( !cJSON_AddItemToObject(root, "context", context)) {
+    if ( !json_add_item_to_object(root, "context", context)) {
         fprintf(stderr, "configure_base_payload: failed to add 'context' to 'root'\n") ;
-        cJSON_Delete(context) ; 
-        cJSON_Delete(root) ;
+        json_free(context) ; 
+        json_free(root) ;
     }  
 
     return root; 
 }
 
-static bool add_continuation_payload (cJSON * root, const char * continuation_token)
+static bool add_continuation_payload (json * root, const char * continuation_token)
 {
     return root && 
            valid_string(continuation_token) && 
-           cJSON_AddStringToObject(root, "continuation", continuation_token) ;
+           json_add_string_to_object(root, "continuation", continuation_token) ;
 }
 
-static bool add_view_user_input_payload (cJSON * root, const char * query, const SortBy sort, const FilterBy filter)
+static bool add_view_user_input_payload (json * root, const char * query, const SortBy sort, const FilterBy filter)
 {
     if ( !root || !valid_string(query))
         return false ;
@@ -203,25 +202,25 @@ static bool add_view_user_input_payload (cJSON * root, const char * query, const
     if ( (written < 0) || (written >= sizeof(params))) 
         return false ;
 
-    return cJSON_AddStringToObject(root, "query", query) && cJSON_AddStringToObject(root, "params", params) ;
+    return json_add_string_to_object(root, "query", query) && json_add_string_to_object(root, "params", params) ;
 }
 
-static bool add_video_id_payload (cJSON * root, const char * video_id)
+static bool add_video_id_payload (json * root, const char * video_id)
 {
     return root && 
            valid_string(video_id) && 
-           cJSON_AddStringToObject(root, "videoId", video_id) ;
+           json_add_string_to_object(root, "videoId", video_id) ;
 }
 
-static bool add_view_channel_videos_payload (cJSON * root, const char * channel_id)
+static bool add_view_channel_videos_payload (json * root, const char * channel_id)
 {
     return root && 
            valid_string(channel_id) && 
-           cJSON_AddStringToObject(root, "browseId", channel_id) && 
-           cJSON_AddStringToObject(root, "params", YT_API_CHANNEL_VIDEOS_PARAMS) ;
+           json_add_string_to_object(root, "browseId", channel_id) && 
+           json_add_string_to_object(root, "params", YT_API_CHANNEL_VIDEOS_PARAMS) ;
 }
 
-static bool add_view_playlist_videos_payload (cJSON * root, const char * playlist_id)
+static bool add_view_playlist_videos_payload (json * root, const char * playlist_id)
 {
     if ( !root || !valid_string(playlist_id))
         return false ;
@@ -232,15 +231,15 @@ static bool add_view_playlist_videos_payload (cJSON * root, const char * playlis
 
     return (0 < written) && 
            (written < sizeof(browseId)) && 
-           cJSON_AddStringToObject(root, "browseId", browseId) ;
+           json_add_string_to_object(root, "browseId", browseId) ;
 }
 
-static cJSON * configure_post_payload (const Query * query, const char * continuation_token)
+static json * configure_post_payload (const Query * query, const char * continuation_token)
 {
     if ( !query) 
         return NULL ;
 
-    cJSON * root = configure_base_payload() ;
+    json * root = configure_base_payload() ;
     
     if ( !root) {
         fprintf(stderr, "configure_post_payload: failed to create base payload\n") ;
@@ -266,7 +265,7 @@ static cJSON * configure_post_payload (const Query * query, const char * continu
 
     if ( !success) {
         fprintf(stderr, "configure_post_payload: failed to add payload with QueryAction %d and QueryType %d\n", query->action, query->type) ;
-        cJSON_Delete(root) ; 
+        json_free(root) ; 
     }
 
     return success ? root : NULL ;
@@ -301,16 +300,16 @@ HttpsRequest configure_innertube_request (const Query query, const char * host, 
         return req ;
     }
 
-    cJSON * payload = configure_post_payload(&query, continuation_token) ;
+    json * payload = configure_post_payload(&query, continuation_token) ;
 
     if ( !payload) {
         fprintf(stderr, "configure_post_request: 'payload' is NULL\n") ;
         return req ;
     }
 
-    req.payload = cJSON_Print(payload) ;
+    req.payload = json_print(payload) ;
 
-    cJSON_Delete(payload) ;
+    json_free(payload) ;
 
     if ( !configure_post_header(req.header, sizeof(req.header), host, req.path, strlen(req.payload))) {
         fprintf(stderr, "configure_post_request: failed to resolve header\n");

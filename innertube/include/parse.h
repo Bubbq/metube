@@ -1,13 +1,10 @@
 #ifndef PARSE_H
 #define PARSE_H
 
-#include <cjson/cJSON.h>
-
 #include "data.h"
 #include "query.h"
+#include "../../include/json_utils.h"
 #include "../../include/linked_list.h"
-
-#define LAST_ELEMENT_INDEX -1
 
 #define HIGH_THUMBNAIL_VIDEO_RESOLUTION     "hqdefault"
 #define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION   "mqdefault"

@@ -1,7 +1,6 @@
 #ifndef INNERTUBE_H
 #define INNERTUBE_H
 
-#include "query.h"
 #include "parse.h"
 
 typedef struct {
