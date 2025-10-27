@@ -1,7 +1,6 @@
 #ifndef THUMBNAILS_H
 #define THUMBNAILS_H
 
-#include "query.h"
 #include "buffer.h"
 #include "connection.h"
 #include "linked_list.h"
@@ -9,11 +8,27 @@
 
 #define YOUTUBE_THUMBNAIL_EXTENSION ".jpeg"
 
+typedef enum {
+    MEDIA_VIDEO,
+    MEDIA_CHANNEL,
+    MEDIA_PLAYLIST,
+    MEDIA_COUNT,
+} MediaType ;
+
+char * media_to_thumbnail_host (const MediaType media) ;
+
+typedef struct {
+    float width;
+    float height;
+} ThumbnailDimension;
+
+ThumbnailDimension media_type_to_dimensions (const MediaType media) ;
+
 typedef struct RawThumbnail
 {
     char id[64] ;     
     Buffer image_data ;              
-    SearchResultType search_result_type ;
+    MediaType media_type ;
 } RawThumbnail ;
 
 RawThumbnail * raw_thumbnail_init     () ;
@@ -37,7 +52,7 @@ typedef struct
     char id[64] ;
     SSL_CTX * ssl_ctx ;
     ThumbnailLoader * loader ;
-    SearchResultType search_result_type ;
+    MediaType media_type ;
 } LoadThumbnailArgs ;
 
 void * load_thumbnail(void * args) ;

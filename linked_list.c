@@ -90,6 +90,8 @@ Node * linked_list_dequeue (LinkedList * linked_list)
 
     linked_list->count-- ;
 
+    detached->prev = detached->next = NULL ;
+
     return detached ;
 }
 

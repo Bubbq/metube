@@ -1,7 +1,7 @@
 #include "include/thumbnails.h"
 
 #include "include/utils.h"
-#include "include/https_utils.h"
+#include "include/ssl_utils.h"
 
 RawThumbnail * raw_thumbnail_init ()
 {
@@ -11,7 +11,7 @@ RawThumbnail * raw_thumbnail_init ()
         return NULL ;
 
     raw_thumbnail->image_data = buffer_init() ;
-    raw_thumbnail->search_result_type = SEARCH_RESULT_TYPE_UNDF ;
+    raw_thumbnail->media_type = -1 ;
     memset(raw_thumbnail->id, 0, sizeof(raw_thumbnail->id)) ;
 
     return raw_thumbnail ;
@@ -30,10 +30,32 @@ void raw_thumbnail_free (RawThumbnail * raw_thumbnail)
 
 bool raw_thumbnail_is_ready (const RawThumbnail * raw_thumbnail)
 {
-    return (raw_thumbnail) && 
-           (valid_string(raw_thumbnail->id)) && 
-           (buffer_is_ready(&raw_thumbnail->image_data)) && 
-           (raw_thumbnail->search_result_type != SEARCH_RESULT_TYPE_UNDF) ;
+    return raw_thumbnail && 
+           valid_string(raw_thumbnail->id) && 
+           buffer_is_ready(&raw_thumbnail->image_data) && 
+           enum_is_valid(raw_thumbnail->media_type, MEDIA_COUNT) ;
+}
+
+char * media_to_thumbnail_host (const MediaType media)
+{
+    switch (media) {
+        case MEDIA_VIDEO:
+        case MEDIA_PLAYLIST: return "i.ytimg.com" ;
+        case MEDIA_CHANNEL: return "yt3.ggpht.com" ;
+        default:
+            return NULL ;
+    }
+}
+
+ThumbnailDimension media_type_to_dimensions (const MediaType media)
+{
+    switch (media) {
+        case MEDIA_VIDEO:
+        case MEDIA_PLAYLIST: return (ThumbnailDimension) { 150, 80 } ;
+        case MEDIA_CHANNEL: return (ThumbnailDimension) { 75, 75 } ;
+        default:
+            return (ThumbnailDimension) { 0 } ;
+    }
 }
 
 bool thumbnail_loader_init (ThumbnailLoader * thumbnail_loader, const size_t nconns)
@@ -41,8 +63,8 @@ bool thumbnail_loader_init (ThumbnailLoader * thumbnail_loader, const size_t nco
     if ( !thumbnail_loader)
         return false ;
 
-    const char * video_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_VIDEO) ;
-    const char * channel_thumb_host = search_result_type_to_thumbnail_host(SEARCH_RESULT_TYPE_CHANNEL) ;
+    const char * video_thumb_host = media_to_thumbnail_host(MEDIA_VIDEO) ;
+    const char * channel_thumb_host = media_to_thumbnail_host(MEDIA_CHANNEL) ;
     
     thumbnail_loader->thumbail_queue = linked_list_init() ;
     
@@ -63,7 +85,7 @@ void thumbnail_loader_free (ThumbnailLoader * loader)
     connection_pool_free(&loader->channel_thumbnail_pool) ;
 }
 
-static const Texture load_texture_from_memory (const Buffer * image_buffer, const char * image_extension, const float width, const float height)
+static const Texture load_texture_from_memory (const Buffer * image_buffer, const char * image_extension, const ThumbnailDimension dimensions)
 {
     Texture texture = {0} ;
 
@@ -72,7 +94,7 @@ static const Texture load_texture_from_memory (const Buffer * image_buffer, cons
 
     Image image = LoadImageFromMemory(image_extension, (const unsigned char*) image_buffer->data, image_buffer->size) ;
     if (IsImageReady(image)) {
-        ImageResize(&image, width, height) ;
+        ImageResize(&image, dimensions.width, dimensions.height) ;
         texture = LoadTextureFromImage(image) ;
         UnloadImage(image) ;
     }
@@ -85,10 +107,8 @@ static void process_raw_thumbnail (RawThumbnail * raw_thumbnail, TextureCache * 
     if ( !raw_thumbnail_is_ready(raw_thumbnail))
         return ;   
 
-    const float thumbnail_w = search_result_type_to_thumbnail_width(raw_thumbnail->search_result_type) ;
-    const float thumbnail_h = search_result_type_to_thumbnail_height(raw_thumbnail->search_result_type) ;
-
-    Texture thumbnail = load_texture_from_memory(&raw_thumbnail->image_data, YOUTUBE_THUMBNAIL_EXTENSION, thumbnail_w, thumbnail_h) ;
+    const ThumbnailDimension dimensions = media_type_to_dimensions(raw_thumbnail->media_type) ;
+    Texture thumbnail = load_texture_from_memory(&raw_thumbnail->image_data, YOUTUBE_THUMBNAIL_EXTENSION, dimensions) ;
 
     TextureCacheEntry * entry = texture_cache_entry_init(thumbnail, raw_thumbnail->id) ;
     if (texture_cache_entry_is_ready(entry)) 
@@ -126,7 +146,7 @@ void * load_thumbnail (void * args)
         return NULL ;
     }
     
-    ConnectionPool * pool = targs->search_result_type == SEARCH_RESULT_TYPE_CHANNEL ? 
+    ConnectionPool * pool = targs->media_type == MEDIA_CHANNEL ? 
                                                         &targs->loader->channel_thumbnail_pool : 
                                                         &targs->loader->video_thumbnail_pool ;
     
@@ -155,7 +175,7 @@ void * load_thumbnail (void * args)
     }
 
     raw_thumbnail->image_data = image_data ;
-    raw_thumbnail->search_result_type = targs->search_result_type ;
+    raw_thumbnail->media_type = targs->media_type ;
     strncpy(raw_thumbnail->id, targs->id, sizeof(raw_thumbnail->id)) ;
     
     Node * node = node_init(raw_thumbnail, sizeof(RawThumbnail), (void*) raw_thumbnail_free, NULL) ;

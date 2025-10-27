@@ -13,6 +13,8 @@ size_t trim_whitespace(char* string);
 int filter_non_numeric_chars(char* string, const size_t string_size);
 bool valid_string(const char* string);
 bool connected_to_internet();
-void format_view_count(char* dest, const size_t dest_size);
+int hms_to_seconds (const char * hms) ;
+bool array_contains_object (const void * array, const size_t nmemb, const size_t element_size, const void * object, const size_t object_size) ;
+bool enum_is_valid (const int enumeration, const size_t ne_memb) ;
 
 #endif

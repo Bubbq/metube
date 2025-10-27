@@ -7,7 +7,7 @@
 typedef struct
 {
     size_t size ;
-    char * data ;
+    void * data ;
 } Buffer ;
 
 Buffer buffer_init   () ;

@@ -1,8 +1,15 @@
-#include "include/https_utils.h"
+#include "include/ssl_utils.h"
 
 #include "include/utils.h"
 
 #include <ctype.h>
+
+bool post_request_is_ready (const HttpsRequest post)
+{
+    return valid_string(post.header) && 
+           valid_string(post.path) && 
+           valid_string(post.payload) ;
+}
 
 bool configure_get_header (char* dest, const size_t dest_size, const char* host, const char* path)
 {
@@ -300,22 +307,4 @@ Buffer get_https_response(const HttpsRequest request, SSL_CTX* ssl_ctx, Connecti
     cleanup:
         pthread_mutex_unlock(&connection->mutex);
         return res;
-}
-
-cJSON* get_json_response(const HttpsRequest* req, SSL_CTX* ssl_ctx, Connection* conn, const char* protocol_ver)
-{
-    if (!req || !ssl_ctx || !conn || !valid_string(protocol_ver)) 
-        return NULL;
-
-    Buffer res = get_https_response((*req), ssl_ctx, conn, protocol_ver);
-    if (!buffer_is_ready(&res)) {
-        fprintf(stderr, "get_json_response: invalid response recived\n");
-        return NULL;
-    }
-
-    cJSON* ret = cJSON_Parse(res.data);
-
-    buffer_free(&res);
-    
-    return ret;
 }

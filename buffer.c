@@ -42,7 +42,8 @@ bool write_to_buffer (Buffer * buffer, const char * data, const size_t data_size
     memcpy(data_dest, data, data_size) ;
 
     buffer->size += data_size ;
-    buffer->data[buffer->size] = '\0' ;
+    
+    (*((char*)(buffer->data + buffer->size))) = '\0' ;
 
     return true ;
 }

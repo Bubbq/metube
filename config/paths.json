@@ -1,0 +1,143 @@
+
+{
+    "pathTemplates" : [
+        {
+            "JSON_PATH" : ".richItemRenderer.content.videoRenderer",
+            "NAME" : "richItemRenderer",
+            "ID" : ".videoId",
+            "TITLE" : ".title.runs[0].text",
+            "DURATION" : ".lengthText.simpleText",
+            "VIEW_COUNT" : ".viewCountText.simpleText",
+            "LIVE_VIEW_COUNT" : ".viewCountText.runs[0].text",
+            "UPLOAD_DATE" : ".publishedTimeText.simpleText",
+            "THUMBNAIL_PATH" : ".videoId"
+        },
+
+        {
+            "JSON_PATH" : ".videoRenderer",
+            "NAME" : "videoRenderer",
+            "ID" : ".videoId",
+            "TITLE" : ".title.runs[0].text",
+            "DURATION" : ".lengthText.simpleText",
+            "AUTHOR_ID" : ".longBylineText.runs[0].navigationEndpoint.browseEndpoint.browseId",
+            "VIEW_COUNT" : ".viewCountText.simpleText",
+            "LIVE_VIEW_COUNT" : ".viewCountText.runs[0].text",
+            "UPLOAD_DATE" : ".publishedTimeText.simpleText",
+            "THUMBNAIL_PATH" : ".videoId"
+        },
+
+        {
+            "JSON_PATH" : ".channelRenderer",
+            "NAME" : "channelRenderer",
+            "ID" : ".channelId",
+            "TITLE" : ".title.simpleText",
+            "SUBSCRIBER_COUNT" : ".videoCountText.simpleText",
+            "THUMBNAIL_PATH" : ".thumbnail.thumbnails[0].url"
+        },
+
+         {
+            "JSON_PATH" : ".header.pageHeaderRenderer.content.pageHeaderViewModel",
+            "NAME" : "highlightedChannelRenderer",
+            "TITLE" : ".title.dynamicTextViewModel.text.content",
+            "SUBSCRIBER_COUNT" : ".metadata.contentMetadataViewModel.metadataRows[1].metadataParts[0].text.content",
+            "THUMBNAIL_PATH" : ".image.decoratedAvatarViewModel.avatar.avatarViewModel.image.sources[0].url"
+        },
+
+        {
+            "JSON_PATH" : ".lockupViewModel",
+            "NAME" : "lockupViewModel",
+            "ID" : ".contentId",
+            "TITLE" : ".metadata.lockupMetadataViewModel.title.content",
+            "DURATION" : ".contentImage.thumbnailViewModel.overlays[0].thumbnailOverlayBadgeViewModel.thumbnailBadges[0].thumbnailBadgeViewModel.text",
+            "AUTHOR_ID" : ".metadata.lockupMetadataViewModel.image.decoratedAvatarViewModel.rendererContext.commandContext.onTap.innertubeCommand.browseEndpoint.browseId",
+            "VIEW_COUNT" : ".metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[0].text.content",
+            "PLAYLIST_LENGTH" : ".contentImage.collectionThumbnailViewModel.primaryThumbnail.thumbnailViewModel.overlays[0].thumbnailOverlayBadgeViewModel.thumbnailBadges[0].thumbnailBadgeViewModel.text",
+            "UPLOAD_DATE" : ".metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[1].metadataParts[1].text.content",
+            "THUMBNAIL_PATH" : ".rendererContext.commandContext.onTap.innertubeCommand.watchEndpoint.videoId"
+        },
+
+        {
+            "JSON_PATH" : ".playlistVideoRenderer",
+            "NAME" : "playlistVideoRenderer",
+            "ID" : ".videoId",
+            "TITLE" : ".title.runs[0].text",
+            "DURATION" : ".lengthText.simpleText",
+            "AUTHOR_ID" : ".shortBylineText.runs[0].navigationEndpoint.browseEndpoint.browseId",
+            "VIEW_COUNT" : ".videoInfo.runs[0].text",
+            "UPLOAD_DATE" : ".videoInfo.runs[2].text",
+            "THUMBNAIL_PATH" : ".videoId"
+        },
+
+        {
+            "JSON_PATH" : ".microformat.playerMicroformatRenderer",
+            "NAME" : "highlightedVideoRenderer",
+            "ID" : ".externalVideoId",
+            "TITLE" : ".title.simpleText",
+            "DURATION" : ".lengthSeconds",
+            "AUTHOR_ID" : ".externalChannelId",
+            "VIEW_COUNT" : ".viewCount",
+            "UPLOAD_DATE" : ".publishDate",
+            "THUMBNAIL_PATH" : ".externalVideoId",
+            "DESCRIPTION" : ".description.simpleText"
+        }
+
+    ],
+
+    "parseProfiles" : [
+        {
+            "queryAction": "SEARCH",
+            "queryType": "REPLACE",
+            "results": ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents",
+            "continuationToken": ".contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"
+        },
+
+        {
+            "queryAction": "SEARCH",
+            "queryType": "APPEND",
+            "results": ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[0].itemSectionRenderer.contents",
+            "continuationToken": ".onResponseReceivedCommands[0].appendContinuationItemsAction.continuationItems[1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"
+        },
+    
+        {
+            "queryAction": "VIEW_RELATED",
+            "queryType": "REPLACE",
+            "results": ".contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results",
+            "continuationToken": ".contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"
+        },
+    
+        {
+            "queryAction": "VIEW_RELATED",
+            "queryType": "APPEND",
+            "results": ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems",
+            "continuationToken": ".onResponseReceivedEndpoints[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"
+        },
+    
+        {
+            "queryAction": "VIEW_PLAYLIST",
+            "queryType": "REPLACE",
+            "results": ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents",
+            "continuationToken": ".contents.twoColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].playlistVideoListRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.commandExecutorCommand.commands[1].continuationCommand.token"
+        },
+    
+        {
+            "queryAction": "VIEW_PLAYLIST",
+            "queryType": "APPEND",
+            "results": ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems",
+            "continuationToken": ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"
+        },
+    
+        {
+            "queryAction": "CHANNEL_PRESS",
+            "queryType": "REPLACE",
+            "results": ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents",
+            "continuationToken": ".contents.twoColumnBrowseResultsRenderer.tabs[1].tabRenderer.content.richGridRenderer.contents[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"
+        },
+    
+        {
+            "queryAction": "CHANNEL_PRESS",
+            "queryType": "APPEND",
+            "results": ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems",
+            "continuationToken": ".onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems[-1].continuationItemRenderer.continuationEndpoint.continuationCommand.token"
+        }
+    ]
+}

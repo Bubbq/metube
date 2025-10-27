@@ -58,7 +58,6 @@ char* get_file_content(const char* filepath)
     if (!buffer) {
         fprintf(stderr, "get_file_length: malloc returned null\n");
         fclose(fp); fp = NULL;
-        exit(EXIT_FAILURE);
     }
 
     const unsigned long read = fread(buffer, sizeof(char), len, fp);
@@ -150,21 +149,47 @@ bool connected_to_internet()
     return connected;
 }
 
-void format_view_count(char* dest, const size_t dest_size)
+int hms_to_seconds (const char * hms)
 {
-    if (!dest || (filter_non_numeric_chars(dest, dest_size) <= 0)) 
-        return;
+    if ( !hms)
+        return -1 ;
 
-    const float view_count = strtof(dest, NULL);
+    int colon_count = 0 ;
+    for (const char * c_ptr = hms ; (*c_ptr) != '\0' ; c_ptr++) 
+        if ((*c_ptr) == ':')
+            colon_count++ ;
+    
+    int hours = 0, minutes = 0, seconds = 0 ;
 
-    if      (view_count < 1e3)  snprintf(dest, dest_size, "%.0f  views", view_count);         // 0               - 999
-    else if (view_count < 1e4)  snprintf(dest, dest_size, "%.2fk views", (view_count / 1e3)); // 1,000           - 9,999
-    else if (view_count < 1e5)  snprintf(dest, dest_size, "%.1fk views", (view_count / 1e3)); // 10,000          - 99,999
-    else if (view_count < 1e6)  snprintf(dest, dest_size, "%.0fk views", (view_count / 1e3)); // 100,000         - 999,999
-    else if (view_count < 1e7)  snprintf(dest, dest_size, "%.2fM views", (view_count / 1e6)); // 1,000,000       - 9,999,999
-    else if (view_count < 1e8)  snprintf(dest, dest_size, "%.1fM views", (view_count / 1e6)); // 10,000,000      - 99,999,999
-    else if (view_count < 1e9)  snprintf(dest, dest_size, "%.0fM views", (view_count / 1e6)); // 100,000,000     - 999,999,999
-    else if (view_count < 1e10) snprintf(dest, dest_size, "%.2fB views", (view_count / 1e9)); // 1,000,000,000   - 9,999,999,999
-    else if (view_count < 1e11) snprintf(dest, dest_size, "%.1fB views", (view_count / 1e9)); // 10,000,000,000  - 99,999,999,999
-    else if (view_count < 1e12) snprintf(dest, dest_size, "%.0fB views", (view_count / 1e9)); // 100,000,000,000 - 999,999,999,999
+    if (colon_count == 2) 
+        sscanf(hms, "%d:%d:%d", &hours, &minutes, &seconds) ;
+
+    else if (colon_count == 1) 
+        sscanf(hms, "%d:%d", &minutes, &seconds) ;
+
+    else {
+        fprintf(stderr, "extract_video_duration: %s is not in HH:MM:SS format\n", hms) ;
+        return -1 ;
+    }
+
+    return (hours * 3600) + (minutes * 60) + seconds ;
+}
+
+bool array_contains_object (const void * array, const size_t nmemb, const size_t element_size, const void * object, const size_t object_size)
+{
+    if ( !array || !object || (element_size != object_size))
+        return false ;
+
+    size_t i  = 0 ;
+
+    for (char * ptr = ((char*) array); (i < nmemb); i++, ptr += object_size) 
+        if (memcmp(object, ptr, object_size) == 0)
+            return true ;
+    
+    return false ;
+}
+
+bool enum_is_valid (const int enumeration, const size_t ne_memb)
+{
+    return (0 <= enumeration) && (enumeration < ne_memb) ;
 }
