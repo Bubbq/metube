@@ -2,6 +2,7 @@
 #define LINKED_LIST_H
 
 #include <pthread.h>
+#include <stdbool.h>
 
 typedef void (*FreeRoutine)  (void *) ;
 typedef void (*PrintRoutine) (void *) ;
@@ -27,9 +28,18 @@ typedef struct {
 } LinkedList ;
 
 LinkedList linked_list_init    () ;
-void       linked_list_free    (LinkedList * linked_list) ;
-void       linked_list_print   (LinkedList * linked_list) ;
-Node *     linked_list_dequeue (LinkedList * linked_list) ;
-void       linked_list_append  (LinkedList * linked_list, Node * node) ;
+void   linked_list_free    (LinkedList * list) ;
+void   linked_list_print   (LinkedList * list) ;
+Node * linked_list_dequeue (LinkedList * list) ;
+void   linked_list_append  (LinkedList * list, Node * node) ;
+void   linked_list_insert  (LinkedList * list, Node * node, const size_t position) ;
+
+void   node_detach         (LinkedList * list, Node * node) ;
+
+// function pointer that compares two objects
+
+typedef bool (*compar) (const void * a, const void * b) ;
+
+Node * linked_list_find (LinkedList * list, const void * data, const compar comparator) ;
 
 #endif

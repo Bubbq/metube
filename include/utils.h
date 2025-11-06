@@ -4,6 +4,15 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+typedef struct
+{
+    size_t start_time;
+	size_t lifetime; // in seconds
+} Timer;
+
+void timer_start(Timer* timer, const size_t lifetime) ;
+bool timer_is_done(Timer timer) ;
+
 int bound_index_to_array (const int pos, const int array_size);
 bool file_exists(const char* filename);
 const long get_file_length(FILE* fp);

@@ -97,6 +97,7 @@ const char * query_action_to_text (const QueryAction action)
         case QUERY_ACTION_VIEW_RELATED: return "VIEW_RELATED" ;
         case QUERY_ACTION_VIEW_HISTORY: return "VIEW_HISTORY" ;
         case QUERY_ACTION_VIEW_LIKES: return "VIEW_LIKES" ;
+        case QUERY_ACTION_UPDATE_SUBSCRIPTION: return "UPDATE_SUBSCRIPTION" ; 
         case QUERY_ACTION_VIEW_SUBSCRIPTIONS: return "VIEW_SUBSCRIPTIONS" ;
         default:
             return NULL ;

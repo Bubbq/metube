@@ -17,16 +17,18 @@ typedef struct {
     ClientContext * client;
     YoutubeSearchResult * dest;
     YoutubeParseContext * parse;
+    LinkedList * current_likes;
 } VideoMetadataArgs;
 
 typedef struct {
     SearchThreadArgs * sargs;
     YoutubeSearchResult * dest;
+    LinkedList * current_subscriptions;
 } ChannelMetadataArgs;
 
 SearchThreadArgs * create_search_thread_args (Query query, SSL_CTX * ssl, LinkedList * results, ClientContext * client, YoutubeParseContext * parse) ;
-VideoMetadataArgs * create_video_metadata_args (SSL_CTX * ssl, const char * video_id, ClientContext * client, YoutubeSearchResult * dest, YoutubeParseContext * parse) ;
-ChannelMetadataArgs * create_channel_metadata_args (SearchThreadArgs * sargs, YoutubeSearchResult * dest) ;
+VideoMetadataArgs * create_video_metadata_args (SSL_CTX * ssl, const char * video_id, ClientContext * client, YoutubeSearchResult * dest, YoutubeParseContext * parse, LinkedList * current_likes) ;
+ChannelMetadataArgs * create_channel_metadata_args (SearchThreadArgs * sargs, YoutubeSearchResult * dest, LinkedList * current_subscriptions) ;
 void free_channel_metadata_args (ChannelMetadataArgs * cargs) ;
 
 cJSON * get_innertube_response (SSL_CTX * ssl, ClientContext * client, Query * query) ;

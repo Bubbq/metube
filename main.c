@@ -1,4 +1,3 @@
-#include "include/utils.h"
 #include "include/thumbnails.h"
 #include "include/thread_utils.h"
 #include "innertube/include/innertube.h"
@@ -9,22 +8,6 @@
 #define THREADS 4
 #define YOUTUBE_HOST "www.youtube.com"
 #define PARSE_CONFIG_PATH "./config/paths.json"
-
-void write_json_to_file(const cJSON* json, const char* filename)
-{
-    if (!json || !valid_string(filename)) 
-        return;
-
-    char* buffer = cJSON_Print(json);
-    if (!buffer) {
-        fprintf(stderr, "write_json_file: json object is empty\n");
-        return; 
-    }
-
-    write_string_to_file(filename, buffer);
-
-    free(buffer); buffer = NULL;
-}
 
 MediaType result_type_to_media (const SearchResultType type)
 {
@@ -40,357 +23,212 @@ MediaType result_type_to_media (const SearchResultType type)
     }
 }
 
-bool queue_load_thumbnail(SSL_CTX* ssl_ctx, ThumbnailLoader* loader, ThreadContext * thread_context, SearchResultType search_result_type, const char* id, const char* path)
-{
-    if ((!ssl_ctx) || 
-        (!loader) || 
-        (!thread_context) || 
-        (!valid_string(id)) || 
-        (!valid_string(path))) {
-        fprintf(stderr, "queue_load_thumbnail: invalid args\n");
-        return false;
-    }
-
-    LoadThumbnailArgs* targs = malloc(sizeof(LoadThumbnailArgs));
-    if (!targs) {
-        fprintf(stderr, "queue_load_thumbnail: malloc returned null\n");
-        return false;
-    }
-
-    targs->loader = loader;
-    targs->ssl_ctx = ssl_ctx;
-    targs->media_type = result_type_to_media(search_result_type);
-    strncpy(targs->id, id, sizeof(targs->id));
-    strncpy(targs->path, path, sizeof(targs->path));
-
-    return thread_context_add_task(thread_context, targs, free, load_thumbnail) ;
-}
-
 // user data management
 
-// #define ARRAY_NAME "array"
+typedef enum {
+    USER_DATA_LIKES,
+    USER_DATA_HISTORY,
+    USER_DATA_SUBSCRIPTIONS,
+    USER_DATA_COUNT,
+} UserDataType;
 
-// #define OBJ_ID_PATH           "id" 
-// #define OBJ_THUMBNAIL_PATH    "thumbnail_path"
-// #define OBJ_TITLE_PATH        "title"
-// #define OBJ_AUTHOR_ID_PATH    "authorId"
-// #define OBJ_SUB_COUNT_PATH    "subscriber_count"
-// #define OBJ_UPLOAD_DATE_PATH  "upload_date"
-// #define OBJ_VIDEO_COUNT_PATH  "video_count"
-// #define OBJ_VIEW_COUNT_PATH   "view_count"
-// #define OBJ_VIDEO_LENGTH_PATH "duration"
-// #define OBJ_search_result_type_PATH   "search_result_type"
-
-// #define LIKED_VIDEOS_FILE  "liked_videos.json"
-// #define SUBSCRIPTIONS_FILE "subscriptions.json"
-// #define WATCH_HISTORY_FILE "watch_history.json"
-
-typedef struct
+char * user_data_type_to_text (const UserDataType type)
 {
-    cJSON* liked_videos;
-    cJSON* watched_videos;
-    cJSON* subscribed_channels;
-} UserData;
+    switch (type) {
+        case USER_DATA_LIKES: return "likes" ;
+        case USER_DATA_HISTORY: return "history" ;
+        case USER_DATA_SUBSCRIPTIONS: return "subscriptions" ;
+        default:
+            return NULL ;
+    }
+}
 
-// cJSON* create_user_data_object()
-// {
-//     cJSON* root = cJSON_CreateObject();
-//     if (root == NULL) {
-//         fprintf(stderr, "create_user_data_object: failed to create root\n");
-//         return NULL;
-//     }
+static const char * filepaths [USER_DATA_COUNT] = {
+    [USER_DATA_LIKES] = "likes.json",
+    [USER_DATA_HISTORY] = "history.json",
+    [USER_DATA_SUBSCRIPTIONS] = "subscriptions.json",
+};
 
-//     cJSON* array = cJSON_CreateArray();
-//     if (array == NULL) {
-//         fprintf(stderr, "create_user_data_object: failed to create array\n");
-//         cJSON_Delete(root); root = NULL;
-//         return NULL;
-//     }
+static const ParseToken USER_DATA_TOKENS [] = {
+    {FIELD_ID, extract_string},
+    {FIELD_TITLE, extract_string},
+    {FIELD_DURATION, extract_int},
+    {FIELD_AUTHOR_ID, extract_string},
+    {FIELD_VIEW_COUNT, extract_int},
+    {FIELD_LIVE_VIEW_COUNT, extract_int},
+    {FIELD_PLAYLIST_LENGTH, extract_int},
+    {FIELD_UPLOAD_DATE, extract_string},
+    {FIELD_THUMBNAIL_PATH, extract_string},
+    {FIELD_SUBSCRIBER_COUNT, extract_int},
+    {FIELD_SEARCH_RESULT_TYPE, extract_int},
+    TOKEN_SENTINAL,
+};
 
-//     if (cJSON_AddItemToObject(root, ARRAY_NAME, array) == false) {
-//         fprintf(stderr, "create_user_data_object: failed to add array to root\n");
-//         cJSON_Delete(root); root = NULL;
-//     }
+bool user_data_init (LinkedList user_data[USER_DATA_COUNT], const char * filepaths[USER_DATA_COUNT])
+{
+    for (int i = 0; i < USER_DATA_COUNT; i++) {
+        user_data[i] = linked_list_init() ;
 
-//     return root;
-// }
+        if ( !file_exists(filepaths[i])) {
+            fprintf(stderr, "user_data_init: \"%s\" not yet created\n", filepaths[i]);
+            continue ;
+        }
 
-// bool user_data_init(UserData* user_data)
-// {
-//     if (!user_data)
-//         return false;
+        json *jarray = json_create_from_file(filepaths[i]) ;
+        
+        if ( !json_array_is_valid(jarray)) {
+            fprintf(stderr, "user_data_init: failed to retrieve valid JSON array from \"%s\"\n", filepaths[i]);
+            if (jarray) 
+                json_free(jarray) ;
+            continue ;
+        }
 
-//     user_data->liked_videos        = file_exists(LIKED_VIDEOS_FILE)   ? parse_json_file(LIKED_VIDEOS_FILE)   : create_user_data_object();
-//     user_data->watched_videos      = file_exists(WATCH_HISTORY_FILE)  ? parse_json_file(WATCH_HISTORY_FILE)  : create_user_data_object();
-//     user_data->subscribed_channels = file_exists(SUBSCRIPTIONS_FILE)  ? parse_json_file(SUBSCRIPTIONS_FILE)  : create_user_data_object();
+        const size_t nelements = json_get_array_size(jarray) ;
 
-//     return (user_data->liked_videos || user_data->watched_videos || user_data->subscribed_channels);
-// }
+        for (size_t j = 0; j < nelements; j++) {
+            json * item = json_get_array_item(jarray, j) ;
 
-// void user_data_free(UserData* user_data)
-// {
-//     if (user_data == NULL) return;
-    
-//     if (user_data->watched_videos) {
-//         write_json_to_file(user_data->watched_videos, WATCH_HISTORY_FILE);
-//         cJSON_Delete(user_data->watched_videos); user_data->watched_videos = NULL;
-//     }
+            YoutubeSearchResult *result = youtube_search_result_init() ;
+            
+            if ( !result) {
+                fprintf(stderr, "user_data_init: failed to create YoutubeSearchResult object\n") ;
+                json_free(jarray) ;
+                return false ;
+            }
 
-//     if (user_data->subscribed_channels) {
-//         write_json_to_file(user_data->subscribed_channels, SUBSCRIPTIONS_FILE);
-//         cJSON_Delete(user_data->subscribed_channels); user_data->subscribed_channels = NULL;
-//     }
+            for (const ParseToken *token = USER_DATA_TOKENS; parse_token_is_ready(token); token++) 
+                parse_token_execute(token, field_to_text(token->field), result, item, RESPONSE_USER_DATA) ;
 
-//     if (user_data->liked_videos) {
-//         write_json_to_file(user_data->liked_videos, LIKED_VIDEOS_FILE);
-//         cJSON_Delete(user_data->liked_videos); user_data->liked_videos = NULL;
-//     }
-// }
+            Node *node = node_init(result, sizeof(YoutubeSearchResult),(void*)youtube_search_result_free,(void*)youtube_search_result_print);
+            
+            if ( !node) {
+                fprintf(stderr, "user_data_init: failed to create Node object\n");
+                youtube_search_result_free(result) ;
+                json_free(jarray) ;
+                return false ;
+            }
 
-// bool user_data_is_ready(UserData* user_data)
-// {
-//     return (user_data) && 
-//            (cJSON_IsObject(user_data->liked_videos)) && 
-//            (cJSON_IsObject(user_data->watched_videos)) && 
-//            (cJSON_IsObject(user_data->subscribed_channels));
-// }
+            pthread_mutex_lock(&user_data[i].mutex) ;
+            linked_list_append(&user_data[i], node) ;
+            pthread_mutex_unlock(&user_data[i].mutex) ;
+        }
 
-// int find_user_data_index(const cJSON* user_data, const char* id, const char* id_path)
-// {
-//     if ((cJSON_IsArray(user_data) == false) || (valid_string(id) == false) || (valid_string(id_path) == false)) return -1;
+        json_free(jarray) ;
+    }
 
-//     int i = 0;
-    
-//     cJSON* item;
-//     cJSON_ArrayForEach(item, user_data) {
-//         const cJSON* id_item = cjson_pointer_get(item, id_path);
-//         if (json_string_is_valid(id_item) && (strcmp(id_item->valuestring, id) == 0)) {
-//             return i;
-//         }
+    return true ;
+}
 
-//         i++;
-//     }
+void user_data_free (LinkedList * lists, const size_t list_count)
+{
+    if ( !lists)
+        return ;
 
-//     return -1;
-// }
+    size_t i = 0 ;
 
-// cJSON* init_search_result_json(const YoutubeSearchResult * result)
-// {
-//     if (result == NULL) return NULL;
-    
-//     cJSON* result_json = cJSON_CreateObject();
-//     if (result_json == NULL) {
-//         fprintf(stderr, "init_search_result_json: failed to create cJSON* object\n");
-//         return NULL;
-//     }
+    for (LinkedList * list = lists; i < list_count; i++, list++) {
+        json * jarray = json_create_array() ;
 
-//     cJSON_AddStringToObject(result_json, OBJ_ID_PATH, result->id);
-//     cJSON_AddStringToObject(result_json, OBJ_TITLE_PATH, result->title);
-//     cJSON_AddNumberToObject(result_json, OBJ_search_result_type_PATH, result->type);
-//     cJSON_AddStringToObject(result_json, OBJ_THUMBNAIL_PATH, result->thumbnail_path);
-    
-//     switch (result->type) {
-//         case SEARCH_RESULT_TYPE_LIVE:
-//         case SEARCH_RESULT_TYPE_VIDEO: 
-//             cJSON_AddStringToObject(result_json, OBJ_AUTHOR_ID_PATH, result->author_id);
-//             cJSON_AddNumberToObject(result_json, OBJ_VIEW_COUNT_PATH, result->view_count);
-//             cJSON_AddNumberToObject(result_json, OBJ_VIDEO_LENGTH_PATH, result->duration);
-//             cJSON_AddStringToObject(result_json, OBJ_UPLOAD_DATE_PATH, result->upload_date);
-//             break;
-//         case SEARCH_RESULT_TYPE_CHANNEL: 
-//             cJSON_AddNumberToObject(result_json, OBJ_SUB_COUNT_PATH, result->subscriber_count); 
-//             break;
-//         case SEARCH_RESULT_TYPE_PLAYLIST: 
-//             cJSON_AddNumberToObject(result_json, OBJ_VIDEO_COUNT_PATH, result->playlist_length);
-//             break;
-//         default: 
-//             fprintf(stderr, "init_search_result_json: SearchResultType %d not supported\n", result->type);
-//             return NULL;
-//     }
+        if ( !jarray) {
+            fprintf(stderr, "user_data_free: failed to create json array object\n") ;
+            continue ; 
+        }
+        
+        for (Node * node = list->head; node; node = node->next) {
+            json * result_json = create_search_result_json(node->data) ;
+            if (result_json)
+                cJSON_AddItemToArray(jarray, result_json) ;
+        }
+        
+        json_write_to_file(jarray, filepaths[i]) ;
 
-//     return result_json;
-// }
+        json_free(jarray) ;
 
-// void delete_user_data(cJSON* user_data, const char* id)
-// {
-//     if ((user_data == NULL) || (valid_string(id) == false)) return;
+        linked_list_free(list) ;
+    }
+}
 
-//     cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
-//     if (cJSON_IsArray(array) == false) {
-//         fprintf(stderr, "delete_user_data: invalid array parsed\n");
-//         return;
-//     }
+bool user_data_add (LinkedList * list, YoutubeSearchResult * data, const UserDataType type)
+{
+    if ( !list || !data || !enum_is_valid(type, USER_DATA_COUNT))
+        return false ;
 
-//     const int i = find_user_data_index(array, id, OBJ_ID_PATH);
-//     if (i >= 0) {
-//         cJSON* delete = cJSON_DetachItemFromArray(array, i);
-//         cJSON_Delete(delete); delete = NULL;
-//     }
-// }
+    YoutubeSearchResult * result = youtube_search_result_init() ;
 
-// void add_user_data(cJSON* user_data, const YoutubeSearchResult * interacted_result)
-// {
-//     if (!user_data || !interacted_result)
-//         return;
+    if ( !result) {
+        fprintf(stderr, "user_data_add: failed to create YoutubeSearchResult object\n") ;
+        return false ;
+    }
 
-//     cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
-//     if (cJSON_IsArray(array) == false) {
-//         fprintf(stderr, "add_user_data: invalid array parsed\n");
-//         return;
-//     }
+    memcpy(result, data, sizeof(YoutubeSearchResult)) ;
 
-//     cJSON* add = NULL;
+    Node * node = node_init(result, sizeof(YoutubeSearchResult), (void*) youtube_search_result_free, (void*) youtube_search_result_print) ;
 
-//     const char* id = interacted_result->id;
-//     const int i = find_user_data_index(array, id, OBJ_ID_PATH);
+    if ( !node) {
+        fprintf(stderr, "user_data_add: failed to create Node object\n") ;
+        youtube_search_result_free(result) ;
+    }
 
-//     if (i >= 0) 
-//         add = cJSON_DetachItemFromArray(array, i);
+    linked_list_append(list, node) ;
 
-//     else 
-//         add = init_search_result_json(interacted_result);
+    printf("\"%s\" added to %s\n", result->id, user_data_type_to_text(type)) ;
 
-//     if (add)
-//         cJSON_InsertItemInArray(array, 0, add);
-// }
-
-// bool is_subbed_to_channel(cJSON* subscribed_channels_json, const char* id)
-// {
-//     if ((subscribed_channels_json == NULL) || (id == NULL)) return false;
-
-//     cJSON* subbed_channels = cjson_pointer_get(subscribed_channels_json, ARRAY_NAME);
-    
-//     if (cJSON_IsArray(subbed_channels) == false) return false;
-
-//     const int found = find_user_data_index(subbed_channels, id, OBJ_ID_PATH);
-
-//     return (found >= 0);
-// }
-
-// void parse_user_data(cJSON* user_data, YoutubeSearchResult * dest) 
-// {
-//     if ((user_data == NULL) || (dest == NULL)) return;
-
-//     assign_number_from_path(user_data, OBJ_search_result_type_PATH, (int*) &dest->type);
-//     if (dest->type == SEARCH_RESULT_TYPE_UNDF) 
-//         return;
-
-//     assign_string_from_path(user_data, OBJ_ID_PATH, dest->id, sizeof(dest->id));
-//     assign_string_from_path(user_data, OBJ_TITLE_PATH, dest->title, sizeof(dest->title));
-//     assign_string_from_path(user_data, OBJ_THUMBNAIL_PATH, dest->thumbnail_path, sizeof(dest->thumbnail_path));
-
-//     switch (dest->type) {
-//         case SEARCH_RESULT_TYPE_LIVE:
-//         case SEARCH_RESULT_TYPE_VIDEO: 
-//             assign_string_from_path(user_data, OBJ_AUTHOR_ID_PATH, dest->author_id, sizeof(dest->author_id));
-//             assign_string_from_path(user_data, OBJ_VIDEO_LENGTH_PATH, dest->duration, sizeof(dest->duration));
-//             assign_string_from_path(user_data, OBJ_VIEW_COUNT_PATH, dest->view_count, sizeof(dest->view_count));
-//             assign_string_from_path(user_data, OBJ_UPLOAD_DATE_PATH, dest->upload_date, sizeof(dest->upload_date));
-//             break;
-//         case SEARCH_RESULT_TYPE_CHANNEL: 
-//             assign_string_from_path(user_data, OBJ_SUB_COUNT_PATH, dest->subscriber_count, sizeof(dest->subscriber_count));
-//             break;
-//         case SEARCH_RESULT_TYPE_PLAYLIST: 
-//             assign_string_from_path(user_data, OBJ_VIDEO_COUNT_PATH, dest->video_count, sizeof(dest->video_count));
-//             break;
-//         case SEARCH_RESULT_TYPE_ANY:
-//         case SEARCH_RESULT_TYPE_UNDF:
-//             break;
-//     }
-// }
-
-// void load_user_data(LinkedList* results, cJSON* user_data)
-// {
-//     if ((results == NULL) || (user_data == NULL)) return;
-
-//     cJSON* array = cjson_pointer_get(user_data, ARRAY_NAME);
-//     if (cJSON_IsArray(array) == false) {
-//         fprintf(stderr, "load_user_data: invalid array parsed\n");
-//         return;
-//     }
-
-//     pthread_mutex_lock(&results->mutex);
-    
-//     const int old_size = results->count;
-
-//     cJSON* item;
-//     cJSON_ArrayForEach(item, array) {
-//         SearchResult * search_result = youtube_search_result_init() ;
-//         if ( !search_result)
-//             return ;
-
-//         Node* node = node_init(search_result, sizeof(SearchResult), free, NULL) ;
-//         if (node) {
-//             SearchResult * dest = (SearchResult*) node->data;
-//             if (dest) {
-//                 parse_user_data(item, dest);
-                
-//                 if (dest->type != SEARCH_RESULT_TYPE_UNDF) 
-//                     linked_list_append(results, node);
-//                 else 
-//                     node_free(node);
-//             }
-//         }
-//     }
-
-//     for (int i = 0; i < old_size; i++) {
-//         node_free(linked_list_dequeue(results));
-//     }
-
-//     pthread_mutex_unlock(&results->mutex);
-// }
+    return true ;
+}
 
 // query operations
 
 typedef struct
 {
-    YoutubeSearchResult info;
-    char* description;
-} HighlightedVideo;
-
-typedef struct
-{
-    YoutubeSearchResult info;
-    TextureCacheEntry* cached;
-    bool is_subscribed;
-} HighlightedChannel;
-
-typedef struct
-{
-    char video_id[64];
-    bool* playing_video;
+    char * video_id;
+    bool * playing_video;
 } PlayVideoArgs;
 
-// bool configure_watch_url(const char* video_id, char* dest, const size_t dest_size)
-// {
-//     if (!valid_string(video_id) || !dest)
-//         return false;
+PlayVideoArgs * create_play_video_args (char * video_id, bool * is_playing_video)
+{
+    if ( !valid_string(video_id) || !is_playing_video)
+        return NULL ;
 
-//     const int written = snprintf(dest, dest_size, "mpv https://www.youtube.com/watch?v=%s", video_id);
+    PlayVideoArgs * targs = calloc(1, sizeof(PlayVideoArgs)) ;
+
+    if (targs) {
+        targs->playing_video = is_playing_video ;
+        targs->video_id = video_id ;
+    }
+
+    return targs ;
+}
+
+bool configure_watch_url (const char * video_id, char * dest, const size_t dest_size)
+{
+    if ( !valid_string(video_id) || !dest)
+        return false ;
+
+    const int written = snprintf(dest, dest_size, "mpv https://www.youtube.com/watch?v=%s", video_id) ;
     
-//     return (0 < written) && (written < dest_size);
-// }
+    return (0 < written) && (written < dest_size) ;
+}
 
-// void* play_video(void * args)
-// {
-//     PlayVideoArgs* targs = (PlayVideoArgs*) args;
+void * play_video(void * args)
+{
+    PlayVideoArgs * targs = (PlayVideoArgs*) args ;
 
-//     if (!targs || !valid_string(targs->video_id) || !targs->playing_video)
-//         return NULL;
+    if ( !targs || !targs->playing_video || !valid_string(targs->video_id))
+        return NULL ;
 
-//     char command[512] = {0};
+    char command[512] = {0} ;
     
-//     if (!configure_watch_url(targs->video_id, command, sizeof(command)))
-//         return false;
+    if ( !configure_watch_url(targs->video_id, command, sizeof(command)))
+        return false ;
 
-//     (*targs->playing_video) = true;
+    (*targs->playing_video) = true ;
 
-//     system(command);
+    system(command) ;
 
-//     (*targs->playing_video) = false;
+    (*targs->playing_video) = false ;
     
-//     return NULL;
-// }
+    return NULL ;
+}
 
 typedef struct
 {
@@ -706,21 +544,18 @@ void draw_filter_window(const Rectangle container, const Ui ui, Query* query)
     }
 }
 
-void format_view_count (const float view_count, char * dest, const size_t dest_size)
+void get_youtube_number_format (const float value, char * dest, const size_t dest_size)
 {
-    if ( !dest) 
-        return ;
-
-    if      (view_count < 1e3)  snprintf(dest, dest_size, "%.0f  views", view_count) ;         // 0               - 999
-    else if (view_count < 1e4)  snprintf(dest, dest_size, "%.2fk views", (view_count / 1e3)) ; // 1,000           - 9,999
-    else if (view_count < 1e5)  snprintf(dest, dest_size, "%.1fk views", (view_count / 1e3)) ; // 10,000          - 99,999
-    else if (view_count < 1e6)  snprintf(dest, dest_size, "%.0fk views", (view_count / 1e3)) ; // 100,000         - 999,999
-    else if (view_count < 1e7)  snprintf(dest, dest_size, "%.2fM views", (view_count / 1e6)) ; // 1,000,000       - 9,999,999
-    else if (view_count < 1e8)  snprintf(dest, dest_size, "%.1fM views", (view_count / 1e6)) ; // 10,000,000      - 99,999,999
-    else if (view_count < 1e9)  snprintf(dest, dest_size, "%.0fM views", (view_count / 1e6)) ; // 100,000,000     - 999,999,999
-    else if (view_count < 1e10) snprintf(dest, dest_size, "%.2fB views", (view_count / 1e9)) ; // 1,000,000,000   - 9,999,999,999
-    else if (view_count < 1e11) snprintf(dest, dest_size, "%.1fB views", (view_count / 1e9)) ; // 10,000,000,000  - 99,999,999,999
-    else if (view_count < 1e12) snprintf(dest, dest_size, "%.0fB views", (view_count / 1e9)) ; // 100,000,000,000 - 999,999,999,999
+    if      (value < 1e3)  snprintf(dest, dest_size, "%.0f", value) ;         // 0               - 999
+    else if (value < 1e4)  snprintf(dest, dest_size, "%.2fk", (value / 1e3)) ; // 1,000           - 9,999
+    else if (value < 1e5)  snprintf(dest, dest_size, "%.1fk", (value / 1e3)) ; // 10,000          - 99,999
+    else if (value < 1e6)  snprintf(dest, dest_size, "%.0fk", (value / 1e3)) ; // 100,000         - 999,999
+    else if (value < 1e7)  snprintf(dest, dest_size, "%.2fM", (value / 1e6)) ; // 1,000,000       - 9,999,999
+    else if (value < 1e8)  snprintf(dest, dest_size, "%.1fM", (value / 1e6)) ; // 10,000,000      - 99,999,999
+    else if (value < 1e9)  snprintf(dest, dest_size, "%.0fM", (value / 1e6)) ; // 100,000,000     - 999,999,999
+    else if (value < 1e10) snprintf(dest, dest_size, "%.2fB", (value / 1e9)) ; // 1,000,000,000   - 9,999,999,999
+    else if (value < 1e11) snprintf(dest, dest_size, "%.1fB", (value / 1e9)) ; // 10,000,000,000  - 99,999,999,999
+    else if (value < 1e12) snprintf(dest, dest_size, "%.0fB", (value / 1e9)) ; // 100,000,000,000 - 999,999,999,999
 }
 
 void format_video_duration (const int duration_s, char * dest, const size_t sizeof_dest)
@@ -730,25 +565,10 @@ void format_video_duration (const int duration_s, char * dest, const size_t size
     int seconds = duration_s % 60 ;
 
     if (hours > 0)
-        snprintf(dest, sizeof_dest, "%d:%d:%d", hours, minutes, seconds) ;
+        snprintf(dest, sizeof_dest, "%d:%02d:%02d", hours, minutes, seconds) ;
 
     else 
-        snprintf(dest, sizeof_dest, "%d:%d", minutes, seconds) ;
-}
-
-void draw_video_card (const YoutubeSearchResult * video)
-{
-    // set the thumbnail area for the video
-
-    // set the title area for the video
-
-    // set the subtext area 
-
-    // format the view count
-
-    // format the video duration
-
-    // draw everything
+        snprintf(dest, sizeof_dest, "%d:%02d", minutes, seconds) ;
 }
 
 void draw_search_result(YoutubeSearchResult * search_result, const Texture thumbnail, const Rectangle container, const Color background_color, const Ui ui)
@@ -796,8 +616,10 @@ void draw_search_result(YoutubeSearchResult * search_result, const Texture thumb
             
             char view_count_text[16] = {0} ;
 
-            format_view_count(search_result->view_count, view_count_text, sizeof(view_count_text)) ;
-
+            get_youtube_number_format(search_result->view_count, view_count_text, sizeof(view_count_text)) ;
+            
+            strcat(view_count_text, " views") ;
+            
             const Vector2 view_count_pos = {
                 .x = subtext_area.x + subtext_area.width - MeasureTextEx(ui.font, view_count_text, font_size, ui.spacing).x - ui.padding,
                 .y = subtext_area.y + ui.padding,
@@ -936,93 +758,41 @@ void draw_text_scrollable(const Rectangle scroll_window_bounds, const bool show_
     EndScissorMode();
 }
 
-// void draw_highlighted_channel(const Rectangle container, const Ui* ui, cJSON* subscribed_channels_json, HighlightedChannel* highlighted_channel)
-// {
-//     DrawRectangleLinesEx(container, 1, GRAY);
-    
-//     const float font_size = 17;
-//     const float title_size = 25;
-
-//     YoutubeSearchResult * data = &highlighted_channel->info ;
-
-//     if ((ui == NULL) || (highlighted_channel == NULL) || (highlighted_channel->cached == NULL) || ( !valid_string(data->id))) 
-//         return;
-
-//     const float thumbnail_w = search_result_type_to_thumbnail_width(SEARCH_RESULT_TYPE_CHANNEL);
-    
-//     if (texture_cache_entry_is_ready(highlighted_channel->cached)) 
-//         DrawTextureEx(highlighted_channel->cached->texture, (Vector2){container.x + ui->padding, container.y + ui->padding}, 0.0f, 1.0f, RAYWHITE);
-
-//     const Vector2 title_pos = {
-//         .x = container.x + thumbnail_w + (ui->padding * 2),
-//         .y = container.y + (container.height / 3.0f) - (title_size / 2.0f),
-//     };
-
-//     DrawTextEx(ui->font, data->title, title_pos, title_size, ui->spacing, BLACK);
-    
-//     const Vector2 sub_count_pos = {
-//         .x = container.x + thumbnail_w + (ui->padding * 2),
-//         .y = container.y + container.height - MeasureTextEx(ui->font, data->subscriber_count, font_size, ui->spacing).y - ui->padding,
-//     };
-
-//     DrawTextEx(ui->font, data->subscriber_count, sub_count_pos, font_size, ui->spacing, BLACK);
-
-//     const float button_width = 75;
-//     const float widget_height = 25;
-//     const Rectangle subscribe_button_bounds = {
-//         .x = container.x + container.width - button_width - ui->padding,
-//         .y = container.y + container.height - widget_height - ui->padding,
-//         .width = button_width,
-//         .height = 25,
-//     };
-
-//     const char* button_text = highlighted_channel->is_subscribed ? "Unsubscribe" : "Subscribe";
-
-//     if (GuiButton(subscribe_button_bounds, button_text)) {
-//         if (highlighted_channel->is_subscribed)
-//             delete_user_data(subscribed_channels_json, data->id);
-//         else
-//             add_user_data(subscribed_channels_json, &highlighted_channel->info);
-        
-//         highlighted_channel->is_subscribed = !highlighted_channel->is_subscribed;
-//     }
-// }
-
-void draw_video_management_buttons(const Rectangle container, Query* query, const YoutubeSearchResult * highlighted_video, cJSON * liked_video_data, UpdateFlags* update_flags, ThreadContext* thread_context, UserData* user_data)
+void draw_video_management_buttons(const Rectangle container, Query * query, LinkedList * user_likes, const YoutubeSearchResult * highlighted_video, UpdateFlags * update_flags)
 {
-    const int padding = 5;
-    const size_t nbuttons = 4;
-    const bool is_button_active = valid_string(highlighted_video->id);
+    const int padding = 5 ;
 
-    Rectangle button_areas[nbuttons];
-    layout_dynamic_bar(container, padding, MIN_BUTTON_WIDTH, button_areas, nbuttons);
+    const size_t nbuttons = 4 ;
+    
+    Rectangle button_areas[nbuttons] ;
 
-    if ( !is_button_active)
+    layout_dynamic_bar(container, padding, MIN_BUTTON_WIDTH, button_areas, nbuttons) ;
+
+    if ( !highlighted_video || !valid_string(highlighted_video->id))
         GuiSetState(STATE_DISABLED) ;
 
-    // TODO: launch task in update section in main loop render
-    if (GuiButton(button_areas[0], "Play Video") && is_button_active && !update_flags->is_playing_video) {
-        // query->action = QUERY_ACTION_PLAY_VIDEO ;
-        // update_flags->is_task_set = update_flags->is_playing_video = true ;
+    if (GuiButton(button_areas[0], "Play Video") && !update_flags->is_playing_video) {
+        query->action = QUERY_ACTION_PLAY_VIDEO ;
+        update_flags->is_task_set = update_flags->is_playing_video = true ;
     } 
 
-    if (GuiButton(button_areas[1], "Like") && is_button_active) 
-        ;
-        // add_user_data(liked_video_data, &selected_video->info);
+    if (GuiButton(button_areas[1], highlighted_video->is_liked ? "unlike" : "like")) {
+        update_flags->is_task_set = true ;
+        query->action = QUERY_ACTION_LIKE_VIDEO ;
+    } 
 
-    if (GuiButton(button_areas[2], "Related Videos") && is_button_active) {
-        // update_flags->is_task_set = true;
-        // query->action = QUERY_ACTION_VIEW_RELATED;
-        // query->type = QUERY_TYPE_REPLACE;
+    if (GuiButton(button_areas[2], "related")) {
+        update_flags->is_task_set = true ;
+        query->type = QUERY_TYPE_REPLACE ;
+        query->action = QUERY_ACTION_VIEW_RELATED ;
+        strcpy(query->focused_id, highlighted_video->id) ;
     }
     
-    if (GuiButton(button_areas[3], "View Channel") && is_button_active) {
-        // update_flags->is_task_set = true;
-        // query->attr = QUERY_ATTR_REPLACE;
-        // query->type = QUERY_TYPE_VIEW_CHANNEL;
-
-        // strncpy(query->focused_id, data->author_id, sizeof(query->focused_id) - 1);
-        // query->focused_id[sizeof(query->focused_id) - 1] = '\0';
+    if (GuiButton(button_areas[3], "channel")) {
+        update_flags->is_task_set = true ;
+        query->type = QUERY_TYPE_REPLACE ;
+        query->action = QUERY_ACTION_CHANNEL_PRESS ;
+        strcpy(query->focused_id, highlighted_video->author_id) ;
     }
 
     GuiSetState(STATE_NORMAL) ;
@@ -1030,76 +800,80 @@ void draw_video_management_buttons(const Rectangle container, Query* query, cons
 
 void draw_user_data_buttons(const Rectangle container, Query* query, UpdateFlags* update_flags)
 {
-    if (!query || !update_flags)
-        return;
+    if ( !query || !update_flags)
+        return ;
 
-    const int padding = 5;
-    const size_t nbuttons = 3;
+    const int padding = 5 ;
+    const size_t nbuttons = 3 ;
 
-    Rectangle button_areas[nbuttons];
-    layout_dynamic_bar(container, padding, MIN_BUTTON_WIDTH, button_areas, nbuttons);
+    Rectangle button_areas[nbuttons] ;
+    layout_dynamic_bar(container, padding, MIN_BUTTON_WIDTH, button_areas, nbuttons) ;
 
-    if (GuiButton(button_areas[0], "Subscribed Channels")) {
-        update_flags->is_task_set = true;
-        query->action = QUERY_ACTION_VIEW_SUBSCRIPTIONS ;
+    if (GuiButton(button_areas[0], "subscriptions")) {
+        update_flags->is_task_set = true ;
         query->type = QUERY_TYPE_REPLACE ;
+        query->action = QUERY_ACTION_VIEW_SUBSCRIPTIONS ;
     }
 
-    if (GuiButton(button_areas[1], "Liked Videos")) {
-        update_flags->is_task_set = true;
+    if (GuiButton(button_areas[1], "likes")) {
+        update_flags->is_task_set = true ;
         query->type = QUERY_TYPE_REPLACE ;
         query->action = QUERY_ACTION_VIEW_LIKES ;
     }
     
-    if (GuiButton(button_areas[2], "Watch History")) {
-        update_flags->is_task_set = true;
+    if (GuiButton(button_areas[2], "history")) {
+        update_flags->is_task_set = true ;
         query->type = QUERY_TYPE_REPLACE ;
         query->action = QUERY_ACTION_VIEW_HISTORY ;
     }
 }
 
-void handle_view_user_data(LinkedList* results, pthread_mutex_t* token_mutex, char** continuation_token, cJSON* user_data)
+void draw_highlighted_channel (const YoutubeSearchResult * channel, UpdateFlags * flags, Query * query)
 {
-    if (!results || !token_mutex || !continuation_token || !user_data)
-        return;
+    const float height = 80 ;
+    const float padding = 5 ;
+    const Rectangle bounds = {
+        .x = padding,
+        .y = GetScreenHeight() - padding - height,
+        .width = 380, 
+        .height = height,
+    } ;
+    
+    DrawRectangleLinesEx(bounds, 1, GRAY) ;
+   
+    if ( !channel || !valid_string(channel->id) || !flags || !query)
+        return ;
 
-    pthread_mutex_lock(token_mutex);
+    const float title_font_size = 25 ;
+    const float sub_count_font_size = 20 ;
 
-    if ((*continuation_token)) {
-        free((*continuation_token)); (*continuation_token) = NULL;
+    char subscriber_count_text[32] = {0} ;
+    get_youtube_number_format(channel->subscriber_count, subscriber_count_text, sizeof(subscriber_count_text)) ;
+    strcat(subscriber_count_text, " subscribers") ;
+
+    DrawText(channel->title, bounds.x + padding, bounds.y + padding, title_font_size, DARKGRAY) ;
+    DrawText(subscriber_count_text, bounds.x + padding, bounds.y + title_font_size + (padding * 2), sub_count_font_size, DARKGRAY) ;
+
+    const char * button_text = channel->is_subscribed ? "unsubscribe" : "subscribe" ;
+    const float button_width = 80 ;
+    const Rectangle button_bounds = {
+        .x = (bounds.x + bounds.width) - (button_width + padding),
+        .y = bounds.y + title_font_size + (padding * 2),
+        .width = button_width,
+        .height = 20, 
+    };
+
+    if (GuiButton(button_bounds, button_text)) {
+        flags->is_task_set = true ;
+        query->action = QUERY_ACTION_UPDATE_SUBSCRIPTION ;
     }
-
-    pthread_mutex_unlock(token_mutex);
-
-    // load_user_data(results, user_data);
 }
 
-// cJSON* query_type_to_user_data(const UserData* user_data, const QueryType query_type)
-// {
-//     if (!user_data)
-//         return NULL;
-
-//     switch (query_type) {
-//         case QUERY_TYPE_VIEW_LIKED_VIDEOS:
-//             return user_data->liked_videos;
-//         case QUERY_TYPE_VIEW_WATCH_HISTORY:
-//             return user_data->watched_videos;
-//         case QUERY_TYPE_VIEW_SUBSCRIBED_CHANNELS:
-//             return user_data->subscribed_channels;
-//         default:
-//             fprintf(stderr, "query_type_to_user_data: QueryType %d is invalid\n", query_type);
-//             return NULL;
-//     }
-// }
-
-// TODO : seperate user data logic from main
-// TODO : add functionality to video management buttons (view related, play video, view channel)
-// TODO : draw highlighted channel 
-// TODO : display results properly
-// TODO : replace CJSON with another parser that doesnt duplicate memory when parsing, or create my own
-// TODO : clean innertube
-    // pass query to get video metadata
-    // combine video/channel metadata into same thing?
+// TODO : UI OVERHAUL
+    // TODO : VIEW USER DATA (SUBSCRIPTIONS, LIKES, HISTORY)
+// TODO : REDO THUMBNAILS.H/C
+// TODO : CHANGE HOW VIDEO/CHANNEL METADATA IS PROCESSED
+// TODO : BETTER JSON PARSER OR CREATE OWN
 
 int main()
 {
@@ -1138,12 +912,13 @@ int main()
     
     UpdateFlags update_flags = {false};
 
-    UserData user_data = {0};
-    // if (!user_data_init(&user_data)) {
-    //     fprintf(stderr, "CRITICAL: failed to create UserData object\n");
-    //     return 1;
-    // }
-    
+    LinkedList user_data[USER_DATA_COUNT] ;
+
+    if ( !user_data_init(user_data, filepaths)) {
+        fprintf(stderr, "CRITICAL: failed to create user data object\n") ;
+        return 1 ;
+    }
+
     YoutubeParseContext parse_context ;
     if ( !youtube_parse_context_init(&parse_context, PARSE_CONFIG_PATH)) {
         fprintf(stderr, "CRITICAL: failed to create YoutubeParseContext object\n") ;
@@ -1194,23 +969,91 @@ int main()
                     break ;
                 }
                 case QUERY_ACTION_VIDEO_PRESS: {
-                    VideoMetadataArgs * args = create_video_metadata_args(ssl_ctx, query.focused_id, &client_context, highlighted_video, &parse_context) ;
+                    LinkedList * likes = &user_data[USER_DATA_LIKES] ;
+                    VideoMetadataArgs * args = create_video_metadata_args(ssl_ctx, query.focused_id, &client_context, highlighted_video, &parse_context, likes) ;
                     thread_context_add_task(&thread_context, args, free, get_video_metadata) ;
                     break ;
                 }
                 case QUERY_ACTION_CHANNEL_PRESS: {
                     last_action = query.action ;
+                    LinkedList * subscriptions = &user_data[USER_DATA_SUBSCRIPTIONS] ;
                     SearchThreadArgs * sargs = create_search_thread_args(query, ssl_ctx, &results, &client_context, &parse_context) ;
-                    ChannelMetadataArgs * targs = create_channel_metadata_args(sargs, highlighted_channel) ;
+                    ChannelMetadataArgs * targs = create_channel_metadata_args(sargs, highlighted_channel, subscriptions) ;
                     thread_context_add_task(&thread_context, targs, (void*) free_channel_metadata_args, get_channel_metadata) ;
                     break ;
                 }
-                case QUERY_ACTION_PLAY_VIDEO:
+                case QUERY_ACTION_PLAY_VIDEO: {
+                    PlayVideoArgs * targs = create_play_video_args(highlighted_video->id, &update_flags.is_playing_video) ;
+                    thread_context_add_task(&thread_context, targs, free, play_video) ;
+                    
+                    LinkedList * history = &user_data[USER_DATA_HISTORY] ;
+
+                    pthread_mutex_lock(&history->mutex) ;
+
+                    Node * found = linked_list_find(history, highlighted_video, (void*) youtube_search_result_equals) ;
+                    if (found) {
+                        node_detach(history, found) ;
+                        linked_list_insert(history, found, 0) ;
+                    }
+                    
+                    else 
+                        user_data_add(history, highlighted_video, USER_DATA_HISTORY) ;
+                    
+                    pthread_mutex_unlock(&history->mutex) ;
+
+                    break ;
+                }
+                case QUERY_ACTION_LIKE_VIDEO: {
+                    LinkedList * likes = &user_data[USER_DATA_LIKES] ;
+
+                    pthread_mutex_lock(&likes->mutex) ;
+                    
+                    if (highlighted_video->is_liked) {
+                        Node * found = linked_list_find(likes, highlighted_video, (void*) youtube_search_result_equals) ;
+                        if (found) {
+                            printf("\"%s\" removed from likes\n", highlighted_video->id) ;
+                            node_detach(likes, found) ;
+                            node_free(found) ;
+                        }
+                    }
+                    
+                    else
+                        user_data_add(likes, highlighted_video, USER_DATA_LIKES) ;
+                
+                    pthread_mutex_unlock(&likes->mutex) ;
+                    
+                    highlighted_video->is_liked = !highlighted_video->is_liked ;
+                    
+                    break ;
+                }
+                case QUERY_ACTION_UPDATE_SUBSCRIPTION: {
+                    LinkedList * subscriptions = &user_data[USER_DATA_SUBSCRIPTIONS] ;
+
+                    pthread_mutex_lock(&subscriptions->mutex) ;
+                    
+                    if (highlighted_channel->is_subscribed) {
+                        Node * found = linked_list_find(subscriptions, highlighted_channel, (void*) youtube_search_result_equals) ;
+                        if (found) {
+                            printf("\"%s\" removed from subscriptions\n", highlighted_channel->id) ;
+                            node_detach(subscriptions, found) ;
+                            node_free(found) ;
+                        }
+                    }
+                    
+                    else 
+                        user_data_add(subscriptions, highlighted_channel, USER_DATA_SUBSCRIPTIONS) ;
+                
+                    pthread_mutex_unlock(&subscriptions->mutex) ;
+    
+                    highlighted_channel->is_subscribed = !highlighted_channel->is_subscribed ;
+
+                    break ;
+                }
                 case QUERY_ACTION_VIEW_LIKES:
                 case QUERY_ACTION_VIEW_HISTORY:
                 case QUERY_ACTION_VIEW_SUBSCRIPTIONS: 
                 default:
-                    fprintf(stderr, "QueryType %d is invalid\n", query.type);
+                    fprintf(stderr, "QueryAction %d is invalid\n", query.action);
             }
         }
 
@@ -1274,31 +1117,27 @@ int main()
             }
         
             // bottom left portion
+
             {  
-                const Rectangle highlighted_channel_bounds = {
-                    .x = ui.padding,
-                    .y = GetScreenHeight() - ui.padding - focused_channel_height,
-                    .width = search_bar_bounds.width - ui.padding, 
-                    .height = focused_channel_height,
-                };
+                draw_highlighted_channel(highlighted_channel, &update_flags, &query) ;
+                
+                // const Rectangle load_more_button_bounds = {
+                //     .x = ui.padding,
+                //     .y = highlighted_channel_bounds.y - load_more_button_height - ui.padding,
+                //     .width = search_bar_bounds.width - ui.padding,
+                //     .height = load_more_button_height,
+                // };
 
-                const Rectangle load_more_button_bounds = {
-                    .x = ui.padding,
-                    .y = highlighted_channel_bounds.y - load_more_button_height - ui.padding,
-                    .width = search_bar_bounds.width - ui.padding,
-                    .height = load_more_button_height,
-                };
-
-                if (!valid_string(client_context.continuation_token))
-                    GuiSetState(STATE_DISABLED);
+                // if (!valid_string(client_context.continuation_token))
+                //     GuiSetState(STATE_DISABLED);
             
-                if (GuiButton(load_more_button_bounds, "<< LOAD MORE >> ")) {
-                    update_flags.is_task_set = true;
-                    query.action = last_action ;
-                    query.type = QUERY_TYPE_APPEND ;
-                }
+                // if (GuiButton(load_more_button_bounds, "<< LOAD MORE >> ")) {
+                //     update_flags.is_task_set = true;
+                //     query.action = last_action ;
+                //     query.type = QUERY_TYPE_APPEND ;
+                // }
 
-                GuiSetState(STATE_NORMAL);
+                // GuiSetState(STATE_NORMAL);
             }
 
             // search window elements
@@ -1355,8 +1194,9 @@ int main()
                         continue;
 
                     if (valid_string(search_result->thumbnail_path) && !search_result->is_thumbnail_loaded) {
-                        search_result->is_thumbnail_loaded = true;
-                        queue_load_thumbnail(ssl_ctx, &thumbnail_loader, &thread_context, search_result->type, search_result->id, search_result->thumbnail_path);
+                        search_result->is_thumbnail_loaded = true ;
+                        LoadThumbnailArgs * targs = create_load_thumbnail_args(search_result->thumbnail_path, search_result->id, ssl_ctx, &thumbnail_loader, result_type_to_media(search_result->type)) ;
+                        thread_context_add_task(&thread_context, targs, free, load_thumbnail) ;
                     }
 
                     const Color container_color = i % 2 ? WHITE : RAYWHITE;
@@ -1365,10 +1205,10 @@ int main()
 
                     if ((CheckCollisionPointRec(GetMousePosition(), container)) && (CheckCollisionPointRec(GetMousePosition(), scissor_rect)) && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
 
-                            update_flags.is_task_set = true ;
-                            query.type = QUERY_TYPE_REPLACE ;
-                            strcpy(query.focused_id, search_result->id) ;
-                        
+                        update_flags.is_task_set = true ;
+                        query.type = QUERY_TYPE_REPLACE ;
+                        strcpy(query.focused_id, search_result->id) ;
+
                         switch (search_result->type) {
                             case SEARCH_RESULT_TYPE_VIDEO:
                             case SEARCH_RESULT_TYPE_LIVE_VIDEO:
@@ -1418,7 +1258,7 @@ int main()
                     .height = GetScreenHeight() - (button_bar_height * 2),
                 };
 
-                draw_video_management_buttons(video_management_button_bar, &query, highlighted_video, user_data.liked_videos, &update_flags, &thread_context, &user_data);
+                draw_video_management_buttons(video_management_button_bar, &query, &user_data[USER_DATA_LIKES], highlighted_video, &update_flags) ;
                 draw_user_data_buttons(user_data_button_bar, &query, &update_flags);
                 draw_text_scrollable(focused_video_bounds, false, ui, &description_scrollbar, highlighted_video->description);
             }
@@ -1435,14 +1275,13 @@ int main()
     texture_cache_free(&texture_cache);
     youtube_parse_context_free(&parse_context) ;
     
-    // user_data_free(&user_data);
-
+    user_data_free(user_data, USER_DATA_COUNT) ;
+    
     youtube_search_result_free(highlighted_video) ;
     youtube_search_result_free(highlighted_channel) ;
     
-    if (ssl_ctx) {
-        SSL_CTX_free(ssl_ctx); ssl_ctx = NULL;
-    }
+    if (ssl_ctx) 
+        SSL_CTX_free(ssl_ctx) ;
     
     CloseWindow();
     

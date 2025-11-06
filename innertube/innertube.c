@@ -1,6 +1,9 @@
 #include "include/innertube.h"
 
 #include "../include/utils.h"
+#include "include/data.h"
+#include <pthread.h>
+#include <stdio.h>
 
 SearchThreadArgs * create_search_thread_args (Query query, SSL_CTX * ssl, LinkedList * results, ClientContext * client, YoutubeParseContext * parse) 
 {
@@ -17,7 +20,7 @@ SearchThreadArgs * create_search_thread_args (Query query, SSL_CTX * ssl, Linked
     return args ;
 }
 
-VideoMetadataArgs * create_video_metadata_args (SSL_CTX * ssl, const char * video_id, ClientContext * client, YoutubeSearchResult * dest, YoutubeParseContext * parse)
+VideoMetadataArgs * create_video_metadata_args (SSL_CTX * ssl, const char * video_id, ClientContext * client, YoutubeSearchResult * dest, YoutubeParseContext * parse, LinkedList * current_likes)
 {
     if ( !ssl || !valid_string(video_id) || !client || !parse || !dest)
         return NULL ;
@@ -30,14 +33,15 @@ VideoMetadataArgs * create_video_metadata_args (SSL_CTX * ssl, const char * vide
         args->client = client ;
         args->dest = dest ;
         args->parse  = parse ;
+        args->current_likes = current_likes ;
     }
 
     return args ;
 }
 
-ChannelMetadataArgs * create_channel_metadata_args (SearchThreadArgs * sargs, YoutubeSearchResult * dest)
+ChannelMetadataArgs * create_channel_metadata_args (SearchThreadArgs * sargs, YoutubeSearchResult * dest, LinkedList * current_subscriptions)
 {
-    if ( !sargs || !dest)
+    if ( !sargs || !dest || !current_subscriptions)
         return NULL ;
 
     ChannelMetadataArgs * targs = calloc(1, sizeof(ChannelMetadataArgs)) ;
@@ -45,6 +49,7 @@ ChannelMetadataArgs * create_channel_metadata_args (SearchThreadArgs * sargs, Yo
     if (targs) {
         targs->sargs = sargs ;
         targs->dest = dest ;
+        targs->current_subscriptions = current_subscriptions ;
     }
 
     return targs ;
@@ -147,7 +152,7 @@ void * get_channel_metadata (void * args)
 
     json * response = get_innertube_response(targs->sargs->ssl, targs->sargs->client, &targs->sargs->query) ;
 
-     if ( !response) {
+    if ( !response) {
         fprintf(stderr, "get_channel_metadata: failed to retrieve youtube response\n") ;
         return NULL ;
     }
@@ -178,7 +183,13 @@ void * get_channel_metadata (void * args)
         return NULL ;
     }
 
-    // TODO : copy the id to the highlighted channel as well as all the search results
+    strcpy(dest->id, targs->sargs->query.focused_id) ;
+
+    youtube_search_result_print(dest) ;
+
+    pthread_mutex_lock(&targs->current_subscriptions->mutex) ;
+    dest->is_subscribed = linked_list_find(targs->current_subscriptions, dest, (void*) youtube_search_result_equals) ;
+    pthread_mutex_unlock(&targs->current_subscriptions->mutex) ;
 
     json_free(response) ; 
 
@@ -227,6 +238,10 @@ void * get_video_metadata (void * args)
 
     if ( !parse_youtube_search_result(dest, response, template)) 
         fprintf(stderr, "get_video_metadata: failed to parse highligted video\n") ;
+
+    pthread_mutex_lock(&targs->current_likes->mutex) ;
+    dest->is_liked = linked_list_find(targs->current_likes, dest, (void*) youtube_search_result_equals) ;
+    pthread_mutex_unlock(&targs->current_likes->mutex) ;
 
     json_free(response) ;
     

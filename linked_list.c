@@ -1,6 +1,8 @@
 #include "include/linked_list.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 Node * node_init (void * data, const unsigned long data_size, const FreeRoutine freef, const PrintRoutine printf)
 {
@@ -85,8 +87,12 @@ Node * linked_list_dequeue (LinkedList * linked_list)
     Node * detached = linked_list->head ;
 
     linked_list->head = linked_list->head->next ;
+
     if ( !linked_list->head)
         linked_list->tail = NULL ;
+
+    else
+        linked_list->head->prev = NULL ;
 
     linked_list->count-- ;
 
@@ -103,4 +109,86 @@ void linked_list_print (LinkedList * linked_list)
     for (Node * node = linked_list->head; node; node = node->next)
         if (node->printf)
             node->printf(node->data) ;
+}
+
+Node * linked_list_find (LinkedList * linked_list, const void * data, const compar comparator)
+{
+    if ( !linked_list || !data || !comparator)
+        return NULL ;
+
+    for (Node * node = linked_list->head; node; node = node->next) {
+        if (comparator(data, node->data))
+            return node ;
+    }
+
+    return NULL ;
+}
+
+void linked_list_insert (LinkedList * list, Node * node, const size_t position)
+{
+    if ( !list || !node || (position > list->count))
+        return ;
+
+    if (position == list->count) {
+        linked_list_append(list, node) ;    
+        return ;
+    }
+
+    size_t i = 0 ;
+    
+    Node * current = list->head ;
+    
+    for (; current && (i < position); current = current->next, i++)
+        ;
+    
+    if (current && (i == position)) {
+        Node * prev = current->prev ;
+        
+        if (prev)
+            prev->next = node ;
+    
+        else 
+            list->head = node ;
+    
+        node->next = current ;
+        
+        prev = node ;
+
+        list->count++ ;
+    }
+}
+
+void node_detach (LinkedList * list, Node * node)
+{
+    if ( !list || !node)
+        return ;
+
+    Node * prev = node->prev ;
+
+    Node * next = node->next ;
+
+    if (prev) 
+        prev->next = next ;
+    
+    else if (node == list->head) {
+        linked_list_dequeue(list) ;
+        return ;
+    }
+
+    if (next) 
+        next->prev = prev ;
+
+    else if (node == list->tail) {
+        list->tail = node->prev ;
+
+        if ( !list->tail)
+            list->head = NULL ;
+        
+        else
+            list->tail->next = NULL ;
+    }
+    
+    node->prev = node->next = NULL ;
+
+    list->count-- ;
 }

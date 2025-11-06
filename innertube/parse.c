@@ -1,8 +1,10 @@
 #include <ctype.h>
+#include <stdio.h>
 
 #include "include/parse.h"
 
 #include "../include/utils.h"
+#include "include/data.h"
 
 static bool json_string_equals (json * root, const char * path, const char * expected)
 {
@@ -34,6 +36,21 @@ static int extract_enum_from_string (json * root, const char * path, const size_
 }
 
 #define EXTRACT_ROUTINE_BUFFER 256
+
+bool extract_int (json * root, const char * path, void * dest, const size_t dest_size)
+{
+    if ( !root || !valid_string(path) || !dest)
+        return false ;
+
+    json * j_int = json_get_via_path(root, path) ;
+
+    if ( !j_int)
+        return false ;
+
+    (*((int*) dest)) = j_int->valueint ;
+
+    return true ;
+}
 
 bool extract_string (json * root, const char * path, void * dest, const size_t dest_size)
 {
@@ -533,31 +550,33 @@ static bool extract_dest_is_ready (const ExtractDest * info)
 static ExtractDest get_extract_dest (const YoutubeSearchResult * result, const YoutubeResultField field)
 {
     static const size_t FIELD_OFFSETS[] = {
-        [FIELD_ID]               = offsetof(YoutubeSearchResult, id),
-        [FIELD_TITLE]            = offsetof(YoutubeSearchResult, title),
-        [FIELD_DURATION]         = offsetof(YoutubeSearchResult, duration),
-        [FIELD_AUTHOR_ID]        = offsetof(YoutubeSearchResult, author_id),
-        [FIELD_VIEW_COUNT]       = offsetof(YoutubeSearchResult, view_count),
-        [FIELD_LIVE_VIEW_COUNT]  = offsetof(YoutubeSearchResult, view_count),
-        [FIELD_PLAYLIST_LENGTH]  = offsetof(YoutubeSearchResult, playlist_length),
-        [FIELD_UPLOAD_DATE]      = offsetof(YoutubeSearchResult, upload_date),
-        [FIELD_THUMBNAIL_PATH]   = offsetof(YoutubeSearchResult, thumbnail_path),
-        [FIELD_SUBSCRIBER_COUNT] = offsetof(YoutubeSearchResult, subscriber_count),
-        [FIELD_DESCRIPTION]      = offsetof(YoutubeSearchResult, description),
+        [FIELD_ID]                 = offsetof(YoutubeSearchResult, id),
+        [FIELD_TITLE]              = offsetof(YoutubeSearchResult, title),
+        [FIELD_DURATION]           = offsetof(YoutubeSearchResult, duration),
+        [FIELD_AUTHOR_ID]          = offsetof(YoutubeSearchResult, author_id),
+        [FIELD_VIEW_COUNT]         = offsetof(YoutubeSearchResult, view_count),
+        [FIELD_LIVE_VIEW_COUNT]    = offsetof(YoutubeSearchResult, view_count),
+        [FIELD_PLAYLIST_LENGTH]    = offsetof(YoutubeSearchResult, playlist_length),
+        [FIELD_UPLOAD_DATE]        = offsetof(YoutubeSearchResult, upload_date),
+        [FIELD_THUMBNAIL_PATH]     = offsetof(YoutubeSearchResult, thumbnail_path),
+        [FIELD_SUBSCRIBER_COUNT]   = offsetof(YoutubeSearchResult, subscriber_count),
+        [FIELD_DESCRIPTION]        = offsetof(YoutubeSearchResult, description),
+        [FIELD_SEARCH_RESULT_TYPE] = offsetof(YoutubeSearchResult, type),
     } ; 
 
     static const size_t FIELD_SIZES[] = {
-        [FIELD_ID]               = sizeof(result->id),
-        [FIELD_TITLE]            = sizeof(result->title),
-        [FIELD_DURATION]         = sizeof(result->duration),
-        [FIELD_AUTHOR_ID]        = sizeof(result->author_id),
-        [FIELD_VIEW_COUNT]       = sizeof(result->view_count),
-        [FIELD_LIVE_VIEW_COUNT]  = sizeof(result->view_count),
-        [FIELD_PLAYLIST_LENGTH]  = sizeof(result->playlist_length),
-        [FIELD_UPLOAD_DATE]      = sizeof(result->upload_date),
-        [FIELD_THUMBNAIL_PATH]   = sizeof(result->thumbnail_path),
-        [FIELD_SUBSCRIBER_COUNT] = sizeof(result->subscriber_count),
-        [FIELD_DESCRIPTION]      = sizeof(result->description),
+        [FIELD_ID]                 = sizeof(result->id),
+        [FIELD_TITLE]              = sizeof(result->title),
+        [FIELD_DURATION]           = sizeof(result->duration),
+        [FIELD_AUTHOR_ID]          = sizeof(result->author_id),
+        [FIELD_VIEW_COUNT]         = sizeof(result->view_count),
+        [FIELD_LIVE_VIEW_COUNT]    = sizeof(result->view_count),
+        [FIELD_PLAYLIST_LENGTH]    = sizeof(result->playlist_length),
+        [FIELD_UPLOAD_DATE]        = sizeof(result->upload_date),
+        [FIELD_THUMBNAIL_PATH]     = sizeof(result->thumbnail_path),
+        [FIELD_SUBSCRIBER_COUNT]   = sizeof(result->subscriber_count),
+        [FIELD_DESCRIPTION]        = sizeof(result->description),
+        [FIELD_SEARCH_RESULT_TYPE] = sizeof(result->type),
 
     } ;
 
@@ -594,6 +613,30 @@ static SearchResultType find_search_result_type (json * response, const YoutubeJ
     }
 }
 
+void parse_token_execute (const ParseToken * token, const char * path, YoutubeSearchResult * result, json * json, const YoutubeJSONResponse response_type)
+{
+    if ( !parse_token_is_ready(token) || !valid_string(path) || !result)
+        return ;
+
+    const ExtractDest field_dest = get_extract_dest(result, token->field) ;
+
+    if ( !extract_dest_is_ready(&field_dest)) {
+        fprintf(stderr, "parse_token_execute: failed to retrieve extraction dest for the field \"%s\"\n", field_to_text(token->field)) ;
+        return ;
+    }
+
+    const bool extraction_status = token->routine(json, path, field_dest.address, field_dest.size) ;
+
+    if ( !extraction_status) {
+        fprintf(stderr, "EXTRACTION ERROR: (JSON Object: \"%s\", Field: \"%s\", Result Type: \"%s\", Path: \"%s\")\n",
+            response_type_to_text(response_type),
+            field_to_text(token->field),
+            result_type_to_text(result->type),
+            path
+        );
+    }
+}
+
 bool parse_youtube_search_result (YoutubeSearchResult * dest, json * root, PathTemplate * template)
 {
     if ( !dest || !root || !path_template_is_ready(template))
@@ -621,24 +664,8 @@ bool parse_youtube_search_result (YoutubeSearchResult * dest, json * root, PathT
     }
 
     for (const ParseToken * token = parse_tokens; parse_token_is_ready(token); token++) {
-
         const char * path = template->field_paths[token->field] ;
-        
-        if ( !path)
-            continue ;
-
-        const ExtractDest field_dest = get_extract_dest(dest, token->field) ;
-
-        if ( !extract_dest_is_ready(&field_dest))
-            continue ;
-
-        if ( !token->routine(result_json, path, field_dest.address, field_dest.size)) {
-            fprintf(stderr, "EXTRACTION ERROR: (JSON Object: %s, Field: %s, Result Type: %s, Path: %s)\n",
-                response_type_to_text(template->response_type),
-                field_to_text(token->field),
-                result_type_to_text(dest->type),
-                path) ;
-        }
+        parse_token_execute(token, path, dest, result_json, template->response_type) ;
     }
 
     return true ;
@@ -767,3 +794,62 @@ int get_youtube_search_results (json * response, YoutubeParseContext * context, 
 
     return results_added ;
 } 
+
+typedef json * (JsonAddRoutine) (json * object, char * name, void * item) ;
+
+static JsonAddRoutine * find_add_routine (const YoutubeResultField field)
+{
+    switch (field) {
+        case FIELD_ID:
+        case FIELD_TITLE:
+        case FIELD_AUTHOR_ID:
+        case FIELD_UPLOAD_DATE:
+        case FIELD_THUMBNAIL_PATH:
+        case FIELD_DESCRIPTION: 
+            return (void*) json_add_string_to_object ;
+        case FIELD_DURATION:
+        case FIELD_VIEW_COUNT:
+        case FIELD_LIVE_VIEW_COUNT:
+        case FIELD_PLAYLIST_LENGTH:
+        case FIELD_SEARCH_RESULT_TYPE:
+        case FIELD_SUBSCRIBER_COUNT: 
+            return (void*) json_add_number_to_object ;
+        default:
+            return NULL ;
+    }
+}
+
+json * create_search_result_json (const YoutubeSearchResult * result)
+{
+    if ( !result)
+        return NULL ;
+
+    json * result_json = json_create_object() ;
+
+    if ( !result_json) {
+        fprintf(stderr, "create_search_result_json: failed to create json object\n") ;
+        return NULL ;
+    }
+
+    for (YoutubeResultField f = (YoutubeResultField) 0; f < FIELD_COUNT; f++) {
+        ExtractDest field = get_extract_dest(result, f) ;
+        
+        if ( !extract_dest_is_ready(&field)) {
+            fprintf(stderr, "create_search_result_json: %s is an invalid field\n", field_to_text(f)) ;
+            continue ;
+        }
+
+        JsonAddRoutine * add_routine = find_add_routine(f) ;
+
+        if ( !add_routine) {
+            fprintf(stderr, "create_search_result_json: failed to retrieve add routine with YoutubeResultField %d\n", f) ;
+            continue ;
+        }
+
+        char * field_name = field_to_text(f) ;
+        
+        add_routine(result_json, field_name, field.address) ;
+    }
+
+    return result_json ;
+}

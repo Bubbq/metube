@@ -10,15 +10,16 @@
 #define MEDIUM_THUMBNAIL_VIDEO_RESOLUTION   "mqdefault"
 #define STANDARD_THUMBNAIL_VIDEO_RESOLUTION "sddefault"
 
-typedef bool (*ExtractRoutine) (cJSON * json, const char * path, void * dest, const size_t sizeof_dest) ;
+typedef bool (*ExtractRoutine) (json * json, const char * path, void * dest, const size_t sizeof_dest) ;
 
-bool extract_string  (cJSON * json, const char * path, void * dest, const size_t dest_size) ;
-bool extract_int_from_string (cJSON * json, const char * path, void * dest, const size_t dest_size) ;
-bool extract_allocated_string (cJSON * json, const char * path, void * dest, const size_t dest_size) ;
-bool extract_video_duration (cJSON * json, const char * path, void * dest, const size_t dest_size) ;
-bool extract_youtube_formatted_number (cJSON * json, const char * path, void * dest, const size_t dest_size) ;
-bool extract_video_thumbnail (cJSON * json, const char * path, void * dest, const size_t dest_size) ;
-bool extract_channel_thumbnail (cJSON * json, const char * path, void * dest, const size_t dest_size) ;
+bool extract_int (json * root, const char * path, void * dest, const size_t dest_size) ;
+bool extract_string  (json * json, const char * path, void * dest, const size_t dest_size) ;
+bool extract_int_from_string (json * json, const char * path, void * dest, const size_t dest_size) ;
+bool extract_allocated_string (json * json, const char * path, void * dest, const size_t dest_size) ;
+bool extract_video_duration (json * json, const char * path, void * dest, const size_t dest_size) ;
+bool extract_youtube_formatted_number (json * json, const char * path, void * dest, const size_t dest_size) ;
+bool extract_video_thumbnail (json * json, const char * path, void * dest, const size_t dest_size) ;
+bool extract_channel_thumbnail (json * json, const char * path, void * dest, const size_t dest_size) ;
 
 typedef struct {
     YoutubeResultField field;  
@@ -27,6 +28,7 @@ typedef struct {
 
 bool parse_token_is_ready (const ParseToken * token) ;
 const ParseToken * find_parse_tokens (SearchResultType type) ;
+void parse_token_execute (const ParseToken * token, const char * path, YoutubeSearchResult * result, json * json, const YoutubeJSONResponse response_type) ;
 
 #define TOKEN_ID                   { FIELD_ID, extract_string }
 #define TOKEN_TITLE                { FIELD_TITLE, extract_string }
@@ -58,7 +60,7 @@ typedef struct {
     char * continuation_token_path; // path to continuation token   
 } ParseProfile;
 
-bool parse_profile_init  (ParseProfile * profile, cJSON * raw_profile) ;
+bool parse_profile_init  (ParseProfile * profile, json * raw_profile) ;
 void parse_profile_free  (ParseProfile * profile) ;
 void parse_profile_print (const ParseProfile * profile) ;
 
@@ -67,7 +69,7 @@ typedef struct {
     size_t count;
 } ProfileList;
 
-bool profile_list_init (ProfileList * profile_list, cJSON * config) ;
+bool profile_list_init (ProfileList * profile_list, json * config) ;
 void profile_list_free (ProfileList * profile_list) ;
 
 // paths to 'pathTemplates' objects in paths.json 
@@ -82,7 +84,7 @@ typedef struct {
     YoutubeJSONResponse response_type;
 } PathTemplate ;
 
-bool path_template_init     (PathTemplate * ptemplate, cJSON * raw_template) ;
+bool path_template_init     (PathTemplate * ptemplate, json * raw_template) ;
 void path_template_free     (PathTemplate * ptemplate) ;
 bool path_template_is_ready (const PathTemplate * ) ;
 
@@ -91,9 +93,9 @@ typedef struct {
     size_t count;
 } PathTemplateList;
 
-bool path_template_list_init (PathTemplateList * template_list, cJSON * config) ;
+bool path_template_list_init (PathTemplateList * template_list, json * config) ;
 void path_template_list_free (PathTemplateList * template_list) ;
-PathTemplate * find_path_template (PathTemplateList * list, cJSON * item) ;
+PathTemplate * find_path_template (PathTemplateList * list, json * item) ;
 
 typedef struct {
     ProfileList profile_list;
@@ -103,8 +105,8 @@ typedef struct {
 bool youtube_parse_context_init (YoutubeParseContext * context, const char * pase_config_path) ;
 void youtube_parse_context_free (YoutubeParseContext * context) ;
 
-bool parse_youtube_search_result (YoutubeSearchResult * dest, cJSON * json, PathTemplate * ptemplate) ;
-int  get_youtube_search_results (cJSON * youtube_response, YoutubeParseContext * parse, LinkedList * results_dest, char ** continuation_token, const QueryType type, const QueryAction action) ;
+bool parse_youtube_search_result (YoutubeSearchResult * dest, json * json, PathTemplate * ptemplate) ;
+int  get_youtube_search_results (json * youtube_response, YoutubeParseContext * parse, LinkedList * results_dest, char ** continuation_token, const QueryType type, const QueryAction action) ;
 
 // TODO : this implementation is shit, put identifiers in config
 
@@ -113,5 +115,7 @@ int  get_youtube_search_results (cJSON * youtube_response, YoutubeParseContext *
 
 #define PLAYLIST_IDENTIFIER_PATH   ".contentType"
 #define PLAYLIST_EXPECTED_VALUE    "LOCKUP_CONTENT_TYPE_PLAYLIST"
+
+json * create_search_result_json (const YoutubeSearchResult * result) ;
 
 #endif

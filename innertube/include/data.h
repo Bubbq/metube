@@ -28,12 +28,15 @@ typedef struct {
     int subscriber_count;         
     int view_count;              
     int duration;                 
-    bool is_thumbnail_loaded;      
+    bool is_thumbnail_loaded;   
+    bool is_subscribed;   
+    bool is_liked;
 } YoutubeSearchResult;
 
 YoutubeSearchResult * youtube_search_result_init  () ;
-void                  youtube_search_result_free  (YoutubeSearchResult * result) ;
-void                  youtube_search_result_print (const YoutubeSearchResult * result) ;
+void  youtube_search_result_free  (YoutubeSearchResult * result) ;
+void  youtube_search_result_print (const YoutubeSearchResult * result) ;
+bool  youtube_search_result_equals (const YoutubeSearchResult * a, const YoutubeSearchResult * b) ;
 
 typedef enum {
     FIELD_ID,
@@ -47,6 +50,7 @@ typedef enum {
     FIELD_THUMBNAIL_PATH,
     FIELD_SUBSCRIBER_COUNT,
     FIELD_DESCRIPTION,
+    FIELD_SEARCH_RESULT_TYPE,
     FIELD_COUNT,
 } YoutubeResultField ;
 
@@ -60,6 +64,7 @@ typedef enum {
     RESPONSE_PLAYLIST_VIDEO_RENDERER,
     RESPONSE_HIGHLIGHTED_VIDEO_RENDERER,
     RESPONSE_HIGHLIGHTED_CHANNEL_RENDERER,
+    RESPONSE_USER_DATA,
     RESPONSE_COUNT,
 } YoutubeJSONResponse ;
 

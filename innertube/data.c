@@ -51,6 +51,13 @@ void youtube_search_result_print (const YoutubeSearchResult * result)
     }
 }
 
+bool youtube_search_result_equals(const YoutubeSearchResult * a, const YoutubeSearchResult * b)
+{
+    return a &&
+           b && 
+           (strcmp(a->id, b->id) == 0) ;
+}
+
 char * field_to_text (const YoutubeResultField field)
 {
     switch (field) {
@@ -65,6 +72,7 @@ char * field_to_text (const YoutubeResultField field)
         case FIELD_THUMBNAIL_PATH: return "THUMBNAIL_PATH" ;
         case FIELD_SUBSCRIBER_COUNT: return "SUBSCRIBER_COUNT" ;
         case FIELD_DESCRIPTION: return "DESCRIPTION" ;
+        case FIELD_SEARCH_RESULT_TYPE: return "SEARCH_RESULT_TYPE" ;
         default:
             return NULL ;
     }
@@ -80,6 +88,7 @@ char * response_type_to_text (const YoutubeJSONResponse type)
         case RESPONSE_PLAYLIST_VIDEO_RENDERER: return "playlistVideoRenderer" ;
         case RESPONSE_HIGHLIGHTED_VIDEO_RENDERER: return "highlightedVideoRenderer" ;
         case RESPONSE_HIGHLIGHTED_CHANNEL_RENDERER: return "highlightedChannelRenderer" ;
+        case RESPONSE_USER_DATA: return "userDataRenderer" ;
         default:
             return NULL ;    
     }

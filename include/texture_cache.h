@@ -1,9 +1,9 @@
 #ifndef TEXTURE_CACHE_H
 #define TEXTURE_CACHE_H
 
-#include "timer.h"
 #include "raylib.h"
 #include "uthash.h"
+#include "utils.h"
 
 #define MINUTE 60
 #define CACHED_TEXTURE_LIFETIME (10)

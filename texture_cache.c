@@ -75,16 +75,10 @@ void texture_cache_free(TextureCache* texture_cache)
 void texture_cache_remove_expried_entries(TextureCache* texture_cache) 
 {
     TextureCacheEntry *entry, *tmp;
-    int ndel = 0;
     HASH_ITER(hh, *texture_cache, entry, tmp) {
-        if (timer_is_done(entry->timer)) {
-            ndel++;
+        if (timer_is_done(entry->timer)) 
             texture_cache_remove_entry(texture_cache, entry);
-        }
     }
-
-    if (ndel)
-        printf("%d elements deleted\t current size:%d\n", ndel, HASH_COUNT(*texture_cache));
 }
 
 TextureCacheEntry* texture_cache_find_entry(TextureCache* texture_cache, const char* id)

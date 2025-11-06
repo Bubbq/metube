@@ -2,6 +2,8 @@
 
 #include "include/utils.h"
 #include "include/ssl_utils.h"
+#include <stdlib.h>
+#include <string.h>
 
 RawThumbnail * raw_thumbnail_init ()
 {
@@ -132,6 +134,24 @@ void thumbnail_loader_process_raw_images (ThumbnailLoader * loader, TextureCache
     }
 
     pthread_mutex_unlock(&queue->mutex) ;
+}
+
+LoadThumbnailArgs * create_load_thumbnail_args (const char * path, const char * id, SSL_CTX * ssl, ThumbnailLoader * loader, const MediaType type)
+{
+    if ( !valid_string(path) || !valid_string(id) || !ssl || !loader)
+        return NULL ;
+
+    LoadThumbnailArgs * targs = calloc(1, sizeof(LoadThumbnailArgs)) ;
+
+    if (targs) {
+        strncpy(targs->id, id, sizeof(targs->id) - 1) ;
+        strncpy(targs->path, path, sizeof(targs->path) - 1) ;
+        targs->ssl_ctx = ssl ;
+        targs->loader = loader ;
+        targs->media_type = type ;
+    }
+
+    return targs ;
 }
 
 void * load_thumbnail (void * args)

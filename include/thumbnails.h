@@ -55,6 +55,8 @@ typedef struct
     MediaType media_type ;
 } LoadThumbnailArgs ;
 
+LoadThumbnailArgs * create_load_thumbnail_args (const char * path, const char * id, SSL_CTX * ssl, ThumbnailLoader * loader, const MediaType type) ;
+
 void * load_thumbnail(void * args) ;
 
 #endif

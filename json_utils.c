@@ -1,11 +1,28 @@
+#include <cjson/cJSON.h>
 #include <stdlib.h>
 #include <string.h>
-#include <cjson/cJSON.h>
 
 #include "include/json_utils.h"
 
 #include "include/utils.h"
 #include "include/raylib.h"
+
+void json_write_to_file (const json * json, const char * filepath)
+{
+    if ( !json || !valid_string(filepath)) 
+        return ;
+
+    char * buffer = json_print(json) ;
+
+    if ( !buffer) {
+        fprintf(stderr, "json_write_to_file: json object is empty\n") ;
+        return ; 
+    }
+
+    write_string_to_file(filepath, buffer) ;
+
+    free(buffer); buffer = NULL ;
+}
 
 json * json_create_from_mem (const char * mem)
 {
@@ -37,7 +54,7 @@ void json_free (json * json)
     }
 }
 
-char * json_print (json * json)
+char * json_print (const json * json)
 {
     return json ? 
            cJSON_Print(json) : 
@@ -56,11 +73,23 @@ json * json_add_string_to_object (json * object, const char * name, const char *
            NULL ;
 }
 
+json * json_add_number_to_object (json * object, const char * name, const int * number)
+{
+    return number ? 
+           cJSON_AddNumberToObject(object, name, (*number)) :
+           NULL ;
+}
+
 bool json_add_item_to_object (json * object, const char * name, json * item)
 {
     return (item && valid_string(name)) ? 
            cJSON_AddItemToObject(object, name, item) :
            false ;
+}
+
+json * json_create_array ()
+{
+    return cJSON_CreateArray() ;
 }
 
 int json_get_array_size (const json * jarray)
@@ -152,4 +181,3 @@ json * json_get_via_path (json * root, const char * path)
 
     return ret ;
 }
-
